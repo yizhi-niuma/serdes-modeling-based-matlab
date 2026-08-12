@@ -1,1 +1,18 @@
 .history/
+**/.history/
+
+# MATLAB temporary and generated cache files
+*.asv
+*.autosave
+slprj/
+codegen/
+*.slxc
+
+# Local validation runner logs
+results/*.log
+results/*.pid
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/

@@ -1,0 +1,28 @@
+test_cdr_pd started: 2026-08-12 22:12:20
+Test script: D:\Work\serdes_modeling\validation\CDR\test_cdr_pd
+Result folder: D:\Work\serdes_modeling\results\CDR
+
+[PASS] truth table
+[PASS] polarity
+[PASS] threshold
+[PASS] output and state
+[PASS] matrix input
+[PASS] invalid input
+[PASS] waveform function
+       waveform transitions: 8, valid decisions: 8
+       pdError sequence: [1 -1 1 0 -1 0 1 -1 1 0 -1]
+
+Summary:
+  truth table            : PASS
+  polarity               : PASS
+  threshold              : PASS
+  output and state       : PASS
+  matrix input           : PASS
+  invalid input          : PASS
+  waveform function      : PASS
+
+Passed 7 / 7 tests.
+Text result : D:\Work\serdes_modeling\results\CDR\test_cdr_pd_result.txt
+Waveform PNG: D:\Work\serdes_modeling\results\CDR\test_cdr_pd_waveform.png
+
+test_cdr_pd all tests passed.
