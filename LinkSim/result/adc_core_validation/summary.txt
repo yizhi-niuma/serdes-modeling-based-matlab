@@ -1,0 +1,118 @@
+ADC core 直接验证问题总结
+生成脚本: validate_adc_core_transfer.m
+
+一、验证目的
+本脚本用于直接比较用户新建模 ADC ti_adc_core 与原链路使用的 sys.sar_adc_nb 的静态量化行为。
+验证包含静态 ramp transfer 和随机 Vin 大样本两类输入，用于判断两者基础量化功能是否一致，以及剩余差异是否主要来自 sar_adc_nb 内部 delta1/delta2 补偿逻辑。
+
+二、验证范围
+本脚本不调用 ADCFrontend，也不使用 ADC AFE 封装，只直接调用 ti_adc_core 和 sys.sar_adc_nb。
+qjh_adc: ti_adc_core, path = C:\Work\MatLab_Lib\ADC\TI_ADC
+reference_adc: sys.sar_adc_nb, direct class call
+
+三、公共配置
+num_adcs = 64
+adc_nbits = 7
+VL = -0.5
+VH = 0.5
+lsb = 0.0078125
+
+四、三组 sar_adc_nb 对比定义
+1. default: sar_adc_nb 默认模型，保留比较器噪声、电容 mismatch、delta1/delta2。
+2. idealized: 关闭 sar_adc_nb 的 Comp_noise，并设置理想 C_act_p/C_tot_p，但仍保留 delta1/delta2。
+3. no_delta: 在 idealized 基础上进一步设置 delta1 = 0、delta2 = 0，用于隔离 delta1/delta2 对剩余 1 LSB 差异的影响。
+
+五、统计项说明
+diff = sar_adc_nb_code - ti_adc_core_code，单位为 ADC code/LSB。
+mismatch_count 表示 diff 不为 0 的样本数；max_abs_diff 表示最大绝对码差；unique_diff 表示出现过的所有码差。
+within_1lsb_ratio/within_2lsb_ratio 分别表示差异不超过 1/2 LSB 的样本比例。
+
+六、统计结果
+Ramp transfer: sar_adc_nb default - ti_adc_core
+  count = 32768
+  mismatch_count = 16839
+  mismatch_ratio = 0.513885498047
+  max_abs_diff = 2 LSB
+  mean_diff = 0.0042724609375 LSB
+  mean_abs_diff = 0.524353027344 LSB
+  rms_diff = 0.738436243651 LSB
+  within_1lsb_count = 32425
+  within_1lsb_ratio = 0.989532470703
+  within_2lsb_count = 32768
+  within_2lsb_ratio = 1
+  unique_diff = -2 -1 0 1 2
+
+Ramp transfer: sar_adc_nb idealized - ti_adc_core
+  count = 32768
+  mismatch_count = 16378
+  mismatch_ratio = 0.499816894531
+  max_abs_diff = 1 LSB
+  mean_diff = 0.001953125 LSB
+  mean_abs_diff = 0.499816894531 LSB
+  rms_diff = 0.706977294212 LSB
+  within_1lsb_count = 32768
+  within_1lsb_ratio = 1
+  within_2lsb_count = 32768
+  within_2lsb_ratio = 1
+  unique_diff = -1 0 1
+
+Ramp transfer: sar_adc_nb no_noise no_capmismatch no_delta - ti_adc_core
+  count = 32768
+  mismatch_count = 15880
+  mismatch_ratio = 0.484619140625
+  max_abs_diff = 1 LSB
+  mean_diff = 0.001953125 LSB
+  mean_abs_diff = 0.484619140625 LSB
+  rms_diff = 0.696145919061 LSB
+  within_1lsb_count = 32768
+  within_1lsb_ratio = 1
+  within_2lsb_count = 32768
+  within_2lsb_ratio = 1
+  unique_diff = -1 0 1
+
+Random Vin: sar_adc_nb default - ti_adc_core
+  count = 100000
+  mismatch_count = 51500
+  mismatch_ratio = 0.515
+  max_abs_diff = 2 LSB
+  mean_diff = 0.0006 LSB
+  mean_abs_diff = 0.52506 LSB
+  rms_diff = 0.73836305433 LSB
+  within_1lsb_count = 98994
+  within_1lsb_ratio = 0.98994
+  within_2lsb_count = 100000
+  within_2lsb_ratio = 1
+  unique_diff = -2 -1 0 1 2
+
+Random Vin: sar_adc_nb idealized - ti_adc_core
+  count = 100000
+  mismatch_count = 50009
+  mismatch_ratio = 0.50009
+  max_abs_diff = 1 LSB
+  mean_diff = -0.00103 LSB
+  mean_abs_diff = 0.50009 LSB
+  rms_diff = 0.707170417933 LSB
+  within_1lsb_count = 100000
+  within_1lsb_ratio = 1
+  within_2lsb_count = 100000
+  within_2lsb_ratio = 1
+  unique_diff = -1 0 1
+
+Random Vin: sar_adc_nb no_noise no_capmismatch no_delta - ti_adc_core
+  count = 100000
+  mismatch_count = 48415
+  mismatch_ratio = 0.48415
+  max_abs_diff = 1 LSB
+  mean_diff = 0.00027 LSB
+  mean_abs_diff = 0.48415 LSB
+  rms_diff = 0.695808881806 LSB
+  within_1lsb_count = 100000
+  within_1lsb_ratio = 1
+  within_2lsb_count = 100000
+  within_2lsb_ratio = 1
+  unique_diff = -1 0 1
+
+七、问题判断
+如果 idealized 组关闭噪声和电容 mismatch 后仍存在 +/-1 LSB 差异，而 no_delta 组差异明显下降或完全消失，则可以说明 delta1/delta2 是关闭非理想后剩余差异的主要来源。
+如果 no_delta 组仍存在差异，则剩余差异还可能来自两套 SAR 判决流程本身的边界比较方式、量化阈值定义或端点处理差别。
+具体结论以本文件上方 no_delta 统计结果和 CSV 中 diff_no_delta_minus_qjh 列为准。

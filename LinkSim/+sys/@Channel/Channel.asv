@@ -1,0 +1,1416 @@
+classdef (StrictDefaults) Channel < matlab.System
+
+    properties (Nontunable)
+        %load snp
+        load_snp_en = 0;
+        SnP_file_name;
+        %Sample interval (s)
+        %   The discrete fixed-step simulation sample interval.
+        dt {mustBePositive(dt), mustBeFinite(dt), mustBeNonNan(dt)}= 1e-12;
+        
+        %Target frequency (Hz)
+        %   The frequency at which the channel insertion loss equals the
+        %   desired channel power loss.
+        TargetFrequency  {mustBePositive(TargetFrequency), mustBeFinite(TargetFrequency), mustBeNonNan(TargetFrequency)}= 10e9;
+        
+        %Channel power loss (dB)
+        %   The desired channel power loss
+        Loss {mustBeNumeric(Loss), mustBeReal(Loss),mustBeFinite(Loss), mustBeNonNan(Loss)}= 8;
+        
+        %Differential impedance (Ohms)
+        %   The differential impedance (Ohms) of the lossy transmission line model.
+        Zc {mustBePositive(Zc), mustBeFinite(Zc), mustBeNonNan(Zc)}= 100;
+        
+        %Tx R (Ohms)
+        %   The single ended transmitter resister strength (Ohms).
+        TxR {mustBePositive(TxR), mustBeFinite(TxR), mustBeNonNan(TxR)}= 50;
+        
+        %Tx C (F)
+        %   The single ended transmitter parasitic capacitance (Farads).
+        TxC  {mustBeNonnegative(TxC), mustBeFinite(TxC), mustBeNonNan(TxC)}= 1e-12;
+        
+        %Rx R (Ohms)
+        %   The single ended receiver termination resistor strength (Ohms).
+        RxR {mustBePositive(RxR), mustBeFinite(RxR), mustBeNonNan(RxR)}= 50;
+        
+        %Rx C (F)
+        %   The single ended receiver parasitic capacitance (Farads).
+        RxC {mustBeNonnegative(RxC), mustBeFinite(RxC), mustBeNonNan(RxC)}= 1e-12;
+        
+        %Rise time (s)
+        %   The 20/80% risetime (seconds) of the transmitter into a 50 Ohm
+        %   reference load.
+        RiseTime {mustBePositive(RiseTime), mustBeFinite(RiseTime), mustBeNonNan(RiseTime)}= 10e-12;
+        
+        %Voltage swing ideal (V)
+        %   The open circuit voltage swing (Volts) of the transmitter.
+        VoltageSwingIdeal {mustBePositive(VoltageSwingIdeal), mustBeFinite(VoltageSwingIdeal), mustBeNonNan(VoltageSwingIdeal)}= 1;
+        EnableCrosstalk (1, 1) logical = false;
+        %Crosstalk Specification
+        % 'CEI-28G-SR', 'CEI-25G-LR', 'CEI-28G-VSR', '100GBASE-CR4' and
+        % 'Custom'
+        CrosstalkSpecification = 'CEI-28G-SR';
+        %Baud rate (1/SymbolTime)
+        fb = 14e9;
+        
+        %Far end crosstalk integrated crosstalk noise (V)
+        FEXTICN = 15e-3;
+        
+        %Far end aggressor amplitude factor (Vpp)
+        Aft = 1.200;
+        
+        %Far end aggressor rise time (s)
+        Tft = 9.6e-12;
+        
+        %Near end crosstalk integrated crosstalk noise (V)
+        NEXTICN = 10e-3;
+        
+        %Near end aggressor amplitude factor (Vpp)
+        Ant = 1.200;
+        
+        %Near end aggressor rise time (s)
+        Tnt = 9.6e-12;
+    end
+    
+    properties(Constant, Hidden)
+        CrosstalkSpecificationSet = matlab.system.StringSet( { ...
+            'CEI-28G-SR', ...
+            'CEI-25G-LR', ...
+            'CEI-28G-VSR', ...
+            '100GBASE-CR4', ...
+            'Custom'} );
+    end
+    properties (SetAccess=protected)
+        impulse     %Impulse Response
+        s21         %Insertion Loss
+        dF = 100e6; %Frequency step. Default 100MHz
+        s11
+        s22
+        f
+        FEXT
+        NEXT
+    end
+    properties (SetAccess=protected , Hidden)
+        privBuffer
+        privIsUpToDate = false;
+        privImpulse
+        TLLength
+        
+        privBufferFEXT
+        privBufferNEXT
+        privhFEXT = 1;
+        privhNEXT = 1;
+        
+        %Private crosstalk properties
+        privfb
+        privFEXTICN
+        privAft
+        privTft
+        privNEXTICN
+        privAnt
+        privTnt
+
+        privTLDCR = 0; %Transmission line only DC resistance
+    end
+    properties(Hidden)
+        idealTermination = false;
+    end
+    
+    % Pre-computed constants
+    properties(Hidden, Constant)
+        a0 = 1e-4; %DC loss
+        a1 = 4.114e-4; %loss proportional to sqrt(f)
+        a2 = 2.547e-4; %loss proportional to f
+        tau =  6.191e-3; %Delay parameter
+        Z_0 = 50; %Single Ended Reference Impedance
+    end
+    
+    methods
+        % Constructor
+        function obj = Channel(varargin)
+            % Support name-value pair arguments when constructing object
+            setProperties(obj,nargin,varargin{:})
+            if
+                
+
+        end
+        
+        function plot(obj,varargin)
+            %plot   Plot time and frequency domain responses
+            %   plot(obj) displays the impulse response and frequency
+            %   domain response of the serdes.ChannelLoss object obj.
+            %   plot(obj, SamplesPerSymbol) displays the pulse response and
+            %   frequency domain response fo the serdes.ChannelLoss object,
+            %   obj, where the Symbol Time is SamplesPerSymbol*obj.dt.
+            
+            if ~obj.privIsUpToDate
+                calcImpulse(obj)
+            end
+            
+            if nargin==2
+                doPulse = true;
+                validateattributes(varargin{1},...
+                    {'numeric'},...
+                    {'scalar','positive','integer','finite'},...
+                    '','SamplesPerSymbol');
+                SamplesPerSymbol = double(varargin{1});
+            else
+                doPulse = false;
+            end
+            
+            %Get impulse response
+            imp = obj.impulse;
+            t = obj.dt*(0:length(imp)-1);
+            
+            gcf; clf;
+            if obj.EnableCrosstalk==true
+                %Include Crosstalk in time and frequency domain plots
+                if doPulse==true
+                    pul = impulse2pulse(imp,SamplesPerSymbol,obj.dt);
+                    
+                    SymbolTime = obj.dt*SamplesPerSymbol;
+                    fb2 = 1/SymbolTime;
+                    
+                    subplot(211),plot(t*1e9,pul)
+                    xlabel('ns'),ylabel('Volts')
+                    grid on
+                    legend('Through','FEXT','NEXT')
+                    title(sprintf('Pulse Responses: SymbolTime = %g ps',SymbolTime(1)*1e12))
+                    subplot(212)
+                    plot(obj.f*1e-9,serdes.utilities.db(obj.s11),...
+                        obj.f*1e-9,serdes.utilities.db(obj.s21),...
+                        obj.f*1e-9,serdes.utilities.db(obj.s22),...
+                        obj.f*1e-9,serdes.utilities.db(obj.FEXT),...
+                        obj.f*1e-9,serdes.utilities.db(obj.NEXT))
+                    ax = axis;
+                    axis([0 fb2*2*1e-9,ax(3:4)])
+                    xlabel('GHz'),ylabel('dB')
+                    legend('S_{11}','S_{21}','S_{22}','FEXT','NEXT')
+                    grid on
+                    title('Frequncy Domain Responses')
+                else
+                    subplot(211),plot(t*1e9,imp)
+                    xlabel('ns'),ylabel('Volts')
+                    grid on
+                    legend('Through','FEXT','NEXT')
+                    title('Impulse Responses')
+                    subplot(212)
+                    plot(obj.f*1e-9,serdes.utilities.db(obj.s11),...
+                        obj.f*1e-9,serdes.utilities.db(obj.s21),...
+                        obj.f*1e-9,serdes.utilities.db(obj.s22),...
+                        obj.f*1e-9,serdes.utilities.db(obj.FEXT),...
+                        obj.f*1e-9,serdes.utilities.db(obj.NEXT))
+                    xlabel('GHz'),ylabel('dB')
+                    legend('S_{11}','S_{21}','S_{22}','FEXT','NEXT')
+                    grid on
+                    title('Frequncy Domain Responses')
+                end
+            else
+                
+                if doPulse==true
+                    pul = impulse2pulse(imp,SamplesPerSymbol,obj.dt);
+                    
+                    SymbolTime = obj.dt*SamplesPerSymbol;
+                    fb2 = 1/SymbolTime;
+                    
+                    subplot(211),plot(t*1e9,pul)
+                    xlabel('ns'),ylabel('Volts')
+                    grid on
+                    legend('Through')
+                    title(sprintf('Pulse Response: SymbolTime = %g ps',SymbolTime(1)*1e12))
+                    subplot(212)
+                    plot(obj.f*1e-9,serdes.utilities.db(obj.s11),...
+                        obj.f*1e-9,serdes.utilities.db(obj.s21),...
+                        obj.f*1e-9,serdes.utilities.db(obj.s22))
+                    ax = axis;
+                    axis([0 fb2*2*1e-9,ax(3:4)])
+                    xlabel('GHz'),ylabel('dB')
+                    legend('S_{11}','S_{21}','S_{22}')
+                    grid on
+                    title('Frequncy Domain Responses')
+                    
+                else
+                    subplot(211),plot(t*1e9,imp)
+                    xlabel('ns'),ylabel('Volts')
+                    grid on
+                    legend('Through')
+                    title('Time Domain Response')
+                    subplot(212),
+                    plot(obj.f*1e-9,serdes.utilities.db(obj.s11),...
+                        obj.f*1e-9,serdes.utilities.db(obj.s21),...
+                        obj.f*1e-9,serdes.utilities.db(obj.s22))
+                    xlabel('GHz'),ylabel('dB')
+                    legend('S_{11}','S_{21}','S_{22}')
+                    grid on
+                    title('Frequncy Domain Responses')
+                end
+            end
+        end
+        
+        function set.dt(obj,val)
+            validateattributes(val,...
+                {'numeric'},...
+                {'scalar','finite','real','positive'},...
+                '','dt');
+            isUpdated = compareToOldValue(obj, 'dt', val);
+            obj.dt = (val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.TargetFrequency(obj,val)
+            validateattributes(val,...
+                {'numeric'},...
+                {'scalar','finite','real','positive'},...
+                '','TargetFrequency');
+            isUpdated = compareToOldValue(obj, 'TargetFrequency', val);
+            obj.TargetFrequency = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.Loss(obj,val)
+            validateattributes(val,...
+                {'numeric'},...
+                {'scalar','finite','real'},...
+                '','Loss');
+            
+            %Loss must be 0 or greater than minLoss
+            minLoss = 1;
+            coder.internal.errorIf(~(val==0 || val>=minLoss),...
+                'serdes:serdessystem:LossValueRange',...
+                sprintf('%g',minLoss));
+            
+            isUpdated = compareToOldValue(obj, 'Loss', val);
+            obj.Loss = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.Zc(obj,val)
+            validateattributes(val,...
+                {'numeric'},...
+                {'scalar','finite','real','positive'},...
+                '','Zc');
+            isUpdated = compareToOldValue(obj, 'Zc', val);
+            obj.Zc = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.TxR(obj,val)
+            validateattributes(val,...
+                {'numeric'},...
+                {'scalar','finite','real','positive','<=',100e6},...
+                '','TxR');
+            isUpdated = compareToOldValue(obj, 'TxR', val);
+            obj.TxR = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.TxC(obj,val)
+            validateattributes(val,...
+                {'numeric'},...
+                {'scalar','finite','real','nonnegative'},...
+                '','TxC');
+            isUpdated = compareToOldValue(obj, 'TxC', val);
+            obj.TxC = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.RxR(obj,val)
+            validateattributes(val,...
+                {'numeric'},...
+                {'scalar','finite','real','positive','<=',100e6},...
+                '','RxR');
+            isUpdated = compareToOldValue(obj, 'RxR', val);
+            obj.RxR = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.RxC(obj,val)
+            validateattributes(val,...
+                {'numeric'},...
+                {'scalar','finite','real','nonnegative'},...
+                '','RxC');
+            isUpdated = compareToOldValue(obj, 'RxC', val);
+            obj.RxC = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.RiseTime(obj,val)
+            validateattributes(val,...
+                {'numeric'},...
+                {'scalar','finite','real','nonnegative'},...
+                '','RiseTime');
+            isUpdated = compareToOldValue(obj, 'RiseTime', val);
+            obj.RiseTime = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.VoltageSwingIdeal(obj,val)
+            validateattributes(val,...
+                {'numeric'},...
+                {'scalar','finite','real','nonnegative'},...
+                '','VoltageSwingIdeal');
+            isUpdated = compareToOldValue(obj, 'VoltageSwingIdeal', val);
+            obj.VoltageSwingIdeal = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end        
+        function set.EnableCrosstalk(obj,val)
+            validateattributes(val,{'numeric','logical'},...
+                {'scalar','binary'},'','EnableCrosstalk');
+            obj.EnableCrosstalk = logical(val);
+        end        
+        function set.fb(obj,val)
+            validateattributes(val,{'numeric'},...
+                {'scalar','finite','real','positive'},'','fb');
+            isUpdated = obj.fb~=val;
+            obj.fb = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.FEXTICN(obj,val)
+            validateattributes(val,{'numeric'},...
+                {'scalar','finite','real','nonnegative'},'','FEXTICN');
+            isUpdated = obj.FEXTICN~=val;
+            obj.FEXTICN = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.Aft(obj,val)
+            validateattributes(val,{'numeric'},...
+                {'scalar','finite','real','positive'},'','Aft');
+            isUpdated = obj.Aft~=val;
+            obj.Aft = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.Tft(obj,val)
+            validateattributes(val,{'numeric'},...
+                {'scalar','finite','real','positive'},'','Tft');
+            isUpdated = obj.Tft~=val;
+            obj.Tft = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.NEXTICN(obj,val)
+            validateattributes(val,{'numeric'},...
+                {'scalar','finite','real','nonnegative'},'','NEXTICN');
+            isUpdated = obj.NEXTICN~=val;
+            obj.NEXTICN = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.Ant(obj,val)
+            validateattributes(val,{'numeric'},...
+                {'scalar','finite','real','positive'},'','Ant');
+            isUpdated = obj.Ant~=val;
+            obj.Ant = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end
+        function set.Tnt(obj,val)
+            validateattributes(val,{'numeric'},...
+                {'scalar','finite','real','positive'},'','Tnt');
+            isUpdated = obj.Tnt~=val;
+            obj.Tnt = double(val);
+            if isUpdated
+                %Only set not up to date flag if property changes value.
+                notUpToDate(obj);
+            end
+        end        
+        
+        function imp = get.impulse(obj)
+            if ~obj.privIsUpToDate
+                calcImpulse(obj)
+            end
+            imp = obj.impulse;
+        end
+        function s = get.s21(obj)
+            if ~obj.privIsUpToDate
+                calcImpulse(obj)
+            end
+            s = obj.s21;
+        end
+        function s = get.s11(obj)
+            if ~obj.privIsUpToDate
+                calcImpulse(obj)
+            end
+            s = obj.s11;
+        end
+        function s = get.s22(obj)
+            if ~obj.privIsUpToDate
+                calcImpulse(obj)
+            end
+            s = obj.s22;
+        end
+        function s = get.f(obj)
+            if ~obj.privIsUpToDate
+                calcImpulse(obj)
+            end
+            s = obj.f;
+        end
+        function s = get.FEXT(obj)
+            if ~obj.privIsUpToDate
+                calcImpulse(obj)
+            end
+            s = obj.FEXT;
+        end
+        function s = get.NEXT(obj)
+            if ~obj.privIsUpToDate
+                calcImpulse(obj)
+            end
+            s = obj.NEXT;
+        end
+        
+        function setICN(obj)
+            %setICN     setup ICN for standards
+            %	setICN(obj,standard) Setup the integrated crosstalk noise
+            %	parameters based on a given OIF or IEEE electrical
+            %	standard.  Valid input values for standard are
+            %	'CEI-28G-SR', 'CEI-25G-LR', 'CEI-28G-VSR' and '100GBASE-CR4'
+            
+            %OIF standards referenced below accessed on 7/26/19:
+            %https://www.oiforum.com/wp-content/uploads/2019/01/OIF-CEI-04.0.pdf
+            
+            standard = obj.CrosstalkSpecification;
+            
+            if strcmpi('CEI-28G-SR',standard)
+                %CEI OIF 10.2.6.6.
+                
+                %Table 10-5. Channel integrated crosstalk aggressor parameters
+                obj.privfb = obj.TargetFrequency;
+                obj.privAnt = 1.2;
+                obj.privAft = 1.2;
+                obj.privTnt = 8e-12;
+                obj.privTft = 8e-12;
+                
+                %Total ICN (mV, RMS), Eqn 10-10
+                if obj.Loss<=5.3
+                    TotalICN = 10e-3;
+                elseif obj.Loss>15.42
+                    TotalICN = 0;
+                else
+                    TotalICN = (12.4-0.45*obj.Loss)*1e-3;
+                end
+                %Assign half of total ICN to far- and near-end crosstalk.
+                obj.privFEXTICN = TotalICN/2;
+                obj.privNEXTICN = TotalICN/2;
+                
+            elseif strcmpi('CEI-25G-LR',standard)
+                %CEI OIF 11.2.6.6 Channel integrated crosstalk noise
+                
+                %Table 11-5. Channel integrated crosstalk aggressor parameters
+                obj.privfb = obj.TargetFrequency;
+                obj.privAnt = 1.2;
+                obj.privAft = 1.2;
+                obj.privTnt = 8e-12;
+                obj.privTft = 8e-12;
+                
+                %Total ICN (mV, RMS), Eqn 11-10
+                if obj.Loss<=5.3
+                    TotalICN = 10e-3;
+                elseif obj.Loss>25.5
+                    TotalICN = 0;
+                else
+                    TotalICN = (12.4-0.45*obj.Loss)*1e-3;
+                end
+                %Assign half of total ICN to far- and near-end crosstalk.
+                obj.privFEXTICN = TotalICN/2;
+                obj.privNEXTICN = TotalICN/2;
+                
+            elseif strcmpi('CEI-28G-VSR',standard)
+                %CEI OIF 13.4.1.2 Mated HCB and MCB S parameters
+                
+                obj.privfb = obj.TargetFrequency;
+                
+                % Table 13-3. Crosstalk parameters for host output test and
+                % module stressed input test calibration at TP4
+                obj.privAnt = 0.9;
+                obj.privAft = 0.9;
+                obj.privTnt = 9.5e-12;
+                obj.privTft = 9.5e-12;
+                
+                % "The Integrated Crosstalk Noise (ICN) as calculated using
+                % the method defined in Chapter 12 with the aggressor
+                % amplitudes and rise/fall times as listed in Table 13-3
+                % shall be less than 3.9 mV. MDNEXT shall be less than 1.35
+                % mV RMS. MDFEXT shall be less than 3.6 mV RMS."
+                obj.privFEXTICN = 3.6e-3;
+                obj.privNEXTICN = 1.35e-3;
+                
+            elseif strcmpi('100GBASE-CR4',standard)
+                %100GBASE-CR4
+                
+                %IEEE 802.3bj-2014, 92.11.3.6 Mated test fixture integrated
+                %crosstalk noise
+                
+                %Table 92–14—Mated test fixture integrated crosstalk noise
+                %parameters
+                obj.privfb = 25.78125e9;
+                %Note that the IEEE table defines the amplitude as 'peak'
+                %voltage while the OIF definition is 'peak-peak'.  The
+                %convension here is to convert to 'peak-peak' amplutude.
+                obj.privAnt = 0.6*2;
+                obj.privAft = 0.6*2;
+                obj.privTnt = 9.6e-12;
+                obj.privTft = 9.6e-12;
+                
+                % Table 92-13, Mated test fixtures integrated crosstalk
+                % noise. Max FEXT ICN = 4.8e-3 V RMS, Max NEXT ICN =
+                % 1.8e-3 V RMS
+                obj.privFEXTICN = 4.8e-3;
+                obj.privNEXTICN = 1.8e-3;
+                
+            elseif strcmpi('Custom',standard)
+                obj.privfb = obj.fb;
+                obj.privFEXTICN = obj.FEXTICN;
+                obj.privAft = obj.Aft;
+                obj.privTft = obj.Tft;
+                obj.privNEXTICN = obj.NEXTICN;
+                obj.privAnt = obj.Ant;
+                obj.privTnt = obj.Tnt;
+            else
+                coder.internal.error('serdes:serdessystem:StandardNotRecognized',...
+                    standard);
+            end
+            
+        end
+    end
+    methods (Access = protected)
+        function notUpToDate(obj)
+            obj.privIsUpToDate = false;
+        end
+        
+        function b = compareToOldValue(obj, propName, val)
+            coder.extrinsic('matlab.system.coder.SystemProp.isNontunableProp');
+            if isempty(coder.target)
+                b = obj.(propName) ~= val;
+            else
+                isNontunableProp = coder.internal.const(...
+                   matlab.system.coder.SystemProp.isNontunableProp(class(obj), propName));
+                if isNontunableProp
+                    b = false;
+                else
+                    b = obj.(propName) ~= val;
+                end
+            end
+        end
+        
+        function [hFEXT,hNEXT]=calcCrosstalk(obj, impulseOut,dt2, freq, S11)
+            
+            Nt = length(impulseOut);
+            Nf = length(freq);
+            N = min([Nt, Nf]);
+            
+            %Time domain FEXT response estimated from numerical derivative
+            %of impulse response.
+            hfext = -[0;diff(impulseOut*dt2)];
+            
+            %Frequency domain FEXT response
+            Hfext = fft(hfext);
+            
+            %Determine the scale factor needed to ensure that the ICN of
+            %the FEXT has the requested ICN.
+            ICN_FEXT_factor = obj.privFEXTICN/serdes.utilities.icn(...
+                freq(1:N),...
+                Hfext(1:N),...
+                obj.privfb,...
+                obj.privAft,...
+                obj.privTft);
+            
+            %Avoid divide by zero when icn function returns zero
+            if isinf(ICN_FEXT_factor)
+                ICN_FEXT_factor = 0;
+            end
+            
+            %Scale FEXT responses accordingly
+            hFEXT = hfext*ICN_FEXT_factor/dt2;
+            if Nf==Nt
+                obj.FEXT = Hfext*ICN_FEXT_factor;
+            else
+                if Nf>Nt
+                    obj.FEXT = [Hfext*ICN_FEXT_factor; Hfext(end)*ones(Nf-Nt,1)];
+                else
+                    obj.FEXT = Hfext(1:Nf)*ICN_FEXT_factor;
+                end
+            end
+            
+            
+            %NEXT estimated from the return loss
+            [~,HRL]=serdes.ChannelLoss.addnegfreq(freq,S11(:));
+            
+            %Include Rise time to impulse response
+            RiseTime_20_80 = obj.privTnt;
+            
+            %Linear Ramp Assumption
+            RiseTime100 = 1.95*RiseTime_20_80/0.6;
+            
+            RiseTimeSamples = max([1,round(RiseTime100/obj.dt)]);
+            hrt = zeros(size(HRL));
+            hrt(1:RiseTimeSamples) = 1;
+            
+            %Extract Impulse Response:
+            hRL = ifft(HRL.*fft(hrt))/RiseTimeSamples;
+            
+            %Guess samples/symbol:
+            M = round(mean([1/obj.TargetFrequency/2/dt2, 1/obj.privfb/2/dt2]));
+            nshift = round(M/2);
+            
+            %Ensure that max value is included in subsample
+            [~,mxndx]=max(abs(hRL));
+            if mod(mxndx,2)
+                %Subsample impulse by 2 to compensate for the extra data
+                %points introduced by the negative frequencies
+                hNEXT2 = circshift(real(hRL(1:2:end))/(dt2/2),nshift);
+            else
+                hNEXT2 = circshift(real(hRL(2:2:end))/(dt2/2),nshift);
+            end
+            
+            %Frequency domain NEXT
+            Hnext = fft(hNEXT2*dt2);
+            
+            N2 = min([length(freq),length(Hnext)]);
+            
+            ICN_NEXT_factor = obj.privNEXTICN/serdes.utilities.icn(...
+                freq(1:N2),...
+                Hnext(1:N2),...
+                obj.privfb,...
+                obj.privAnt,...
+                obj.privTnt);
+            
+            %Avoid divide by zero when icn function returns zero
+            if isinf(ICN_NEXT_factor)
+                ICN_NEXT_factor = 0;
+            end
+            
+            %The output vectors sometimes don't equal the needed lengths
+            %due to how the negative frequencies are included when odd/even
+            %length.
+            if Nf<length(Hnext)
+                obj.NEXT = ICN_NEXT_factor*Hnext(1:Nf);
+            elseif Nf>length(Hnext)
+                obj.NEXT = ICN_NEXT_factor*[Hnext;Hnext(end)*ones(Nf-length(Hnext),1)];
+            else %equal dimesions
+                obj.NEXT = Hnext*ICN_NEXT_factor;
+            end
+            
+            if length(hNEXT2)==Nt
+                hNEXT = hNEXT2*ICN_NEXT_factor;
+            else
+                if Nf>Nt
+                    hNEXT = hNEXT2(1:Nt)*ICN_NEXT_factor;
+                else
+                    hNEXT = [hNEXT2;hNEXT2(end)*ones(Nt-length(hNEXT2),1)]*ICN_NEXT_factor;
+                end
+            end
+            
+        end
+        function calcImpulse(obj)
+            %calcImpulse    Calculate the impulse response and S21 and
+            %initialize buffer.
+            
+            %Set update flag
+            obj.privIsUpToDate = true;
+            
+            %Initialize max frequency
+            fmax = 1/obj.dt;
+            
+            %Ensure TargetFrequency is less than 1/dt
+            coder.internal.errorIf(fmax<obj.TargetFrequency,...
+                'serdes:serdessystem:ChannelLossFreqTooLarge',...
+                sprintf('%g',obj.TargetFrequency),sprintf('%g',1/obj.dt));
+            
+            %Ensure that dF has at least 1000 samples in fmax range
+            nfreq = floor(fmax/obj.dF);
+            if nfreq<1001
+                obj.dF = floor(fmax/1001);
+            end
+            
+            %Catch the special case where the ChannelLoss is 0 dB
+            if obj.Loss==0
+                fmax = 1/obj.dt*2;
+                freq = 0:obj.dF:fmax;
+                vlength = length(freq);
+                
+                t = obj.dt*(0:vlength-1)';
+                
+                %Calculate time constant.  Include eps to avoid divide by
+                %zero later.
+                RC = (obj.TxR*obj.RxR)/(obj.TxR+obj.RxR)*(obj.TxC+obj.RxC+eps);
+                Vswing = obj.RxR*obj.VoltageSwingIdeal*2/(obj.TxR+obj.RxR);
+                
+                %Step Response from basic charging RC circuit behavior
+                stepWave = Vswing*(1-exp(-t/RC));
+                impulseOut3 = [0;diff(stepWave)]/obj.dt;
+                
+                %Rise Time: Linear Ramp Assumption
+                RiseTime_20_80 = obj.RiseTime;
+                RiseTime100 = RiseTime_20_80/0.6;
+                
+                %Prepare rise time pulse
+                RiseTimeSamples = max([1,round(RiseTime100/obj.dt)]);
+                hrt = zeros(size(stepWave));
+                hrt(1:RiseTimeSamples) = 1/RiseTimeSamples;
+                
+                %Circularly convolve in rise time impact
+                impulseOut = real(ifft(fft(impulseOut3).*fft(hrt)));
+                
+                if obj.EnableCrosstalk==true
+                    %Setup ICN parameters
+                    setICN(obj);
+                    
+                    %Calculate crosstalk waveforms
+                    [hFEXT,hNEXT]=calcCrosstalk(obj, impulseOut,obj.dt, freq, zeros(size(freq)));
+                    
+                    obj.impulse = [impulseOut(:),hFEXT(:),hNEXT(:)];
+                    obj.privImpulse = impulseOut(:)*obj.dt;
+                    obj.privhFEXT = hFEXT(:)*obj.dt;
+                    obj.privhNEXT = hNEXT(:)*obj.dt;
+                else
+                    obj.impulse = impulseOut(:);
+                    obj.privImpulse = impulseOut(:)*obj.dt;
+                end
+                
+                %An idealized S21.  Not intended for analysis
+                pha = 10*(0:-1:-(vlength-1))'/vlength;
+                obj.s21 = exp(-1j*pha);
+                obj.s11 = zeros(size(pha));
+                obj.s22 = zeros(size(pha));
+                obj.f = freq(:);
+                return
+            end
+            
+            %Calculate S21
+            [S21,freq,delayEstimate1,S11,S22] = calcS21(obj,fmax);
+            
+            %Ensure that loss at fmax is small enough. Also, if the system
+            %has a large DC loss (for example if the Rx resistor
+            %termination is large), then ensure the difference in loss
+            %between DC and fmax is small enough.
+            smallLoss = -30;
+            losstest1 = (serdes.utilities.db(S21(end)) - serdes.utilities.db(S21(1)))>smallLoss;
+            if losstest1
+                %determine new fmax
+                m = (serdes.utilities.db(S21(end)) - serdes.utilities.db(S21(1)))/fmax;
+                fmax = smallLoss/m;
+                
+                [S21,freq,delayEstimate1,S11,S22] = calcS21(obj,fmax);
+            end
+
+            %Calculate delay of S21
+            phaseDelay = -unwrap(angle(S21))./(2*pi*freq);
+            delayEstimate2 = mean(phaseDelay(2:end));
+            
+            %Test and correct for aliasing if the delay recovered from the
+            %phase is not similiar enough to the expected physical delay
+            %given the length of the transmission line.
+            aliasingTest = (delayEstimate2<delayEstimate1) && round(delayEstimate2/delayEstimate1)~=1;
+            if aliasingTest
+                %Correct for main pulse aliasing effects
+                obj.dF = floor(1/(16*delayEstimate1));
+                
+                [S21,freq,~,S11,S22] = calcS21(obj,fmax);
+                
+                phaseDelay = -unwrap(angle(S21))./(2*pi*freq);
+                delayEstimate2 = mean(phaseDelay(2:end));
+            end
+            
+            %Ensure that impulse response is longer than 8 round trips of
+            %any reflections.
+            delayRatio = 1/obj.dF/delayEstimate2;
+            if delayRatio<16
+                %Update frequency step to guarantee a duration of ~9 delays
+                %to correct for reflection based aliasing effects.  The
+                %test is delayRatio<16 but the update is 18*delay to ensure
+                %that the frequency step is sufficient and that cloned
+                %versions of the SO have identical behavior.
+                obj.dF = floor(1/(18*delayEstimate2));
+                
+                [S21,freq,~,S11,S22] = calcS21(obj,fmax);
+            end
+
+            %Make frequency response double side band by including
+            %the negative frequencies.
+            [~,H]=serdes.ChannelLoss.addnegfreq(freq,S21(:));
+            
+            %Add Rise time to impulse response
+            RiseTime_20_80 = obj.RiseTime;
+            
+            %Linear Ramp Assumption
+            RiseTime100 = 1.95*RiseTime_20_80/0.6;
+            
+            local_dt = 1/fmax;
+            RiseTimeSamples = max([1,round(RiseTime100/local_dt)]);
+            hrt = zeros(size(H));
+            hrt(1:RiseTimeSamples) = 1;
+            
+            %Extract Impulse Response:
+            h = ifft(H.*fft(hrt))/RiseTimeSamples;
+            
+            %Subsample impulse by 2 to compensate for the extra data points
+            %introduced by the negative frequencies
+            h2 = h(1:2:end);
+            if max(real(h))~=max(real(h2))
+                h2 = h(2:2:end);
+            end
+            
+            %resample impulse response
+            tLocal = (local_dt)*(0:length(h2)-1)';
+            impLocal = real(h2)/(local_dt/2);
+            [~,mxndx]=max(abs(impLocal));
+
+            %Ensure maximum of impulse is resampled
+            tout = (0:obj.dt:tLocal(end))';
+            [~,mnndx]=min(abs(tout-tLocal(mxndx)));
+            tout2 = tout + (tLocal(mxndx) - tout(mnndx));
+
+            impulseOut = interp1(tLocal,impLocal,tout2,'linear',impLocal(1));
+
+            %Normalize impulse response to compensate for resample
+            %uncertainty and to ensure the output step response will
+            %have the desired voltage swing implied by the voltage
+            %divider.
+            Vswing = 2*obj.RxR*obj.VoltageSwingIdeal/(obj.TxR+obj.RxR+obj.privTLDCR);
+            g2 = sum(impulseOut*obj.dt);
+            impulseOut = impulseOut/g2*Vswing;
+            
+            if obj.EnableCrosstalk==true
+                %Setup ICN parameters
+                setICN(obj);
+                
+                %Calculate crosstalk waveforms
+                [hFEXT,hNEXT]=calcCrosstalk(obj, impulseOut,obj.dt, freq, S11);
+                
+                obj.impulse = [impulseOut(:),hFEXT(:),hNEXT(:)];
+                obj.privImpulse = impulseOut(:)*obj.dt;
+                obj.privhFEXT = hFEXT(:)*obj.dt;
+                obj.privhNEXT = hNEXT(:)*obj.dt;
+            else
+                obj.impulse = impulseOut(:);
+                obj.privImpulse = impulseOut(:)*obj.dt;
+            end
+            obj.s21 = S21(:);
+            obj.s11 = S11(:);
+            obj.s22 = S22(:);
+            obj.f = freq(:);
+        end
+        function [S21,freq, tdelay,S11,S22] = calcS21(obj,fmax)
+            
+            %Create frequency vector.  Ensure that number of frequencies is
+            %odd to better facilitate negative frequency replication.
+            %Increase Fmax if necessary.
+            nsteps1 = ceil(fmax/obj.dF)+1;
+            nsteps = nsteps1 + double(mod(nsteps1,2)==0);
+            
+            localFmax = (nsteps-1)*obj.dF;
+            freq = (0:obj.dF:localFmax)';
+            
+            %Find a transmission line of the specified loss by evaluating
+            %the transmission line at two lengths, determining the loss at
+            %each and then extrapolating the needed length.
+            len1 = 150*1e-3; %in units of m
+            [~,s21A] = serdes.ChannelLoss.causalTransmissionLine(freq, ...
+                obj.Zc, obj.Z_0, obj.a0, obj.a1, obj.a2, obj.tau, len1);
+            
+            len2 = 100*1e-3; %in units of m
+            [~,s21B] = serdes.ChannelLoss.causalTransmissionLine(freq, ...
+                obj.Zc, obj.Z_0, obj.a0, obj.a1, obj.a2, obj.tau, len2);
+            
+            %Get loss at target frequency
+            lossAtTargetFreq1 = interp1(freq,serdes.utilities.db(s21A),obj.TargetFrequency);
+            lossAtTargetFreq2 = interp1(freq,serdes.utilities.db(s21B),obj.TargetFrequency);
+            
+            %Estimate length to get near desired loss.  Note that the abs
+            %below ensures that negative lengths are not returned.
+            len = interp1(abs([lossAtTargetFreq1,lossAtTargetFreq2]),...
+                [len1, len2], abs(obj.Loss),'linear','extrap');
+            
+            %Rule of thumb delay
+            tdelay = len*sqrt(4)/3e8;
+            
+            %Create Transmission line model with desired loss
+            obj.TLLength = len;
+            [TLs11,TLs21] = serdes.ChannelLoss.causalTransmissionLine(freq, ...
+                obj.Zc, obj.Z_0, obj.a0, obj.a1, obj.a2, obj.tau, len);
+            
+            %Calculate Transmission line only DC resistance
+            % The s-parameter of a resistor is as follows:
+            %
+            % S11 = R/(R+2*Zref)
+            % S21 = 2*Zref/(R+2*Zref)
+            %
+            % Therefore, from return loss:
+            % R = 2*Zref*S11(@DC)/(1-S11(@DC))
+            % and from insertion loss:
+            % R = 2*Zref*(1-S21(@DC))/S21(@DC)
+            %R_s11 = 2*obj.Z_0*TLs11(1)/(1-TLs11(1));            
+            R_s21 = 2*obj.Z_0*(1-TLs21(1))/(TLs21(1)+eps);
+                        
+            %Utilize resistance estimation from S21 only
+            if isnan(R_s21) || isinf(R_s21)
+                obj.privTLDCR = 0;
+            else
+                obj.privTLDCR = real(R_s21);
+            end
+
+            if obj.idealTermination
+                S21 = TLs21(:);
+                S11 = TLs11(:);
+                S22 = TLs11(:);
+                return;
+            end
+            
+            %Tx Analog Capacitor Model
+            [txc_s11,txc_s21] = serdes.ChannelLoss.shuntCapacitor(freq,obj.TxC,obj.Z_0);
+            
+            %Rx Analog Capacitor Model
+            [rxc_s11,rxc_s21] = serdes.ChannelLoss.shuntCapacitor(freq,obj.RxC,obj.Z_0);
+            
+            %Calculate tx and rx termination
+            gamma1 = (obj.TxR - obj.Z_0)/(obj.TxR + obj.Z_0);
+            T1 = sqrt(1-gamma1^2);
+            gamma2 = (obj.RxR - obj.Z_0)/(obj.RxR + obj.Z_0);
+            T2 = sqrt(1-gamma2^2);
+            
+            %Combine tx and rx capacitances with transmission line
+            [S11a, S21a, S22a]  = serdes.ChannelLoss.cascade3(...
+                txc_s11,txc_s21,txc_s11,...
+                TLs11,TLs21,TLs11,...
+                rxc_s11,rxc_s21,rxc_s11);
+            
+            %Combine tx and rx terminations with channel
+            [S11, S21, S22]  = serdes.ChannelLoss.cascade3(gamma1,T1,gamma1,...
+                S11a,S21a,S22a,gamma2,T2,gamma2);
+        end
+    end
+    methods(Access = protected)
+        %% Common functions
+        function setupImpl(obj)
+            % Perform one-time calculations, such as computing constants
+            calcImpulse(obj);
+            obj.privBuffer = zeros(length(obj.privImpulse)-1,1);
+        end
+        function [y,varargout] = stepImpl(obj,waveIn,varargin)
+            [y,localPrivBuffer] = filter(obj.privImpulse,1,waveIn,obj.privBuffer);
+            obj.privBuffer = localPrivBuffer;
+            
+            if obj.EnableCrosstalk==true && numel(waveIn)>1
+                %Vector input assume that it is an impulse response.
+                %Convolve input impulse response with crosstalk impulse
+                %responses to create output crosstalk impulse responses.
+                varargout{1} = filter(obj.privhFEXT,1,waveIn);
+                varargout{2} = filter(obj.privhNEXT,1,waveIn);
+            elseif obj.EnableCrosstalk==true && isscalar(waveIn)
+                %Scalar waveIn.  Assume that this is sample-by-sample mode.
+                %If there are additional input waveforms, convolve these
+                %with crosstalk impulse response.
+                
+                [varargout{1},localPrivBufferFEXT] = filter(obj.privhFEXT,1,varargin{1},obj.privBufferFEXT);
+                obj.privBufferFEXT = localPrivBufferFEXT;
+                
+                [varargout{2},localPrivBufferNEXT] = filter(obj.privhNEXT,1,varargin{2},obj.privBufferNEXT);
+                obj.privBufferNEXT = localPrivBufferNEXT;
+            end
+        end
+        function validateInputsImpl(~,waveIn)
+            validateattributes(waveIn,{'numeric'},{'finite'},'','waveIn');
+        end
+        function resetImpl(obj)
+            % Initialize / reset discrete-state properties
+            calcImpulse(obj);
+            obj.privBuffer = zeros(length(obj.privImpulse)-1,1);
+            
+            if obj.EnableCrosstalk==true
+                obj.privBufferFEXT = zeros(length(obj.privImpulse)-1,1);
+                obj.privBufferNEXT = zeros(length(obj.privImpulse)-1,1);
+                
+                setICN(obj);
+            end
+            
+        end
+        %% Backup/restore functions
+        function s = saveObjectImpl(obj)
+            % Set properties in structure s to values in object obj
+            
+            % Set public properties and states
+            s = saveObjectImpl@matlab.System(obj);
+            
+            % Set private and protected properties
+            s.privBuffer = obj.privBuffer;
+            s.privIsUpToDate = obj.privIsUpToDate;
+            s.privImpulse = obj.privImpulse;
+            s.impulse = obj.impulse;
+            s.s21 = obj.s21;
+            s.dF = obj.dF;
+            s.s11 = obj.s11;
+            s.s22 = obj.s22;
+            s.f = obj.f;
+            
+            s.EnableCrosstalk = obj.EnableCrosstalk;
+            s.CrosstalkSpecification = obj.CrosstalkSpecification;
+            s.fb = obj.fb;
+            s.FEXTICN = obj.FEXTICN;
+            s.Aft = obj.Aft;
+            s.Tft = obj.Tft;
+            s.NEXTICN = obj.NEXTICN;
+            s.Ant = obj.Ant;
+            s.Tnt = obj.Tnt;
+            s.FEXT = obj.FEXT;
+            s.NEXT = obj.NEXT;
+            s.privBufferFEXT = obj.privBufferFEXT;
+            s.privBufferNEXT = obj.privBufferNEXT;
+            s.privhFEXT = obj.privhFEXT;
+            s.privhNEXT = obj.privhNEXT;
+            s.privfb = obj.privfb;
+            s.privFEXTICN = obj.privFEXTICN;
+            s.privAft = obj.privAft;
+            s.privTft = obj.privTft;
+            s.privNEXTICN = obj.privNEXTICN;
+            s.privAnt = obj.privAnt;
+            s.privTnt = obj.privTnt;
+        end
+        function loadObjectImpl(obj,s,wasLocked)
+            % Set properties in object obj to values in structure s
+            
+            % Set private and protected properties
+            obj.privBuffer = s.privBuffer;
+            obj.privIsUpToDate = s.privIsUpToDate;
+            obj.privImpulse = s.privImpulse;
+            obj.impulse = s.impulse;
+            obj.s21 = s.s21;
+            obj.dF = s.dF;
+            
+            %properties added in 19b:
+            if isfield(s,'s11')            
+                obj.f = s.f;
+                obj.s11 = s.s11;
+                obj.s22 = s.s22;
+            else
+                notUpToDate(obj);
+            end
+            
+            %properties added in 20a
+            if isfield(s,'FEXT')
+                obj.EnableCrosstalk = s.EnableCrosstalk;
+                obj.CrosstalkSpecification = s.CrosstalkSpecification;
+                obj.fb = s.fb;
+                obj.FEXTICN = s.FEXTICN;
+                obj.Aft = s.Aft;
+                obj.Tft = s.Tft;
+                obj.NEXTICN = s.NEXTICN;
+                obj.Ant = s.Ant;
+                obj.Tnt = s.Tnt;
+                obj.FEXT = s.FEXT;
+                obj.NEXT = s.NEXT;
+                obj.privBufferFEXT = s.privBufferFEXT;
+                obj.privBufferNEXT = s.privBufferNEXT;
+                obj.privhFEXT = s.privhFEXT;
+                obj.privhNEXT = s.privhNEXT;
+                obj.privfb = s.privfb;
+                obj.privFEXTICN = s.privFEXTICN;
+                obj.privAft = s.privAft;
+                obj.privTft = s.privTft;
+                obj.privNEXTICN = s.privNEXTICN;
+                obj.privAnt = s.privAnt;
+                obj.privTnt = s.privTnt;
+            else
+                notUpToDate(obj);
+            end
+            
+            % Set public properties and states
+            loadObjectImpl@matlab.System(obj,s,wasLocked);
+        end
+
+        function flag = isInputSizeMutableImpl(~,~)
+            flag = true;
+        end
+
+        %% Simulink functions
+        function ds = getDiscreteStateImpl(~)
+            % Return structure of properties with DiscreteState attribute
+            ds = struct([]);
+        end
+        function varargout = getOutputSizeImpl(obj)
+            % Return size for each output port
+            varargout{1} = propagatedInputSize(obj, 1);
+            if obj.EnableCrosstalk == true
+                varargout{2} = propagatedInputSize(obj, 1);
+                varargout{3} = propagatedInputSize(obj, 1);
+            end
+        end
+        function varargout = getOutputDataTypeImpl(obj)
+            varargout{1} = propagatedInputDataType(obj, 1);
+            if obj.EnableCrosstalk == true
+                varargout{2} = propagatedInputDataType(obj, 1);
+                varargout{3} = propagatedInputDataType(obj, 1);
+            end
+        end
+        function varargout = isOutputComplexImpl(obj)
+            varargout{1} = propagatedInputComplexity(obj, 1);
+            if obj.EnableCrosstalk == true
+                varargout{2} = propagatedInputComplexity(obj, 1);
+                varargout{3} = propagatedInputComplexity(obj, 1);
+            end
+        end
+        function name = getInputNamesImpl(obj)
+            if obj.EnableCrosstalk == true
+                name = ["in","FEXT","NEXT"];
+            else
+                name = "";
+            end
+        end
+        function name = getOutputNamesImpl(obj)
+            if obj.EnableCrosstalk == true
+                name = ["out","FEXT","NEXT"];
+            else
+                name = "";
+            end
+        end
+        function icon = getIconImpl(~)
+            % Define icon for System block
+            icon = "Channel";
+        end
+        function num = getNumInputsImpl(obj)
+            if obj.EnableCrosstalk == true
+                num = 3;
+            else
+                num = 1;
+            end
+        end
+        function varargout = isOutputFixedSizeImpl(obj)
+            varargout{1} = true;
+            if obj.EnableCrosstalk == true
+                varargout{2} = true;
+                varargout{3} = true;
+            end
+        end
+        function num = getNumOutputsImpl(obj)
+            if obj.EnableCrosstalk == true
+                num = 3;
+            else
+                num = 1;
+            end
+        end
+        function flag = isInactivePropertyImpl(obj,prop)
+            % Return false if property is visible based on object
+            % configuration, for the command line and System block dialog
+            flag = false;
+            switch prop
+                case {'fb'}
+                    if ~obj.EnableCrosstalk
+                        flag=true;
+                    end
+                case {'FEXTICN'}
+                    if ~strcmpi(obj.CrosstalkSpecification,'Custom')
+                        flag=true;
+                    end
+                case {'Aft'}
+                    if ~strcmpi(obj.CrosstalkSpecification,'Custom')
+                        flag=true;
+                    end
+                case {'Tft'}
+                    if ~strcmpi(obj.CrosstalkSpecification,'Custom')
+                        flag=true;
+                    end
+                case {'NEXTICN'}
+                    if ~strcmpi(obj.CrosstalkSpecification,'Custom')
+                        flag=true;
+                    end
+                case {'Ant'}
+                    if ~strcmpi(obj.CrosstalkSpecification,'Custom')
+                        flag=true;
+                    end
+                case {'Tnt'}
+                    if ~strcmpi(obj.CrosstalkSpecification,'Custom')
+                        flag=true;
+                    end
+            end
+        end
+    end
+    methods(Static, Access = protected)
+        %% Simulink customization functions
+        function header = getHeaderImpl
+            % Define header panel for System block dialog
+            header = matlab.system.display.Header(mfilename("class"));
+        end
+        function group = getPropertyGroupsImpl(~)
+            % Define property section(s) for System block dialog
+            basicGroup = matlab.system.display.SectionGroup(...
+                'Title','ChannelLoss',...
+                'PropertyList',{'Loss','TargetFrequency','dt',...
+                'Zc','TxR','TxC','RxR','RxC','RiseTime','VoltageSwingIdeal'});
+            xtalkGroup = matlab.system.display.SectionGroup(...
+                'Title','Crosstalk',...
+                'PropertyList',{'EnableCrosstalk','CrosstalkSpecification','fb',...
+                'FEXTICN','Aft','Tft'...
+                'NEXTICN','Ant','Tnt'});
+            group = [basicGroup, xtalkGroup];
+        end
+    end
+    methods(Static)
+        function [s11, s21] = shuntCapacitor(f,C,Z_0)
+            %SHUNTCAPACITOR Create S-Parameter of a shunt capacitor
+            %
+            % Inputs:
+            %   f   - frequency to create S-Parameter at.
+            %   C   - Capacitance (F)
+            %   Z_0 - Reference impedance
+            %
+            % Outputs:
+            %   s11 - S-Parmeter reflection coefficient
+            %   s21 - S-Parmeter through coefficient
+            %
+            % Reference: IEEE 802.3bj-2014, Equation 93A-8.  Also "Microwave
+            % Engineering, 3rd Ed." Pozar, Table 4.1 and 4.2 for Y=1/(jwC)
+            
+            w = 2*pi*f;
+            
+            %Method: Determine the through (s21) and reflection (s11) terms with the
+            %method found in IEEE 802.3bj-2014 93A-8.  It can be also derived from
+            %"Microwave Engineering, 3rd Ed." Pozar, Table 4.1 and 4.2 for Y=1/(jwC)
+            s11 = 1./(2+1j*w*C*Z_0)*-1j.*w*C*Z_0;
+            s21 = 1./(2+1j*w*C*Z_0)*2;
+        end
+        function [s11, s21, s22]  = cascade3(a11,a21,a22,b11,b21,b22,c11,c21,c22)
+            %cascade 3 s-parameters with Mason's rule.
+            
+            det = 1 - a22.*b11 - b22.*c11 - a22.*b21.*c11.*b21 + a22.*b11.*b22.*c11;
+            
+            s21 = a21.*b21.*c21./det;
+            s11 = a11 + a21.*b11.*a21.*(1-b22.*c11)./det + a21.*b21.*c11.*b21.*a21./det;
+            s22 = c22 + c21.*b22.*c21.*(1-b11.*a22)./det + c21.*b21.*a22.*b21.*c21./det;
+        end
+        function [s11,s21] = causalTransmissionLine(f, Z_c, Z_0, a0, a1, a2, tau, d)
+            %function [s11,s21] = causalTransmissionLine(f, Z_c, Z_0, a0, a1, a2, tau, d)
+            %
+            %Inputs
+            % f
+            % Z_c - Differential characteristic impedance [Ohms]
+            % Z_0 - reference impedance [Ohms]
+            % a0 - DC loss [1/mm]
+            % a1 - loss proportional to sqrt(frequency) [ns^(1/2)/mm]
+            % a2 - loss proportional to frequency [ns/mm]
+            % tau - phase delay [ns/mm]
+            % d - length of transmission line [m]
+            %
+            %Output
+            % s11 - reflection coefficient response at input frequencies
+            % s21 - through response at input frequencies
+            %
+            %
+            % Source: IEEE 802.3bj-2014, Normative section 93A, page 320
+            %
+            % See also:
+            % "Proposal for a causal transmission line model", IEEE P802.3bj Task Force
+            % Match 2014 presentation
+            % http://www.ieee802.org/3/bj/public/mar14/healey_3bj_01_0314.pdf
+            
+            %   Copyright 2018 The MathWorks, Inc.
+            
+            %#codegen
+            
+            f_GHz=f/1e9;
+            
+            dmm = d*1e3; %convert length from meters to mm
+            
+            % Equation 93A-12
+            rho=(Z_c-2*Z_0)/(Z_c+2*Z_0);
+            
+            % Equation 93A-10
+            gamma_1 = a1*(1+1j);
+            
+            %Expand Equation 93A-11 to be valid for negative frequencies
+            %gamma_2 = a2*(1-2j/pi*log(f_GHz)) + 2j*pi*tau;% Equation 93A-11
+            gamma_2 = a2*(1-2j/pi*sign(f_GHz).*log(abs(f_GHz))) + sign(f_GHz)*2j*pi*tau;
+            
+            %Expand Equation 93A-9 to be valid for negative frequencies
+            %gamma = a0 + gamma_1.*sqrt(f_GHz) + gamma_2.*f_GHz; % Equation 93A-9
+            gamma = a0 + real(gamma_1).*sqrt(abs(f_GHz)) ...
+                + 1j*imag(gamma_1).*sign(f_GHz).*sqrt(abs(f_GHz)) ...
+                + real(gamma_2).*abs(f_GHz) ...
+                + 1j*imag(gamma_2).*f_GHz.*sign(f_GHz);
+            gamma(f_GHz==0) = a0;
+            
+            % Equations 93A-13 and 93A-14
+            exp_gamma_d = exp(-dmm*gamma);
+            s11 = rho*(1-exp_gamma_d.^2)./(1-rho^2*exp_gamma_d.^2);
+            s21 = (1-rho^2)*exp_gamma_d./(1-rho^2*exp_gamma_d.^2);
+        end
+        function [fout,Hout]=addnegfreq(fin,Hin)
+            % addnegfreq    Add negative frequencies to a transfer function
+            %   [fout,Hout]=addnegfreq(fin,Hin) creates the full transfer function
+            %   provided the positive frequencies, fin, and tranfer function Hin.  The
+            %   negative transer function is created by enforcing even symmetry for the
+            %   real components of Hin and odd symmetry for the imaginary components of
+            %   Hin. The first input frequency point is required to be 0.
+            %
+            %   Example:
+            %
+            %   See also serdes.ChannelLoss
+            
+            %   Copyright 2018 The MathWorks, Inc.
+            
+            %#codegen
+            
+            %Validate Inputs/Outputs
+            narginchk(2,2)
+            nargoutchk(0,2)
+            
+            validateattributes(fin,{'numeric'},...
+                {'vector','nonnegative','increasing'},'','fin',1);
+            validateattributes(Hin,{'numeric'},{'vector'},'','Hin',2);
+            coder.internal.errorIf(fin(1)~=0,'serdes:utilities:firstFreqNotZero');
+            coder.internal.errorIf(length(fin)~=length(Hin),...
+                'serdes:utilities:VectorLengthNotTheSame');
+            
+            %Make column vectors:
+            Hin = Hin(:);
+            fin = fin(:);
+            
+            H3 = complex([ real(Hin(end:-1:2));real(Hin)],...
+                [-imag(Hin(end:-1:2));imag(Hin)]);
+            f3 = [-fin(end:-1:2);fin];
+            
+            Hout = ifftshift(H3);
+            fout = ifftshift(f3);
+        end
+    end
+    
+    methods(Static, Hidden)
+        function flag = useMessageIDForMaskDialogImpl
+            % Prioritize using message catalog as source for dialog text
+            flag = true;
+        end
+    end   
+end

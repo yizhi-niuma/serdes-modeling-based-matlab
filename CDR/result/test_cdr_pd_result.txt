@@ -1,0 +1,28 @@
+test_cdr_pd started: 2026-08-11 17:46:42
+Test script: C:\Work\MatLab_Lib\CDR\test_cdr_pd
+Result folder: C:\Work\MatLab_Lib\CDR\result
+
+[PASS] truth table
+[PASS] polarity
+[PASS] threshold
+[PASS] output and state
+[PASS] matrix input
+[PASS] invalid input
+[PASS] waveform function
+       waveform transitions: 8, valid decisions: 8
+       pdError sequence: [1 -1 1 0 -1 0 1 -1 1 0 -1]
+
+Summary:
+  truth table            : PASS
+  polarity               : PASS
+  threshold              : PASS
+  output and state       : PASS
+  matrix input           : PASS
+  invalid input          : PASS
+  waveform function      : PASS
+
+Passed 7 / 7 tests.
+Text result : C:\Work\MatLab_Lib\CDR\result\test_cdr_pd_result.txt
+Waveform PNG: C:\Work\MatLab_Lib\CDR\result\test_cdr_pd_waveform.png
+
+test_cdr_pd all tests passed.
