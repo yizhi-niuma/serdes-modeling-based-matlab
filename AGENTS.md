@@ -1,6 +1,6 @@
 # Project Instructions
 
-The project workspace is `D:\Work\serdes_modeling`. All SerDes modeling code and related project work must be performed within this directory.
+The project workspace is `C:\Work\MatLab_Lib`. All SerDes modeling code and related project work must be performed within this directory.
 
 This project implements an end-to-end behavioral SerDes model.
 

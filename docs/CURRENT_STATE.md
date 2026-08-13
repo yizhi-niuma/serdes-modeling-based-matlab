@@ -20,14 +20,22 @@ Updated: 2026-08-13
 
 ## Implemented CDR capabilities
 
-- Alexander bang-bang phase detector with threshold, polarity, transition qualification, debug state, and array input.
+- Pure digital NRZ/PAM4 bang-bang phase detector with polarity, transition qualification, debug state, and array input.
+- PAM4 BBPD transition selection aligned to the reference RTL's symmetric `00<->11` and `01<->10` edges.
+- Vectorized `int8` BBPD fast path with numeric mode selection for block-based BER simulation without input validation or debug-state updates.
+- Explicit top-level block-overlap convention validated for preserving transitions between consecutive ADC/CDR blocks; the PD itself remains stateless.
+- MMPD interface placeholder with explicit not-implemented behavior.
+- Stateless configurable block voter with linear/constant modes, default 64-decision blocks, default constant magnitude 8, `int16` output, and validated/single-block-fast interfaces.
+- Mode-independent proportional-integral loop filter with floating internal state, residual integer-code quantization, configurable integral limits, saturation recovery, and scalar fast update.
 - Phase interpolator with ideal/default-nonideal/custom phase tables, wrapped code, accumulated UI slip, floating sample-index output, and fast update path.
+- Block-rate `cdr_top` integration of PD, voter, loop filter, and PI with explicit cross-block symbol history, next-block PI timing, coordinated reset, and validated/fast paths.
+- `cdr_top` source documentation now explains its block scheduling, state ownership, update-before/after phase semantics, validated/fast contracts, reset behavior, units, and row/column block handling in detailed UTF-8 Chinese comments.
 
 ## Not yet implemented or integrated
 
-- CDR loop filter.
 - Frequency acquisition/detector path.
-- Closed-loop PD -> loop filter -> PI -> TI ADC sampling simulation.
+- Dedicated CDR-path FFE and the data/edge slicers upstream of the digital PD.
+- Closed-loop digital CDR -> TI ADC waveform sampling simulation.
 - End-to-end CDR lock, BER, bathtub, jitter-transfer, and jitter-tolerance analysis.
 - A single top-level configuration/runner for ADC plus CDR.
 
@@ -35,9 +43,15 @@ Updated: 2026-08-13
 
 - All 13 scripts under `validation/` ran successfully after the directory reorganization.
 - ADC coverage includes SAR core, capacitor mismatch, differential clock-driven single/quad channel, TI ADC sine input, CTLE waveform conversion, and clock-skew/jitter histograms.
-- CDR PD validation passed 7/7 internal checks covering truth table, polarity, threshold, output/state, matrix input, invalid input, and waveform behavior.
+- CDR PD validation passed 10/10 internal checks covering NRZ truth table, PAM4 symmetric-edge selection, polarity, mode/state, matrix input, fast-path equivalence/state isolation, cross-block transition preservation, invalid input, MMPD placeholder behavior, and external-slicer waveform behavior.
+- CDR voter automated regression passed 7/7 checks covering defaults, linear/constant decisions, ties, row/column input, single-block fast-path equivalence, mode updates, invalid input, and invalid configuration.
+- CDR loop-filter automated regression passed 9/9 checks covering PI update order, positive/negative residual quantization, integral saturation and recovery, voter-mode-independent numeric input, scalar fast-path equivalence, PI interface compatibility, runtime configuration/reset, and invalid inputs.
+- CDR top-level automated regression passed 6/6 checks covering component scheduling, next-block PI update timing, cross-block symbol overlap, row/column handling, coordinated reset, fast-path equivalence, and invalid inputs/configuration.
+- Seeded-free deterministic ideal-edge validation demonstrated `cdr_top` phase search on a 128-samples/UI NRZ waveform, converging from 0 to a true edge at sample 24 and remaining in a 23/24-sample limit cycle.
+- Independent 128-samples/UI PAM4 convergence cases validated both supported symmetric transition families, outer `0<->3` and inner `1<->2`; both converged to the same 23/24-sample limit cycle around the edge at sample 24.
+- CTLE-waveform PAM4 validation now reads the 5000-UI fixture from `data/ADC/TI_ADC/ctle_out.csv`, calibrates slicer thresholds, measures the BBPD S-curve, and closes `cdr_top` over 4096 UI. With `Kp=0.0625` and `Ki=0.0005`, the PI converged from sample 0 to a 14-15 sample steady-state range around the measured BBPD lock phase at sample 15.
 - CDR PI code/phase/index/wrap behavior has been exercised visually.
-- No general automated regression suite currently exists under `tests/`.
+- `tests/CDR` now contains the first automated CDR component regression; broader ADC/CDR regression coverage is still incomplete.
 
 ## Known issues and technical debt
 
@@ -47,10 +61,11 @@ Updated: 2026-08-13
 - Some Chinese comments are corrupted by inconsistent text encoding.
 - Model configuration is distributed across constructors and validation scripts rather than centralized.
 - Existing validations are mostly behavioral/visual and do not define enough numerical acceptance tolerances.
+- The dedicated upstream CDR FFE and NRZ/PAM4 data/edge slicers are not yet implemented or integrated with the digital PD.
 
 ## Current blockers
 
-- A closed-loop ADC/CDR simulation cannot be completed until the loop filter and top-level scheduling/data-flow logic are defined.
+- A closed-loop ADC/CDR simulation cannot be completed until the dedicated CDR FFE, slicers, and waveform/ADC sampling connection are implemented.
 - Canonical SAR behavior and boundary conventions must be selected before consolidating duplicate models.
 - Required correlation targets and accuracy tolerances are not yet defined.
 
@@ -59,6 +74,5 @@ Updated: 2026-08-13
 1. Declare `src/ADC/TI_ADC` as the working TI ADC implementation and document how the other SAR variants will be used as references or retired.
 2. Add automated regression tests for SAR boundaries, saturation, fast/debug equivalence, TI lane ordering, and clock indices.
 3. Add automated BBPD and PI wrap/nonideality tests under `tests/CDR`.
-4. Define and implement the CDR loop-filter interface.
-5. Build a minimal seeded closed-loop CDR + `ti_adc_top` simulation before adding further nonidealities.
-6. Move remaining waveform studies, input data, and generated artifacts out of `src`.
+4. Build a minimal seeded closed-loop CDR + `ti_adc_top` simulation before adding further nonidealities.
+5. Move remaining waveform studies, input data, and generated artifacts out of `src`.

@@ -18,15 +18,20 @@ Oversampled RX waveform
   -> SAR ADC conversion
   -> ADC code and reconstructed voltage
 
-CDR data sample + edge sample
-  -> Alexander bang-bang phase detector
-  -> future loop filter (not implemented)
+CDR data-symbol decision + edge-bit decision
+  -> digital NRZ/PAM4 bang-bang phase detector
+  -> block voter
+  -> proportional-integral loop filter
   -> phase-interpolator code update
   -> local sample-index offset
   -> TI ADC clock/sampler
 ```
 
 The ADC and CDR components exist, but a closed-loop CDR-to-ADC top-level model has not yet been assembled in the current source.
+
+The CDR timing path will use a dedicated FFE rather than reusing the data-recovery
+FFE/DFE path. That CDR FFE and its downstream slicers remain upstream of the
+current digital CDR top level and are not yet implemented in the current source.
 
 ## ADC modules
 
@@ -75,13 +80,42 @@ This directory contains CTLE/TX/PRBS waveform inputs, eye-diagram and delay-anal
 
 ### `cdr_pd.m`
 
-Alexander bang-bang phase detector with:
+Digital bang-bang phase detector with:
 
-- Previous data, current edge, and current data sample inputs.
-- Configurable slicer threshold and output polarity.
-- Transition-qualified `+1/-1` phase-error decisions.
-- Zero output when no data transition is present.
-- Debug state snapshots and array-input support.
+- `nrz` and `pam4` modulation modes.
+- Digital previous-data, current-edge-bit, and current-data inputs.
+- NRZ transition-qualified `+1/-1` phase-error decisions.
+- PAM4 encoding `00=-3`, `01=-1`, `10=+1`, and `11=+3`.
+- PAM4 phase decisions restricted to the symmetric `00<->11` and `01<->10` transitions used by the reference RTL.
+- Configurable output polarity, zero output for invalid transitions, debug state snapshots, and array-input support.
+- A vectorized `bbpdFast` path using numeric mode selection and `int8` phase decisions, without validation, debug-structure allocation, or state updates for large BER simulations.
+- Block-boundary overlap is owned by the future CDR top-level; `cdr_pd` remains stateless apart from its optional debug snapshot.
+- An `mmpd` interface placeholder that reports the algorithm as not implemented.
+
+Slicing and equalization are intentionally outside `cdr_pd`; the caller must provide hard digital symbol/edge decisions.
+
+### `cdr_voter.m`
+
+Stateless block voter with:
+
+- One configurable parallel phase-decision block per call; the default block size is 64.
+- Linear mode returning the signed sum of the `-1/0/+1` phase decisions.
+- Constant mode returning `+K`, `-K`, or zero from the sign of the block sum; the default magnitude is 8.
+- Validated `vote` and reduced-overhead single-block `voteFast` paths.
+- `int16` accumulation and output.
+
+The voter does not accumulate across blocks or model the RTL output register. The future CDR top-level owns block scheduling and pipeline latency.
+
+### `cdr_loop.m`
+
+Mode-independent proportional-integral loop filter with:
+
+- One numeric voter error input and one integer PI code-increment output per update.
+- Floating-point proportional, integral, and fractional-code residue calculations.
+- Configurable integral-state saturation with reverse-error recovery.
+- Validated `update` and reduced-overhead scalar `updateFast` paths.
+
+The loop filter does not own voter-mode selection, PI code wrap, UI-slip tracking, RTL fixed-point encoding, or a separate frequency-acquisition path.
 
 ### `cdr_pi.m`
 
@@ -95,13 +129,26 @@ Phase-interpolator behavioral model with:
 - Phase-to-floating-sample-index lookup.
 - Full debug update and reduced-overhead `updateFast` paths.
 
+### `cdr_top.m`
+
+Block-rate digital integration model with:
+
+- Explicit composition of configured `cdr_pd`, `cdr_voter`, `cdr_loop`, and `cdr_pi` objects.
+- Cross-block previous-symbol state owned by the top level.
+- One PD/voter/loop/PI update per configured voter block.
+- The PI phase entering a block exposed separately from the updated phase used by the following block.
+- Validated/debug and reduced-overhead fast processing paths.
+- Coordinated reset of PD, loop-filter, PI, block index, and previous-symbol state.
+
+The current top-level input is already-sliced digital data-symbol and edge-bit
+blocks. It does not yet own waveform sampling, the dedicated CDR FFE, slicers,
+or the TI ADC connection.
+
 ## Missing top-level CDR blocks
 
 The current `src/CDR` directory does not yet contain:
 
-- Loop filter.
 - Frequency detector or acquisition aid.
-- CDR controller/top-level state machine.
 - Direct closed-loop connection between `cdr_pd`, `cdr_pi`, and `ti_adc_top`.
 - BER/jitter-tolerance top-level simulation.
 

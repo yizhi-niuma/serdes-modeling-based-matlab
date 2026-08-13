@@ -1,90 +1,161 @@
-﻿classdef cdr_pd < handle
-    % cdr_pd  CDR 环路中的 Phase Detector（PD）行为模型。
+classdef cdr_pd < handle
+    % cdr_pd  CDR 环路中的数字 Phase Detector（PD）行为模型。
 
     properties (SetAccess = private)
-        % PdType  当前 PD 主类型。
-        PdType = 'bbpd'
-
-        % Threshold  slicer 判决阈值。
-        Threshold = 0
+        % Mode  调制模式：nrz 或 pam4。
+        Mode = 'pam4'
 
         % Polarity  PD 输出极性。
         Polarity = 1
 
-        % LastOutput  最近一次 detect 的完整输出快照。
+        % LastOutput  最近一次 PD 判决的完整输出快照。
         LastOutput
     end
 
+    properties (SetAccess = private, Hidden)
+        % ModeId  热路径使用的数值模式：0=NRZ，1=PAM4。
+        ModeId = uint8(1)
+    end
+
     methods
-        function obj = cdr_pd(threshold, polarity)
-            % cdr_pd  构造 Alexander BBPD 行为模型。
+        function obj = cdr_pd(mode, polarity)
+            % cdr_pd  构造数字 BBPD/MMPD 行为模型。
 
             if nargin < 1
-                threshold = 0;
+                mode = 'pam4';
             end
             if nargin < 2
                 polarity = 1;
             end
 
-            obj.setThreshold(threshold);
+            obj.setMode(mode);
             obj.setPolarity(polarity);
             obj.resetState();
         end
 
-        function [pdError, valid, output] = detect(obj, dataSamplePrev, edgeSampleCurr, dataSampleCurr)
-            % detect  根据 D[n-1] / E[n] / D[n] 生成 Alexander BBPD 判决。
+        function [phaseDecision, valid, output] = bbpd(obj, dataPrev, edgeBit, dataCurr)
+            % bbpd  根据数字 D[n-1] / E[n] / D[n] 生成 BBPD 判决。
+            %
+            % NRZ 模式使用 0/1 data 和 edge 判决，所有 data 跳变均有效。
+            % PAM4 模式使用 0~3 symbol code，并只使用 00<->11 和
+            % 01<->10 对称跳变。edgeBit 在两种模式下均为 0/1。
 
-            obj.validateSameSize(dataSamplePrev, edgeSampleCurr, dataSampleCurr);
+            obj.validateSameSize(dataPrev, edgeBit, dataCurr);
+            obj.validateDigitalArray(edgeBit, 0, 1, 'edgeBit');
 
-            % 将三路模拟采样值判决为 0 / 1。
-            dPrev = obj.sliceSample(dataSamplePrev);
-            eCurr = obj.sliceSample(edgeSampleCurr);
-            dCurr = obj.sliceSample(dataSampleCurr);
+            switch obj.Mode
+                case 'nrz'
+                    obj.validateDigitalArray(dataPrev, 0, 1, 'dataPrev');
+                    obj.validateDigitalArray(dataCurr, 0, 1, 'dataCurr');
 
-            % 只有前后 data decision 不同时，当前 UI 才包含数据跳变。
-            transition = dPrev ~= dCurr;
+                    valid = dataPrev ~= dataCurr;
+                    dataSidePrev = dataPrev ~= 0;
 
-            % rawDecision 是未乘 Polarity 前的 BBPD 原始判决。
+                case 'pam4'
+                    obj.validateDigitalArray(dataPrev, 0, 3, 'dataPrev');
+                    obj.validateDigitalArray(dataCurr, 0, 3, 'dataCurr');
 
-            % edge decision 等于旧 data decision 时，按当前约定记为 +1。
-            early = eCurr == dPrev;
+                    outerTransition = (dataPrev == 0 & dataCurr == 3) | ...
+                        (dataPrev == 3 & dataCurr == 0);
+                    innerTransition = (dataPrev == 1 & dataCurr == 2) | ...
+                        (dataPrev == 2 & dataCurr == 1);
+                    valid = outerTransition | innerTransition;
 
-            % rawDecision 是未乘 Polarity 前的 BBPD 原始判决。
-            rawDecision = zeros(size(dCurr));
-            rawDecision(transition) = -1;
-            rawDecision(transition & early) = 1;
+                    % PAM4 编码为 00=-3、01=-1、10=+1、11=+3。
+                    % MSB 表示 symbol 位于中心阈值的哪一侧。
+                    dataSidePrev = dataPrev >= 2;
 
+                otherwise
+                    error('cdr_pd:InvalidMode', 'Unsupported PD mode: %s.', obj.Mode);
+            end
 
-            % valid 只表示当前 UI 是否存在数据跳变。
-            valid = transition;
+            early = valid & ((edgeBit ~= 0) == dataSidePrev);
+            late = valid & ~early;
 
-            % 通过 Polarity 完成环路方向映射。
-            pdError = obj.Polarity * rawDecision;
+            rawDecision = double(early) - double(late);
+            phaseDecision = obj.Polarity * rawDecision;
 
-            % 无效位置强制清零，避免后级 voter / loop filter 误用。
-            pdError(~valid) = 0;
-
-            % 保存 debug 信息，便于上层 CDR 环路调试和波形追踪。
             output = struct();
-            output.PdType = obj.PdType;
-            output.Threshold = obj.Threshold;
+            output.PdType = 'bbpd';
+            output.Mode = obj.Mode;
             output.Polarity = obj.Polarity;
-            output.DataDecisionPrev = dPrev;
-            output.EdgeDecisionCurr = eCurr;
-            output.DataDecisionCurr = dCurr;
-            output.Transition = transition;
+            output.DataSymbolPrev = dataPrev;
+            output.EdgeBit = edgeBit;
+            output.DataSymbolCurr = dataCurr;
+            output.DataSidePrev = dataSidePrev;
+            output.Transition = valid;
+            output.Early = early;
+            output.Late = late;
             output.RawDecision = rawDecision;
             output.Valid = valid;
-            output.PdError = pdError;
+            output.PhaseDecision = phaseDecision;
 
             obj.LastOutput = output;
         end
 
-        function setThreshold(obj, threshold)
-            % setThreshold  设置 slicer 判决阈值。
+        function [phaseDecision, valid] = bbpdFast(obj, dataPrev, edgeBit, dataCurr)
+            % bbpdFast  面向块向量化 BER 仿真的无检查 BBPD 热路径。
+            %
+            % 调用方必须保证三路输入尺寸一致、码值合法且不含 NaN/Inf。
+            % 本方法不生成调试结构，也不更新 LastOutput。
 
-            obj.validateFiniteScalar(threshold, 'threshold');
-            obj.Threshold = threshold;
+            modeId = obj.ModeId;
+            polarity = int8(obj.Polarity);
+
+            switch modeId
+                case 0
+                    valid = dataPrev ~= dataCurr;
+                    early = valid & (edgeBit == dataPrev);
+
+                case 1
+                    outerTransition = (dataPrev == 0 & dataCurr == 3) | ...
+                        (dataPrev == 3 & dataCurr == 0);
+                    innerTransition = (dataPrev == 1 & dataCurr == 2) | ...
+                        (dataPrev == 2 & dataCurr == 1);
+                    valid = outerTransition | innerTransition;
+                    early = valid & ((edgeBit ~= 0) == (dataPrev >= 2));
+
+                otherwise
+                    error('cdr_pd:InvalidModeId', 'Unsupported numeric PD mode: %d.', modeId);
+            end
+
+            phaseDecision = zeros(size(valid), 'int8');
+            phaseDecision(valid) = -polarity;
+            phaseDecision(early) = polarity;
+        end
+
+        function [phaseDecision, valid, output] = mmpd(~, dataPrev, errorPrev, dataCurr, errorCurr) %#ok<INUSD>
+            % mmpd  MMPD 数字接口框架，算法尚未实现。
+
+            phaseDecision = []; %#ok<NASGU>
+            valid = []; %#ok<NASGU>
+            output = struct(); %#ok<NASGU>
+            error('cdr_pd:MMPDNotImplemented', ...
+                'MMPD is not implemented yet. Use bbpd for the current model.');
+        end
+
+        function setMode(obj, mode)
+            % setMode  设置调制模式：nrz 或 pam4。
+
+            if isstring(mode) && isscalar(mode)
+                mode = char(mode);
+            end
+            if ~ischar(mode) || ~isrow(mode)
+                error('cdr_pd:InvalidMode', 'mode must be ''nrz'' or ''pam4''.');
+            end
+
+            mode = lower(mode);
+            if ~ismember(mode, {'nrz', 'pam4'})
+                error('cdr_pd:InvalidMode', 'mode must be ''nrz'' or ''pam4''.');
+            end
+
+            obj.Mode = mode;
+            if strcmp(mode, 'nrz')
+                obj.ModeId = uint8(0);
+            else
+                obj.ModeId = uint8(1);
+            end
+            obj.resetState();
         end
 
         function setPolarity(obj, polarity)
@@ -104,45 +175,30 @@
             % getState  返回 PD 当前配置和最近一次输出快照。
 
             state = struct();
-            state.PdType = obj.PdType;
-            state.Threshold = obj.Threshold;
+            state.Mode = obj.Mode;
             state.Polarity = obj.Polarity;
             state.LastOutput = obj.LastOutput;
         end
     end
 
     methods (Access = private)
-        function decision = sliceSample(obj, sampleValue)
-            % sliceSample  将模拟 sample value 判决为 0 / 1。
+        function validateSameSize(~, dataPrev, edgeBit, dataCurr)
+            % validateSameSize  检查三路数字输入尺寸一致。
 
-            decision = sampleValue > obj.Threshold;
-        end
-
-        function validateSameSize(obj, dataSamplePrev, edgeSampleCurr, dataSampleCurr)
-            % validateSameSize  检查三路输入是否为同尺寸有限数值数组。
-
-            obj.validateFiniteNumericArray(dataSamplePrev, 'dataSamplePrev');
-            obj.validateFiniteNumericArray(edgeSampleCurr, 'edgeSampleCurr');
-            obj.validateFiniteNumericArray(dataSampleCurr, 'dataSampleCurr');
-
-            if ~isequal(size(dataSamplePrev), size(edgeSampleCurr)) || ~isequal(size(dataSamplePrev), size(dataSampleCurr))
-                error('dataSamplePrev, edgeSampleCurr, and dataSampleCurr must have the same size.');
+            if ~isequal(size(dataPrev), size(edgeBit)) || ~isequal(size(dataPrev), size(dataCurr))
+                error('cdr_pd:SizeMismatch', ...
+                    'dataPrev, edgeBit, and dataCurr must have the same size.');
             end
         end
 
-        function validateFiniteNumericArray(~, value, name)
-            % validateFiniteNumericArray  检查输入是否为有限数值数组。
+        function validateDigitalArray(~, value, minValue, maxValue, name)
+            % validateDigitalArray  检查有限、整数且位于指定范围的数字数组。
 
-            if ~isnumeric(value) || isempty(value) || any(~isfinite(value(:)))
-                error('%s must be a finite numeric array.', name);
-            end
-        end
-
-        function validateFiniteScalar(~, value, name)
-            % validateFiniteScalar  检查输入是否为有限数值标量。
-
-            if ~isnumeric(value) || ~isscalar(value) || ~isfinite(value)
-                error('%s must be a finite numeric scalar.', name);
+            if ~(isnumeric(value) || islogical(value)) || isempty(value) || ...
+                    any(~isfinite(value(:))) || any(value(:) ~= round(value(:))) || ...
+                    any(value(:) < minValue) || any(value(:) > maxValue)
+                error('cdr_pd:InvalidDigitalInput', ...
+                    '%s must contain integer values from %d to %d.', name, minValue, maxValue);
             end
         end
 
@@ -150,7 +206,7 @@
             % validatePolarity  检查 polarity 是否为 +1 或 -1。
 
             if ~isnumeric(polarity) || ~isscalar(polarity) || ~(polarity == 1 || polarity == -1)
-                error('polarity must be +1 or -1.');
+                error('cdr_pd:InvalidPolarity', 'polarity must be +1 or -1.');
             end
         end
     end
