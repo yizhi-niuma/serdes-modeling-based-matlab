@@ -1,6 +1,6 @@
 # Current State
 
-Updated: 2026-08-13
+Updated: 2026-08-14
 
 ## Current modeling scope
 
@@ -20,16 +20,18 @@ Updated: 2026-08-13
 
 ## Implemented CDR capabilities
 
-- Pure digital NRZ/PAM4 bang-bang phase detector with polarity, transition qualification, debug state, and array input.
+- Pure digital NRZ/PAM4 bang-bang phase detector with polarity, transition qualification, compact input/result debug state, and array input.
 - PAM4 BBPD transition selection aligned to the reference RTL's symmetric `00<->11` and `01<->10` edges.
-- Vectorized `int8` BBPD fast path with numeric mode selection for block-based BER simulation without input validation or debug-state updates.
+- Vectorized `int8` BBPD decision kernel with numeric mode selection; the validated path reuses the same kernel and adds only input validation plus debug-state updates, with strict value/type equivalence covered by tests.
 - Explicit top-level block-overlap convention validated for preserving transitions between consecutive ADC/CDR blocks; the PD itself remains stateless.
 - MMPD interface placeholder with explicit not-implemented behavior.
-- Stateless configurable block voter with linear/constant modes, default 64-decision blocks, default constant magnitude 8, `int16` output, and validated/single-block-fast interfaces.
+- Stateless configurable block voter with linear/constant modes, default 64-decision blocks, default constant magnitude 8, `int16` output, and a validated interface that reuses the single-block fast calculation path.
 - Mode-independent proportional-integral loop filter with floating internal state, residual integer-code quantization, configurable integral limits, saturation recovery, and scalar fast update.
 - Phase interpolator with ideal/default-nonideal/custom phase tables, wrapped code, accumulated UI slip, floating sample-index output, and fast update path.
 - Block-rate `cdr_top` integration of PD, voter, loop filter, and PI with explicit cross-block symbol history, next-block PI timing, coordinated reset, and validated/fast paths.
 - `cdr_top` source documentation now explains its block scheduling, state ownership, update-before/after phase semantics, validated/fast contracts, reset behavior, units, and row/column block handling in detailed UTF-8 Chinese comments.
+- `cdr_top` executable statements no longer use MATLAB ellipsis continuation; complex validation expressions are split into named boolean checks while preserving the original interfaces and behavior.
+- `test_cdr_top_ctle_waveform.m` now contains detailed UTF-8 Chinese comments covering the validation boundary, offline phase/threshold calibration, BBPD statistical lock reference, constant-voter and PI-loop configuration, current/next-block timing, error-signal units, acceptance checks, and helper-function behavior; executable behavior is unchanged.
 
 ## Not yet implemented or integrated
 

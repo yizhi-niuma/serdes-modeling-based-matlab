@@ -44,9 +44,9 @@ The current validation script passed 10/10 checks:
 - NRZ BBPD truth table.
 - PAM4 symmetric-edge selection and early/late decisions.
 - Polarity inversion.
-- Mode selection and output/state snapshot.
+- Mode selection and exact compact output/state snapshot fields.
 - Matrix input.
-- `bbpdFast` equivalence to `bbpd` for seeded NRZ/PAM4 row, column, and matrix blocks with both polarities, including `int8` output and verification that the stateless fast path does not modify object state.
+- Strict value-and-type equivalence between `bbpdFast` and `bbpd` for seeded NRZ/PAM4 row, column, and matrix blocks with both polarities, including verification that the stateless fast path does not modify object state.
 - Cross-block equivalence for five consecutive 64-symbol blocks using explicit previous-symbol overlap in the caller/top-level.
 - Invalid digital mode/symbol/edge/shape rejection.
 - Explicit MMPD-not-implemented behavior.

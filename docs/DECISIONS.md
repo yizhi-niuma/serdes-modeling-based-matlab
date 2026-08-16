@@ -27,7 +27,8 @@
 - PAM4 uses `00=-3`, `01=-1`, `10=+1`, and `11=+3`, and only the symmetric `00<->11` and `01<->10` transitions contribute phase decisions.
 - The public MMPD method is named `mmpd`; it is an interface placeholder and must fail explicitly until its algorithm is implemented.
 - The BBPD/MMPD output is named `phaseDecision` to distinguish the discrete early/late direction from a quantitative phase-error estimate.
-- `bbpdFast` is the stateless block-vectorized BER hot path; callers own input validation and block overlap, its phase decision uses `int8`, and it must not allocate debug output or modify object state.
+- `bbpdFast` is the single stateless block-vectorized BBPD decision kernel. Both public paths return `int8`; `bbpd` delegates to it and adds validation/debug capture, while direct fast-path callers own input validity and block overlap.
+- The validated BBPD snapshot stores configuration, digital inputs, `Valid`, and `PhaseDecision`; derived aliases such as early/late/raw/transition/data-side are omitted because they duplicate the decision kernel outputs or can be reconstructed by a debugger.
 - Cross-block previous-symbol state belongs to the future CDR top-level, not `cdr_pd`; the top-level must explicitly construct each block's `dataPrev` input using the preceding block's final symbol.
 
 ## 2026-08-13: CDR voter boundary

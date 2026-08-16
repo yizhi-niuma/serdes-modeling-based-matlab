@@ -42,38 +42,11 @@ classdef cdr_pd < handle
 
             obj.validateSameSize(dataPrev, edgeBit, dataCurr);
             obj.validateDigitalArray(edgeBit, 0, 1, 'edgeBit');
+            maxSymbol = 1 + 2 * double(obj.ModeId);
+            obj.validateDigitalArray(dataPrev, 0, maxSymbol, 'dataPrev');
+            obj.validateDigitalArray(dataCurr, 0, maxSymbol, 'dataCurr');
 
-            switch obj.Mode
-                case 'nrz'
-                    obj.validateDigitalArray(dataPrev, 0, 1, 'dataPrev');
-                    obj.validateDigitalArray(dataCurr, 0, 1, 'dataCurr');
-
-                    valid = dataPrev ~= dataCurr;
-                    dataSidePrev = dataPrev ~= 0;
-
-                case 'pam4'
-                    obj.validateDigitalArray(dataPrev, 0, 3, 'dataPrev');
-                    obj.validateDigitalArray(dataCurr, 0, 3, 'dataCurr');
-
-                    outerTransition = (dataPrev == 0 & dataCurr == 3) | ...
-                        (dataPrev == 3 & dataCurr == 0);
-                    innerTransition = (dataPrev == 1 & dataCurr == 2) | ...
-                        (dataPrev == 2 & dataCurr == 1);
-                    valid = outerTransition | innerTransition;
-
-                    % PAM4 编码为 00=-3、01=-1、10=+1、11=+3。
-                    % MSB 表示 symbol 位于中心阈值的哪一侧。
-                    dataSidePrev = dataPrev >= 2;
-
-                otherwise
-                    error('cdr_pd:InvalidMode', 'Unsupported PD mode: %s.', obj.Mode);
-            end
-
-            early = valid & ((edgeBit ~= 0) == dataSidePrev);
-            late = valid & ~early;
-
-            rawDecision = double(early) - double(late);
-            phaseDecision = obj.Polarity * rawDecision;
+            [phaseDecision, valid] = obj.bbpdFast(dataPrev, edgeBit, dataCurr);
 
             output = struct();
             output.PdType = 'bbpd';
@@ -82,11 +55,6 @@ classdef cdr_pd < handle
             output.DataSymbolPrev = dataPrev;
             output.EdgeBit = edgeBit;
             output.DataSymbolCurr = dataCurr;
-            output.DataSidePrev = dataSidePrev;
-            output.Transition = valid;
-            output.Early = early;
-            output.Late = late;
-            output.RawDecision = rawDecision;
             output.Valid = valid;
             output.PhaseDecision = phaseDecision;
 

@@ -66,9 +66,7 @@ classdef cdr_loop < handle
             % 本方法刻意省略输入检查，适合端到端 BER 仿真的 block 热路径。
 
             phaseError = double(phaseError);
-            frequencyState = min(max(obj.FrequencyState + ...
-                obj.Ki * phaseError, ...
-                obj.FrequencyMin), obj.FrequencyMax);
+            frequencyState = min(max(obj.FrequencyState + obj.Ki * phaseError, obj.FrequencyMin), obj.FrequencyMax);
             control = obj.Kp * phaseError + frequencyState;
             residueAccum = obj.CodeResidue + control;
             deltaCode = fix(residueAccum);

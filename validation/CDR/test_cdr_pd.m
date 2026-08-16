@@ -97,18 +97,17 @@ function testNrzTruthTable()
     dataPrev = [0 0 0 0 1 1 1 1];
     edgeBit = [0 0 1 1 0 0 1 1];
     dataCurr = [0 1 0 1 0 1 0 1];
-    [phaseDecision, valid, output] = pd.bbpd(dataPrev, edgeBit, dataCurr);
+    [phaseDecision, valid] = pd.bbpd(dataPrev, edgeBit, dataCurr);
     expectedValid = [false true false true true false true false];
-    expectedRaw = [0 1 0 -1 -1 0 1 0];
+    expectedRaw = int8([0 1 0 -1 -1 0 1 0]);
     assertEqual(valid, expectedValid, 'NRZ valid mismatch');
-    assertEqual(output.RawDecision, expectedRaw, 'NRZ raw decision mismatch');
     assertEqual(phaseDecision, expectedRaw, 'NRZ phaseDecision mismatch');
 end
 
 function testPam4SymmetricEdges()
     pd = cdr_pd('pam4', 1);
     [dataPrev, dataCurr, edgeBit] = ndgrid(0:3, 0:3, 0:1);
-    [phaseDecision, valid, output] = pd.bbpd(dataPrev, edgeBit, dataCurr);
+    [phaseDecision, valid] = pd.bbpd(dataPrev, edgeBit, dataCurr);
 
     d0Msb = bitget(dataPrev, 2) ~= 0;
     d0Lsb = bitget(dataPrev, 1) ~= 0;
@@ -129,11 +128,9 @@ function testPam4SymmetricEdges()
         (d0Msb & d0Lsb & ~d1Msb & ~d1Lsb & ~edge) | ...
         (~d0Msb & ~d0Lsb & d1Msb & d1Lsb & edge);
     expectedValid = expectedEarly | expectedLate;
-    expectedRaw = double(expectedEarly) - double(expectedLate);
+    expectedRaw = int8(expectedEarly) - int8(expectedLate);
 
     assertEqual(valid, expectedValid, 'PAM4 complete transition selection mismatch');
-    assertEqual(output.Early, expectedEarly, 'PAM4 early truth table mismatch');
-    assertEqual(output.Late, expectedLate, 'PAM4 late truth table mismatch');
     assertEqual(phaseDecision, expectedRaw, 'PAM4 phaseDecision mismatch');
 end
 
@@ -144,8 +141,8 @@ function testPolarity()
     [errNeg, validNeg] = pdNeg.bbpd([2 1 0], [1 1 0], [1 2 1]);
     assertEqual(validPos, [true true false], 'positive polarity valid mismatch');
     assertEqual(validNeg, [true true false], 'negative polarity valid mismatch');
-    assertEqual(errPos, [1 -1 0], 'positive polarity phaseDecision mismatch');
-    assertEqual(errNeg, [-1 1 0], 'negative polarity phaseDecision mismatch');
+    assertEqual(errPos, int8([1 -1 0]), 'positive polarity phaseDecision mismatch');
+    assertEqual(errNeg, int8([-1 1 0]), 'negative polarity phaseDecision mismatch');
 end
 
 function testModeAndState()
@@ -154,11 +151,9 @@ function testModeAndState()
     [err, valid, output] = pd.bbpd([3 1], [1 0], [0 2]);
     state = pd.getState();
     requiredFields = {'PdType', 'Mode', 'Polarity', 'DataSymbolPrev', 'EdgeBit', ...
-        'DataSymbolCurr', 'DataSidePrev', 'Transition', 'Early', 'Late', ...
-        'RawDecision', 'Valid', 'PhaseDecision'};
-    for idx = 1:numel(requiredFields)
-        assert(isfield(output, requiredFields{idx}), ['output missing field: ', requiredFields{idx}]);
-    end
+        'DataSymbolCurr', 'Valid', 'PhaseDecision'};
+    assertEqual(sort(fieldnames(output)), sort(requiredFields(:)), ...
+        'output should contain only the compact debug snapshot fields');
     assertEqual(output.PdType, 'bbpd', 'PD type mismatch');
     assertEqual(state.Mode, 'pam4', 'state mode mismatch');
     assertEqual(state.LastOutput.PhaseDecision, err, 'state LastOutput PhaseDecision mismatch');
@@ -174,10 +169,10 @@ function testMatrixInput()
     dataPrev = [2 1; 3 0];
     edgeBit = [1 1; 0 0];
     dataCurr = [1 2; 0 1];
-    [err, valid, output] = pd.bbpd(dataPrev, edgeBit, dataCurr);
+    [err, valid] = pd.bbpd(dataPrev, edgeBit, dataCurr);
     assertEqual(size(err), [2 2], 'matrix phaseDecision size mismatch');
     assertEqual(valid, [true true; true false], 'matrix valid mismatch');
-    assertEqual(output.RawDecision, [1 -1; -1 0], 'matrix raw decision mismatch');
+    assertEqual(err, int8([1 -1; -1 0]), 'matrix phaseDecision mismatch');
 end
 
 function testFastPathEquivalence()
@@ -209,8 +204,9 @@ function testFastPathEquivalence()
                 [fastError, fastValid] = pd.bbpdFast(dataPrev, edgeBit, dataCurr);
                 stateAfterFast = pd.getState();
 
+                assert(isa(expectedError, 'int8'), 'validated phaseDecision must use int8 storage');
                 assert(isa(fastError, 'int8'), 'fast-path phaseDecision must use int8 storage');
-                assertEqual(fastError, int8(expectedError), ...
+                assertEqual(fastError, expectedError, ...
                     sprintf('%s fast-path phaseDecision mismatch', mode));
                 assertEqual(fastValid, expectedValid, ...
                     sprintf('%s fast-path valid mismatch', mode));
@@ -280,6 +276,10 @@ function testInvalidInput()
     assertThrowsId(@() pd.bbpd([0 4], [0 1], [3 0]), 'cdr_pd:InvalidDigitalInput', 'invalid PAM4 symbol should throw');
     assertThrowsId(@() pd.bbpd([0 3], [0 2], [3 0]), 'cdr_pd:InvalidDigitalInput', 'invalid edge bit should throw');
     assertThrowsId(@() pd.bbpd([0 NaN], [0 1], [3 0]), 'cdr_pd:InvalidDigitalInput', 'NaN input should throw');
+
+    pd.setMode('nrz');
+    assertThrowsId(@() pd.bbpd([0 2], [0 1], [1 0]), ...
+        'cdr_pd:InvalidDigitalInput', 'invalid NRZ symbol should throw');
 end
 
 function testMmpdFramework()
@@ -317,13 +317,12 @@ function waveformResult = testWaveformFunction(wavePng)
     dataCurr = dataDecision(2:end);
 
     pd = cdr_pd('nrz', 1);
-    [phaseDecision, valid, output] = pd.bbpd(dataPrev, edgeDecision, dataCurr);
+    [phaseDecision, valid] = pd.bbpd(dataPrev, edgeDecision, dataCurr);
 
-    expectedRaw = zeros(size(phaseDecision));
+    expectedRaw = zeros(size(phaseDecision), 'int8');
     expectedRaw(valid) = -1;
     expectedRaw(valid & (edgeDecision == dataPrev)) = 1;
 
-    assertEqual(output.RawDecision, expectedRaw, 'waveform raw decision mismatch');
     assertEqual(phaseDecision, expectedRaw, 'waveform phaseDecision mismatch');
     assert(any(phaseDecision == 1), 'waveform test should contain early decisions');
     assert(any(phaseDecision == -1), 'waveform test should contain late decisions');
@@ -365,8 +364,7 @@ function waveformResult = testWaveformFunction(wavePng)
     waveformResult.EdgeSample = edgeSample;
     waveformResult.PhaseDecision = phaseDecision;
     waveformResult.Valid = valid;
-    waveformResult.RawDecision = output.RawDecision;
-    waveformResult.NumTransitions = sum(output.Transition);
+    waveformResult.NumTransitions = sum(valid);
     waveformResult.NumValid = sum(valid);
 end
 

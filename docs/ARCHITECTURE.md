@@ -87,8 +87,8 @@ Digital bang-bang phase detector with:
 - NRZ transition-qualified `+1/-1` phase-error decisions.
 - PAM4 encoding `00=-3`, `01=-1`, `10=+1`, and `11=+3`.
 - PAM4 phase decisions restricted to the symmetric `00<->11` and `01<->10` transitions used by the reference RTL.
-- Configurable output polarity, zero output for invalid transitions, debug state snapshots, and array-input support.
-- A vectorized `bbpdFast` path using numeric mode selection and `int8` phase decisions, without validation, debug-structure allocation, or state updates for large BER simulations.
+- Configurable output polarity, zero output for invalid transitions, compact input/result debug snapshots, and array-input support.
+- A shared vectorized `bbpdFast` decision kernel using numeric mode selection and `int8` phase decisions; validated `bbpd` delegates to it and adds only input checks plus debug-state capture.
 - Block-boundary overlap is owned by the future CDR top-level; `cdr_pd` remains stateless apart from its optional debug snapshot.
 - An `mmpd` interface placeholder that reports the algorithm as not implemented.
 

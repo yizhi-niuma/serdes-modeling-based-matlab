@@ -1,5 +1,5 @@
 function result = test_cdr_top_convergence_pam4
-% test_cdr_top_convergence_pam4  Track ideal PAM4 symmetric edges.
+% test_cdr_top_convergence_pam4  跟踪理想的 PAM4 对称边沿。
 
 thisFile = mfilename('fullpath');
 validationDir = fileparts(thisFile);
@@ -17,7 +17,7 @@ config.BlockSize = 64;
 config.NumBlocks = 64;
 config.EdgeOffsetSamples = 24;
 
-% Exercise the two symmetric PAM4 transition families supported by cdr_pd.
+% 测试 cdr_pd 支持的两类对称 PAM4 跳变族。
 outer = runPam4Case([0 3], config);
 inner = runPam4Case([1 2], config);
 
@@ -142,7 +142,7 @@ fprintf('Saved PNG: %s\n', figurePath);
 end
 
 function caseResult = runPam4Case(symbolPair, config)
-% runPam4Case  Run one selected symmetric PAM4 transition family.
+% runPam4Case  运行一种选定的对称 PAM4 跳变族。
 
 numSymbols = config.BlockSize * config.NumBlocks;
 pairIndex = mod(0:numSymbols, 2) + 1;
@@ -210,14 +210,14 @@ caseResult.ValidCount = validCount;
 end
 
 function dataSymbol = slicePam4(sampleValue)
-% slicePam4  Apply ideal PAM4 thresholds at -2, 0, and +2.
+% slicePam4  在 -2、0 和 +2 处应用理想的 PAM4 判决门限。
 
 dataSymbol = double(sampleValue > -2) + ...
     double(sampleValue > 0) + double(sampleValue > 2);
 end
 
 function assertPam4Convergence(caseResult, steadyStateBlock, config, name)
-% assertPam4Convergence  Check one PAM4 transition family's closed loop.
+% assertPam4Convergence  检查一种 PAM4 跳变族的闭环。
 
 assert(all(caseResult.ValidCount == config.BlockSize), ...
     '%s should provide one valid phase decision per UI.', name);

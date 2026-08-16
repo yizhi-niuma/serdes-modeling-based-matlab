@@ -75,9 +75,7 @@ classdef cdr_top < handle
             % resetState，使 PD/loop/PI 动态状态和顶层 previous-symbol 状态从
             % 同一个明确的初始条件开始。
             if nargin < 5
-                error('cdr_top:MissingInput', ...
-                    ['pd, voter, loopFilter, phaseInterpolator, and ' ...
-                    'initialSymbol must be provided.']);
+                error('cdr_top:MissingInput', 'pd, voter, loopFilter, phaseInterpolator, and initialSymbol must be provided.');
             end
 
             obj.validateComponents(pd, voter, loopFilter, phaseInterpolator);
@@ -89,22 +87,7 @@ classdef cdr_top < handle
         end
 
         function output = processBlock(obj, dataCurrBlock, edgeBitBlock)
-            % processBlock  检查并处理一个完整的数字判决 block（调试路径）。
-            %
-            % 输入：
-            %   dataCurrBlock - 当前 block 的 data symbol 判决向量；NRZ 为 0/1，
-            %                   PAM4 为 0/1/2/3，长度必须为 Voter.BlockSize；
-            %   edgeBitBlock  - 与 dataCurrBlock 同尺寸、同方向的中心阈值 edge
-            %                   判决向量，每个元素为 0/1。
-            %
-            % 时序约定非常重要：
-            %   sampleIndexForBlock 在进入本函数时立即保存，它代表“产生本 block
-            %   data/edge 判决时已经使用的 PI 相位”。随后本 block 的相位误差经过
-            %   voter 和 loop filter 更新 PI；更新结果 NextLocalIndexFloat 只能用于
-            %   下一 block，不能反过来影响已经获得的当前 block 判决。
-            %
-            % 本路径执行完整输入检查，并返回 PD 详细调试结构 PdOutput；适用于
-            % 单步调试、波形验证和回归测试。长 BER 仿真优先使用 processBlockFast。
+            % processBlock  检查输入并执行一次 block-rate CDR 更新。
             obj.validateBlockShape(dataCurrBlock, edgeBitBlock);
 
             % cdr_pd 本身不保存跨 block 的 D[n-1]。这里将顶层保存的上一 symbol
@@ -117,16 +100,14 @@ classdef cdr_top < handle
 
             % 逐级执行数字 CDR 控制链。phaseDecision/valid 与 data block 等长；
             % phaseError 和 deltaCode 每个 block 只产生一个标量。
-            [phaseDecision, valid, pdOutput] = obj.Pd.bbpd( ...
-                dataPrevBlock, edgeBitBlock, dataCurrBlock);
+            [phaseDecision, valid, pdOutput] = obj.Pd.bbpd(dataPrevBlock, edgeBitBlock, dataCurrBlock);
             phaseError = obj.Voter.vote(phaseDecision);
             deltaCode = obj.LoopFilter.update(phaseError);
             obj.PhaseInterpolator.update(deltaCode);
 
             % PI 更新后的本地 index 作为下一 block 的采样相位。与此同时保存当前
             % block 最后一个 symbol，供下一次调用构造跨 block 的首个 D[n-1]。
-            obj.CurrentLocalIndexFloat = ...
-                obj.PhaseInterpolator.getLocalIndex();
+            obj.CurrentLocalIndexFloat = obj.PhaseInterpolator.getLocalIndex();
             obj.PreviousSymbol = dataCurrBlock(end);
             obj.BlockIndex = obj.BlockIndex + 1;
 
@@ -161,9 +142,7 @@ classdef cdr_top < handle
             obj.LastOutput = output;
         end
 
-        function [sampleIndexForBlock, nextLocalIndexFloat, ...
-                phaseError, deltaCode] = processBlockFast( ...
-                obj, dataCurrBlock, edgeBitBlock)
+        function [sampleIndexForBlock, nextLocalIndexFloat, phaseError, deltaCode] = processBlockFast(obj, dataCurrBlock, edgeBitBlock)
             % processBlockFast  处理一个由调用方保证合法的数字判决 block。
             %
             % 调用前提：
@@ -184,12 +163,10 @@ classdef cdr_top < handle
             sampleIndexForBlock = obj.CurrentLocalIndexFloat;
 
             % Fast 路径与 processBlock 保持完全相同的模块顺序和 block 时序。
-            [phaseDecision, ~] = obj.Pd.bbpdFast( ...
-                dataPrevBlock, edgeBitBlock, dataCurrBlock);
+            [phaseDecision, ~] = obj.Pd.bbpdFast(dataPrevBlock, edgeBitBlock, dataCurrBlock);
             phaseError = obj.Voter.voteFast(phaseDecision);
             deltaCode = obj.LoopFilter.updateFast(phaseError);
-            nextLocalIndexFloat = ...
-                obj.PhaseInterpolator.updateFast(deltaCode);
+            nextLocalIndexFloat = obj.PhaseInterpolator.updateFast(deltaCode);
 
             % 虽然省略调试结构，影响闭环后续行为的动态状态仍必须完整推进。
             obj.CurrentLocalIndexFloat = nextLocalIndexFloat;
@@ -216,8 +193,7 @@ classdef cdr_top < handle
             % 顶层调度状态与 PI 复位后的本地 index 同步回到初始状态。
             obj.PreviousSymbol = initialSymbol;
             obj.BlockIndex = 0;
-            obj.CurrentLocalIndexFloat = ...
-                obj.PhaseInterpolator.getLocalIndex();
+            obj.CurrentLocalIndexFloat = obj.PhaseInterpolator.getLocalIndex();
             obj.LastOutput = struct();
         end
 
@@ -261,19 +237,18 @@ classdef cdr_top < handle
             % 这里只检查数据类型、实数性、向量形状、block 长度及两个输入的尺寸
             % 一致性。具体 symbol/edge 码值合法性由 cdr_pd.bbpd 继续检查，避免在
             % 顶层复制 NRZ/PAM4 模式相关规则。
-            if ~(isnumeric(dataCurrBlock) || islogical(dataCurrBlock)) || ...
-                    ~isreal(dataCurrBlock) || ~isvector(dataCurrBlock) || ...
-                    numel(dataCurrBlock) ~= obj.Voter.BlockSize
-                error('cdr_top:InvalidDataBlock', ...
-                    ['dataCurrBlock must be a real vector with ' ...
-                    'Voter.BlockSize elements.']);
+            isDataTypeValid = isnumeric(dataCurrBlock) || islogical(dataCurrBlock);
+            isDataShapeValid = isDataTypeValid && isreal(dataCurrBlock) && isvector(dataCurrBlock);
+            isDataLengthValid = numel(dataCurrBlock) == obj.Voter.BlockSize;
+            if ~(isDataTypeValid && isDataShapeValid && isDataLengthValid)
+                error('cdr_top:InvalidDataBlock', 'dataCurrBlock must be a real vector with Voter.BlockSize elements.');
             end
-            if ~(isnumeric(edgeBitBlock) || islogical(edgeBitBlock)) || ...
-                    ~isreal(edgeBitBlock) || ~isvector(edgeBitBlock) || ...
-                    ~isequal(size(edgeBitBlock), size(dataCurrBlock))
-                error('cdr_top:InvalidEdgeBlock', ...
-                    ['edgeBitBlock must be a real vector with the same ' ...
-                    'size and orientation as dataCurrBlock.']);
+
+            isEdgeTypeValid = isnumeric(edgeBitBlock) || islogical(edgeBitBlock);
+            isEdgeShapeValid = isEdgeTypeValid && isreal(edgeBitBlock) && isvector(edgeBitBlock);
+            isEdgeSizeValid = isequal(size(edgeBitBlock), size(dataCurrBlock));
+            if ~(isEdgeTypeValid && isEdgeShapeValid && isEdgeSizeValid)
+                error('cdr_top:InvalidEdgeBlock', 'edgeBitBlock must be a real vector with the same size and orientation as dataCurrBlock.');
             end
         end
 
@@ -283,11 +258,10 @@ classdef cdr_top < handle
             % initialSymbol 必须是有限实整数标量；合法码值范围随 Pd.Mode 变化：
             % NRZ 使用 0/1，PAM4 使用 0/1/2/3。这里提前检查可避免 reset 之后才在
             % 第一次 PD 调用中暴露不合法的跨 block 状态。
-            if ~isnumeric(initialSymbol) || ~isreal(initialSymbol) || ...
-                    ~isscalar(initialSymbol) || ~isfinite(initialSymbol) || ...
-                    initialSymbol ~= round(initialSymbol)
-                error('cdr_top:InvalidInitialSymbol', ...
-                    'initialSymbol must be a finite integer scalar.');
+            isNumericScalar = isnumeric(initialSymbol) && isreal(initialSymbol) && isscalar(initialSymbol);
+            isFiniteInteger = isNumericScalar && isfinite(initialSymbol) && initialSymbol == round(initialSymbol);
+            if ~(isNumericScalar && isFiniteInteger)
+                error('cdr_top:InvalidInitialSymbol', 'initialSymbol must be a finite integer scalar.');
             end
 
             if strcmp(obj.Pd.Mode, 'nrz')
@@ -296,8 +270,7 @@ classdef cdr_top < handle
                 isValid = initialSymbol >= 0 && initialSymbol <= 3;
             end
             if ~isValid
-                error('cdr_top:InvalidInitialSymbol', ...
-                    'initialSymbol is invalid for the configured PD mode.');
+                error('cdr_top:InvalidInitialSymbol', 'initialSymbol is invalid for the configured PD mode.');
             end
         end
 
@@ -306,12 +279,12 @@ classdef cdr_top < handle
             %
             % 使用明确 isa 检查，而不是仅检查同名方法，可以尽早发现错误接线，
             % 并确保 processBlock/processBlockFast 所依赖的属性和状态语义一致。
-            if ~isa(pd, 'cdr_pd') || ~isa(voter, 'cdr_voter') || ...
-                    ~isa(loopFilter, 'cdr_loop') || ...
-                    ~isa(phaseInterpolator, 'cdr_pi')
-                error('cdr_top:InvalidComponent', ...
-                    ['Components must be cdr_pd, cdr_voter, cdr_loop, ' ...
-                    'and cdr_pi objects.']);
+            isPdValid = isa(pd, 'cdr_pd');
+            isVoterValid = isa(voter, 'cdr_voter');
+            isLoopValid = isa(loopFilter, 'cdr_loop');
+            isPiValid = isa(phaseInterpolator, 'cdr_pi');
+            if ~(isPdValid && isVoterValid && isLoopValid && isPiValid)
+                error('cdr_top:InvalidComponent', 'Components must be cdr_pd, cdr_voter, cdr_loop, and cdr_pi objects.');
             end
         end
     end

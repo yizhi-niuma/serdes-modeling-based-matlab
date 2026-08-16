@@ -43,7 +43,7 @@ classdef cdr_voter < handle
         function phaseError = vote(obj, phaseDecision)
             % vote  检查并聚合一个并行相位判决 block。
             obj.validatePhaseDecision(phaseDecision);
-            phaseError = obj.calculateVote(phaseDecision);
+            phaseError = obj.voteFast(phaseDecision);
         end
 
         function phaseError = voteFast(obj, phaseDecision)
@@ -92,21 +92,6 @@ classdef cdr_voter < handle
     end
 
     methods (Access = private)
-        function phaseError = calculateVote(obj, phaseDecision)
-            % calculateVote  按当前配置执行投票计算。
-            phaseDecisionCount = sum(int16(phaseDecision), 'native');
-
-            if obj.ModeId == 0
-                phaseError = phaseDecisionCount;
-            elseif phaseDecisionCount > 0
-                phaseError = obj.ConstantMagnitude;
-            elseif phaseDecisionCount < 0
-                phaseError = -obj.ConstantMagnitude;
-            else
-                phaseError = int16(0);
-            end
-        end
-
         function validatePhaseDecision(obj, phaseDecision)
             % validatePhaseDecision  检查一个完整的相位判决向量。
             if ~(isnumeric(phaseDecision) || islogical(phaseDecision)) || ...

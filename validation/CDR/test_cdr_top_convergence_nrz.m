@@ -1,5 +1,5 @@
 function result = test_cdr_top_convergence_nrz
-% test_cdr_top_convergence_nrz  Track an ideal NRZ edge with the digital CDR.
+% test_cdr_top_convergence_nrz  用数字 CDR 跟踪理想的 NRZ 边沿。
 
 thisFile = mfilename('fullpath');
 validationDir = fileparts(thisFile);
@@ -17,14 +17,14 @@ numBlocks = 64;
 edgeOffsetSamples = 24;
 numSymbols = blockSize * numBlocks;
 
-% Alternating NRZ symbols provide one ideal transition per UI so the
-% convergence trace is independent of random transition density.
+% 交替的 NRZ 符号在每个 UI 提供一次理想跳变，因此收敛
+% 轨迹与随机跳变密度无关。
 symbolNumber = 0:numSymbols;
 txBits = mod(symbolNumber, 2);
 txLevels = 2 * txBits - 1;
 
-% Build a 128x oversampled ideal-edge waveform. Symbol n starts at
-% (n - 1) UI plus the configured edge offset.
+% 构建 128 倍过采样的理想边沿波形。符号 n 起始于
+% 第 (n - 1) 个 UI 加上配置的边沿偏移处。
 numWaveformSamples = (numSymbols + 1) * samplesPerUI;
 waveformSample = 0:numWaveformSamples - 1;
 waveformSymbol = floor( ...
@@ -49,8 +49,8 @@ validCount = zeros(1, numBlocks);
 for blockIndex = 1:numBlocks
     symbolIndex = (blockIndex - 1) * blockSize + (1:blockSize);
 
-    % This validation uses nearest-grid sampling of the ideal 128x
-    % waveform. The project-wide round/interpolation choice remains open.
+    % 本验证对理想的 128 倍波形采用最近栅格采样。
+    % 全项目范围的取整/插值方案仍未确定。
     localIndexFloat = top.CurrentLocalIndexFloat;
     localIndexInteger = round(localIndexFloat);
     edgeIndex = (symbolIndex - 1) * samplesPerUI + ...

@@ -68,7 +68,7 @@ This document is derived only from `src/ADC` and `src/CDR`. It records current c
 - With default polarity, an edge bit equal to the previous NRZ bit or previous PAM4 symbol MSB produces `+1`; the opposite edge decision produces `-1`.
 - Invalid/non-selected transitions are forced to zero.
 - The public PD output is named `phaseDecision`; it is a discrete early/late direction in `{-1,0,+1}`, not a continuous phase-error estimate in UI or time.
-- `bbpdFast` implements the same NRZ/PAM4 decisions as `bbpd`, but assumes valid, same-sized digital inputs, returns an `int8` phase decision, and intentionally does not update any object state.
+- Both `bbpd` and `bbpdFast` return `int8` phase decisions. The validated `bbpd` delegates to the `bbpdFast` decision kernel and adds input validation plus debug-state capture; `bbpdFast` assumes valid, same-sized digital inputs and does not update object state.
 - For block processing, the CDR top-level must construct `dataPrevBlock = [previousSymbol, dataCurrBlock(1:end-1)]` and carry `dataCurrBlock(end)` into the next block. The PD does not own stream-boundary state.
 - MMPD has an explicit software interface but no implemented behavior.
 
