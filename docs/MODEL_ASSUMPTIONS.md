@@ -40,6 +40,16 @@ This document is derived only from `src/ADC` and `src/CDR`. It records current c
 - `LaneSkew` in `ti_adc_core` does not resample a continuous waveform; actual timing displacement is implemented through `ti_adc_clock`/`ti_adc_top` sample indices.
 - `ti_adc_top` requires adequate left and right waveform margin when skew or jitter can shift samples outside the nominal local block.
 - Current CTLE-based validation uses 64 lanes, 8 SAR lanes per TAH group, 128 samples/UI, and a 7-bit ADC.
+- TI ADC block output positions are physical-lane ordered. A downstream serial DSP must reorder them using the clock model's physical-lane-to-time-order mapping before computing adjacent-symbol decisions.
+
+### Joint TI ADC and CDR validation assumptions
+
+- `validation/CDR/test_ti_adc_cdr_joint_ctle.m` models the CDR timing path as CTLE waveform, ideal TI ADC sampling/conversion, code-domain fixed decisions, MMPD, voter, loop filter, and PI; it does not include the deferred dedicated CDR FFE or data-path DFE.
+- The ideal 7-bit ADC range remains `[-0.3,+0.3] V`. Fixture samples outside that range use the SAR model's saturation behavior; approximately 1.583% of the complete fixture samples are outside the configured range.
+- PAM4 code centers are deterministically calibrated at the offline maximum-power data phase. Adjacent center midpoints are fixed DSP data thresholds for the complete closed-loop run.
+- The binary MMPD error bit compares the ADC code with the calibrated center of its decided PAM4 level, using the existing negative/positive-level polarity convention.
+- PI floating sample indices are rounded to the nearest integer only at this validation's TI ADC sampling boundary.
+- MMPD is treated as a tracking detector and starts eight waveform samples before the ADC-quantized statistical lock phase; this does not demonstrate full-UI acquisition.
 
 ## TI ADC clock assumptions
 
@@ -70,7 +80,33 @@ This document is derived only from `src/ADC` and `src/CDR`. It records current c
 - The public PD output is named `phaseDecision`; it is a discrete early/late direction in `{-1,0,+1}`, not a continuous phase-error estimate in UI or time.
 - Both `bbpd` and `bbpdFast` return `int8` phase decisions. The validated `bbpd` delegates to the `bbpdFast` decision kernel and adds input validation plus debug-state capture; `bbpdFast` assumes valid, same-sized digital inputs and does not update object state.
 - For block processing, the CDR top-level must construct `dataPrevBlock = [previousSymbol, dataCurrBlock(1:end-1)]` and carry `dataCurrBlock(end)` into the next block. The PD does not own stream-boundary state.
-- MMPD has an explicit software interface but no implemented behavior.
+- MMPD is PAM4-only and uses the reference RTL's binary error-bit concept rather than a continuous-amplitude Mueller-Muller formula.
+- The experimental branch deliberately omits the RTL odd/even path split and accepts every non-static PAM4 transition when adjacent binary error bits agree.
+- Symmetric `0<->3` and `1<->2` transitions contribute magnitude 2; all other transitions contribute magnitude 1. Falling transitions use `11` for positive and `00` for negative decisions; rising transitions reverse those signs.
+
+### CTLE-waveform MMPD validation assumptions
+
+- PAM4 symbol centers and thresholds are calibrated from the fixed CTLE fixture using the same deterministic four-level clustering used by the BBPD validation.
+- The MMPD error bit is a binary level-error direction derived from the decided symbol center: for negative symbols 0/1, a sample above its center maps to one; for positive symbols 2/3, a sample below its center maps to one.
+- The MMPD statistical lock phase is selected from an offline S-curve within +/-0.25 UI of the maximum-power data phase and with at least 5% valid weighted transitions.
+- Baud-rate MMPD is treated as a tracking detector with limited acquisition range. With the default one-code output slew limit, the validation starts 8 waveform samples before the measured lock phase rather than claiming acquisition from an arbitrary phase over the full UI.
+- The validation directly slices CTLE voltage and does not include the dedicated CDR FFE, TI ADC quantization, or data-path DFE.
+- Under the weighted all-transition PD, the limited constant-voter comparison selects `Kp=0.5`, `Ki=0.005`, integral-state limits `[-2,+2]` code/block, and `MaxDeltaCode=1`. It tracks from phase 74 to the measured lock phase 82. These are behavioral validation settings, not product bandwidth requirements.
+
+### Weighted all-transition MMPD v1 assumptions
+
+- `validation/CDR/test_cdr_top_ctle_waveform_mmpd_v1.m` is an experimental comparison, not the baseline 64-UI tracking configuration.
+- It uses a 64-UI linear voter and 50 loop updates over 3200 non-repeated fixture UI, matching the 64-lane ADC/CDR block cadence while retaining the same unique waveform length.
+- Delta-code limiting is explicitly disabled with `MaxDeltaCode=Inf`.
+- The S-curve used by the loop is the unconditional mean weighted decision over all UI; conditional mean and valid density are diagnostics only.
+- A deterministic scan over Kp, Ki, polarity, and circular initial offsets selects the farthest initial phase meeting final-window mean-error, span, and drift criteria.
+- The earlier 32-UI/update baseline result is retained only as historical context and is not compared directly with the corrected 64-UI/update acquisition result.
+- The four-group weight search is a validation-layer experiment and does not change the hard-coded `cdr_pd.mmpdFast` transition weights. The closed-loop study remaps valid decision magnitudes externally while preserving the existing transition-dependent decision signs.
+- Search candidates use primitive integer group weights in `[0,4]`. The four group curves are converted to unit-event-weight unconditional contributions before applying candidate weights.
+- Stable and unstable zero crossings are classified from a 9-sample circular moving average. With polarity `+1`, negative-slope crossings are treated as stable; the static capture basin is the circular interval between the nearest unstable crossings around the target stable crossing.
+- Candidate scoring uses the fixed 3200-UI fixture and combines target-lock distance, static basin width, additional stable-zero count, and target-crossing slope. It is not yet cross-validated across independent fixtures, channels, noise, or PVT corners.
+- The selected experimental group weights are `[G1 G2 G3 G4]=[2 1 2 1]`. The smoothed static characteristic has a target stable crossing near phase 83.87 and one stable crossing over the UI. This static result is not interpreted as proven full-UI dynamic acquisition.
+- With the selected weights, the corrected 50-update, 64-UI/update scan tests every integer initial offset over one UI. The continuous validated acquisition interval is `[-14,+18]` samples around the 83.87-sample target, corresponding to requested initial phases 69.87 through 101.87 (approximately 70 through 102 after PI/sample quantization). An isolated convergent point at `+21` samples is reported separately and is not treated as part of the continuous acquisition interval.
 
 ## CDR top-level assumptions
 
@@ -124,6 +160,10 @@ This document is derived only from `src/ADC` and `src/CDR`. It records current c
 - The loop filter implements a behavioral proportional-integral controller. The current error updates the integral state before both proportional and integral terms form the current control output.
 - `Kp`, `Ki`, the integral state, and the code residue use floating-point arithmetic; RTL fixed-point widths, shifts, pipeline registers, and permanent overflow freeze are not modeled.
 - The loop-filter output unit is PI code per update. Only complete integer codes are passed to `cdr_pi`; fractional code is retained in `CodeResidue` for later updates.
+- `MaxDeltaCode` defaults to one, so the applied PI increment is limited to `-1/0/+1` per block. `Inf` explicitly disables this limit.
+- Output limiting is owned by `cdr_loop`, not `cdr_top`, so the loop state and the code actually applied to `cdr_pi` remain consistent. The pre-limit integer request is exposed as `LastRawDeltaCode`.
+- `CodeResidue` retains only the fractional remainder below one code. Complete integer demand not yet executed because of `MaxDeltaCode` is retained separately in `PendingCode` and is canceled naturally by later opposite-direction demand.
+- `PendingCode` is an explicit slew backlog and is not currently bounded independently. Persistent demand beyond the PI slew capability can therefore accumulate pending code; this behavior must be revisited when RTL anti-windup/backlog limits are defined.
 - Integral limits are configurable in code/block and default to `[-Inf, +Inf]`. At a finite limit, outward integration saturates while reverse error can return the state to range.
 - `cdr_loop` does not implement a frequency detector, FLL, acquisition state machine, PI code wrap, or UI-slip tracking.
 

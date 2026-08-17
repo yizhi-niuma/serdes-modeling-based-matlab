@@ -90,7 +90,9 @@ Digital bang-bang phase detector with:
 - Configurable output polarity, zero output for invalid transitions, compact input/result debug snapshots, and array-input support.
 - A shared vectorized `bbpdFast` decision kernel using numeric mode selection and `int8` phase decisions; validated `bbpd` delegates to it and adds only input checks plus debug-state capture.
 - Block-boundary overlap is owned by the future CDR top-level; `cdr_pd` remains stateless apart from its optional debug snapshot.
-- An `mmpd` interface placeholder that reports the algorithm as not implemented.
+- An experimental PAM4 `mmpd` path using every non-static transition without RTL odd/even filtering; symmetric `0<->3` and `1<->2` transitions have weight 2 and all asymmetric transitions have weight 1.
+- Validated `mmpd` and stateless `mmpdFast` paths with `int8` `-1/0/+1` decisions.
+- CTLE-waveform MMPD validation explicitly composes the PD, voter, loop filter, and PI while carrying symbol/error overlap because the current `cdr_top` public input remains BBPD-specific.
 
 Slicing and equalization are intentionally outside `cdr_pd`; the caller must provide hard digital symbol/edge decisions.
 
@@ -113,6 +115,7 @@ Mode-independent proportional-integral loop filter with:
 - One numeric voter error input and one integer PI code-increment output per update.
 - Floating-point proportional, integral, and fractional-code residue calculations.
 - Configurable integral-state saturation with reverse-error recovery.
+- Configurable output slew limit with a default maximum PI increment of one code per block.
 - Validated `update` and reduced-overhead scalar `updateFast` paths.
 
 The loop filter does not own voter-mode selection, PI code wrap, UI-slip tracking, RTL fixed-point encoding, or a separate frequency-acquisition path.

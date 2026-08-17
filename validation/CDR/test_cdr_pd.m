@@ -284,8 +284,41 @@ end
 
 function testMmpdFramework()
     pd = cdr_pd('pam4', 1);
-    assertThrowsId(@() pd.mmpd(3, 1, 0, 1), 'cdr_pd:MMPDNotImplemented', ...
-        'MMPD framework should report not implemented');
+    dataPrev = [3 0 3 0 2 1 2 1 0 3 0 2 1 3];
+    dataCurr = [0 3 0 3 1 2 1 2 1 2 2 1 3 0];
+    errorPrev = [1 0 0 1 1 0 0 1 0 1 0 1 1 0];
+    errorCurr = [1 0 0 1 1 0 0 1 0 1 0 1 1 1];
+    [decision, valid, output] = pd.mmpd( ...
+        dataPrev, errorPrev, dataCurr, errorCurr);
+
+    assertEqual(decision, int8([2 2 -2 -2 2 2 -2 -2 1 1 1 2 -1 0]), ...
+        'MMPD weighted-transition truth table mismatch');
+    assertEqual(valid, logical([1 1 1 1 1 1 1 1 1 1 1 1 1 0]), ...
+        'MMPD validity mismatch');
+    assertEqual(output.PdType, 'mmpd', 'MMPD output type mismatch');
+    assertEqual(output.ErrorBitPrev, errorPrev, 'MMPD previous error mismatch');
+    assertEqual(output.ErrorBitCurr, errorCurr, 'MMPD current error mismatch');
+    assertEqual(pd.LastOutput, output, 'MMPD LastOutput mismatch');
+
+    pdNegative = cdr_pd('pam4', -1);
+    [negativeDecision, negativeValid] = pdNegative.mmpd( ...
+        dataPrev, errorPrev, dataCurr, errorCurr);
+    assertEqual(negativeDecision, -decision, 'MMPD polarity mismatch');
+    assertEqual(negativeValid, valid, 'MMPD polarity changed validity');
+
+    stateBeforeFast = pd.getState();
+    [fastDecision, fastValid] = pd.mmpdFast( ...
+        dataPrev(:), errorPrev(:), dataCurr(:), errorCurr(:));
+    assertEqual(fastDecision, decision(:), 'MMPD fast column decision mismatch');
+    assertEqual(fastValid, valid(:), 'MMPD fast column validity mismatch');
+    assertEqual(pd.getState(), stateBeforeFast, 'MMPD fast path changed state');
+
+    assertThrowsId(@() cdr_pd('nrz', 1).mmpd(0, 0, 1, 0), ...
+        'cdr_pd:MMPDUnsupportedMode', 'NRZ MMPD should be rejected');
+    assertThrowsId(@() pd.mmpd([3 0], [1 0 1], [0 3], [1 0]), ...
+        'cdr_pd:SizeMismatch', 'MMPD size mismatch should throw');
+    assertThrowsId(@() pd.mmpd([3 0], [1 2], [0 3], [1 0]), ...
+        'cdr_pd:InvalidDigitalInput', 'invalid MMPD error bit should throw');
 end
 
 function waveformResult = testWaveformFunction(wavePng)

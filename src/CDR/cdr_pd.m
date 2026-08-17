@@ -92,14 +92,59 @@ classdef cdr_pd < handle
             phaseDecision(early) = polarity;
         end
 
-        function [phaseDecision, valid, output] = mmpd(~, dataPrev, errorPrev, dataCurr, errorCurr) %#ok<INUSD>
-            % mmpd  MMPD 数字接口框架，算法尚未实现。
+        function [phaseDecision, valid, output] = mmpd(obj, dataPrev, errorPrev, dataCurr, errorCurr)
+            % mmpd  PAM4 MMPD 核心二值判决。
+            %
+            % 所有非静态 PAM4 跳变均参与判决。对称的 0<->3、1<->2
+            % 跳变权重为 2，其余非对称跳变权重为 1。下降跳变时 error=11
+            % 为 early、00 为 late；上升跳变时符号相反。
+            if obj.ModeId ~= 1
+                error('cdr_pd:MMPDUnsupportedMode', ...
+                    'The reference MMPD behavior supports PAM4 mode only.');
+            end
+            obj.validateSameSizeFour(dataPrev, errorPrev, dataCurr, errorCurr);
+            obj.validateDigitalArray(dataPrev, 0, 3, 'dataPrev');
+            obj.validateDigitalArray(dataCurr, 0, 3, 'dataCurr');
+            obj.validateDigitalArray(errorPrev, 0, 1, 'errorPrev');
+            obj.validateDigitalArray(errorCurr, 0, 1, 'errorCurr');
 
-            phaseDecision = []; %#ok<NASGU>
-            valid = []; %#ok<NASGU>
-            output = struct(); %#ok<NASGU>
-            error('cdr_pd:MMPDNotImplemented', ...
-                'MMPD is not implemented yet. Use bbpd for the current model.');
+            [phaseDecision, valid] = obj.mmpdFast( ...
+                dataPrev, errorPrev, dataCurr, errorCurr);
+
+            output = struct();
+            output.PdType = 'mmpd';
+            output.Mode = obj.Mode;
+            output.Polarity = obj.Polarity;
+            output.DataSymbolPrev = dataPrev;
+            output.ErrorBitPrev = errorPrev;
+            output.DataSymbolCurr = dataCurr;
+            output.ErrorBitCurr = errorCurr;
+            output.Valid = valid;
+            output.PhaseDecision = phaseDecision;
+            obj.LastOutput = output;
+        end
+
+        function [phaseDecision, valid] = mmpdFast(obj, dataPrev, errorPrev, dataCurr, errorCurr)
+            % mmpdFast  无检查、无状态更新的 PAM4 MMPD block 热路径。
+            %
+            % 调用方必须保证 PAM4/误差码合法且四路输入尺寸一致。
+            sameError = errorPrev == errorCurr;
+            errorHigh = errorPrev ~= 0;
+
+            outerTransition = (dataPrev == 0 & dataCurr == 3) | (dataPrev == 3 & dataCurr == 0);
+            innerTransition = (dataPrev == 1 & dataCurr == 2) | (dataPrev == 2 & dataCurr == 1);
+            symmetricTransition = outerTransition | innerTransition;
+            dataTransition = dataPrev ~= dataCurr;
+            risingTransition = dataCurr > dataPrev;
+            valid = sameError & dataTransition;
+            early = valid & ((~risingTransition & errorHigh) | (risingTransition & ~errorHigh));
+
+            polarity = int8(obj.Polarity);
+            weight = ones(size(valid), 'int8');
+            weight(symmetricTransition) = int8(2);
+            phaseDecision = zeros(size(valid), 'int8');
+            phaseDecision(valid) = -polarity .* weight(valid);
+            phaseDecision(early) = polarity .* weight(early);
         end
 
         function setMode(obj, mode)
@@ -156,6 +201,17 @@ classdef cdr_pd < handle
             if ~isequal(size(dataPrev), size(edgeBit)) || ~isequal(size(dataPrev), size(dataCurr))
                 error('cdr_pd:SizeMismatch', ...
                     'dataPrev, edgeBit, and dataCurr must have the same size.');
+            end
+        end
+
+        function validateSameSizeFour(~, dataPrev, errorPrev, dataCurr, errorCurr)
+            % validateSameSizeFour  检查 MMPD 四路输入尺寸一致。
+            if ~isequal(size(dataPrev), size(errorPrev)) || ...
+                    ~isequal(size(dataPrev), size(dataCurr)) || ...
+                    ~isequal(size(dataPrev), size(errorCurr))
+                error('cdr_pd:SizeMismatch', ...
+                    ['dataPrev, errorPrev, dataCurr, and errorCurr ' ...
+                    'must have the same size.']);
             end
         end
 

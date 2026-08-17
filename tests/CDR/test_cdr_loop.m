@@ -14,13 +14,14 @@ testModeIndependentNumericInput();
 testFastPathEquivalence();
 testPiInterfaceCompatibility();
 testRuntimeConfigurationAndReset();
+testDeltaCodeLimit();
 testInvalidInputAndConfiguration();
 
-fprintf('test_cdr_loop passed 9 / 9 checks.\n');
+fprintf('test_cdr_loop passed 10 / 10 checks.\n');
 end
 
 function testPiUpdateOrder()
-loop = cdr_loop(0.2, 0.05);
+loop = cdr_loop(0.2, 0.05, -Inf, Inf, Inf);
 deltaCode = loop.update(10);
 state = loop.getState();
 
@@ -66,8 +67,8 @@ assert(loop.FrequencyState == -1);
 end
 
 function testModeIndependentNumericInput()
-loopLinear = cdr_loop(0.25, 0);
-loopConstant = cdr_loop(0.25, 0);
+loopLinear = cdr_loop(0.25, 0, -Inf, Inf, Inf);
+loopConstant = cdr_loop(0.25, 0, -Inf, Inf, Inf);
 
 assert(loopLinear.update(int16(12)) == 3);
 assert(loopConstant.update(int16(8)) == 2);
@@ -87,7 +88,7 @@ assert(isequal(loopDebug.getState(), loopFast.getState()));
 end
 
 function testPiInterfaceCompatibility()
-loop = cdr_loop(0.25, 0);
+loop = cdr_loop(0.25, 0, -Inf, Inf, Inf);
 piModel = cdr_pi(8, 128);
 
 deltaCode = loop.update(8);
@@ -110,8 +111,41 @@ assert(loop.FrequencyState == 0.5);
 loop.resetState();
 assert(loop.FrequencyState == 0);
 assert(loop.CodeResidue == 0);
+assert(loop.PendingCode == 0);
 assert(loop.LastControl == 0);
+assert(loop.LastRawDeltaCode == 0);
 assert(loop.LastDeltaCode == 0);
+end
+
+function testDeltaCodeLimit()
+loop = cdr_loop(0.25, 0);
+
+assert(loop.update(8) == 1);
+assert(loop.MaxDeltaCode == 1);
+assert(loop.LastRawDeltaCode == 2);
+assert(loop.LastDeltaCode == 1);
+assert(loop.CodeResidue == 0);
+assert(loop.PendingCode == 1);
+
+assert(loop.update(8) == 1);
+assert(loop.LastRawDeltaCode == 2);
+assert(loop.PendingCode == 2);
+
+% Reverse demand first cancels queued forward code, then applies the rest.
+assert(loop.update(-12) == -1);
+assert(loop.LastRawDeltaCode == -3);
+assert(loop.LastDeltaCode == -1);
+assert(loop.PendingCode == 0);
+
+loop.setMaxDeltaCode(2);
+assert(loop.update(12) == 2);
+assert(loop.LastRawDeltaCode == 3);
+assert(loop.LastDeltaCode == 2);
+assert(loop.PendingCode == 1);
+
+loop.setMaxDeltaCode(Inf);
+assert(loop.update(-12) == -2);
+assert(loop.PendingCode == 0);
 end
 
 function testInvalidInputAndConfiguration()
@@ -122,12 +156,18 @@ assertThrowsId(@() cdr_loop(0.1, 0.01, 1, -1), ...
     'cdr_loop:InvalidFrequencyLimits');
 assertThrowsId(@() cdr_loop(0.1, 0.01, Inf, Inf), ...
     'cdr_loop:InvalidFrequencyLimits');
+assertThrowsId(@() cdr_loop(0.1, 0.01, -Inf, Inf, 0), ...
+    'cdr_loop:InvalidMaxDeltaCode');
+assertThrowsId(@() cdr_loop(0.1, 0.01, -Inf, Inf, 1.5), ...
+    'cdr_loop:InvalidMaxDeltaCode');
 
 loop = cdr_loop(0.1, 0.01);
 assertThrowsId(@() loop.update([1 2]), 'cdr_loop:InvalidPhaseError');
 assertThrowsId(@() loop.update(NaN), 'cdr_loop:InvalidPhaseError');
 assertThrowsId(@() loop.setFrequencyLimits(NaN, 1), ...
     'cdr_loop:InvalidFrequencyLimits');
+assertThrowsId(@() loop.setMaxDeltaCode(-1), ...
+    'cdr_loop:InvalidMaxDeltaCode');
 end
 
 function assertThrowsId(testFcn, expectedId)

@@ -1,6 +1,6 @@
-test_cdr_pd started: 2026-08-14 12:35:43
-Test script: C:\Work\MatLab_Lib\validation\CDR\test_cdr_pd
-Result folder: C:\Work\MatLab_Lib\results\CDR
+test_cdr_pd started: 2026-08-16 18:40:17
+Test script: D:\Work\serdes_modeling\validation\CDR\test_cdr_pd
+Result folder: D:\Work\serdes_modeling\results\CDR
 
 [PASS] NRZ truth table
 [PASS] PAM4 symmetric edges
@@ -28,10 +28,25 @@ Summary:
   external slicer waveform : PASS
 
 Passed 10 / 10 tests.
-Text result : C:\Work\MatLab_Lib\results\CDR\test_cdr_pd_result.txt
-Waveform PNG: C:\Work\MatLab_Lib\results\CDR\test_cdr_pd_waveform.png
+Text result : D:\Work\serdes_modeling\results\CDR\test_cdr_pd_result.txt
+Waveform PNG: D:\Work\serdes_modeling\results\CDR\test_cdr_pd_waveform.png
 
 test_cdr_pd all tests passed.
 test_cdr_voter passed 7 / 7 checks.
-test_cdr_loop passed 9 / 9 checks.
+test_cdr_loop passed 10 / 10 checks.
 test_cdr_top passed 6 / 6 checks.
+CTLE CDR diagnostic: power edge = 20, BBPD lock = 15, final phase = 14.500, steady mean error = -0.344, range = 14.000 to 15.000, valid = 1032.
+test_cdr_top_ctle_waveform passed.
+PAM4 centers: [-0.22934 -0.074767 0.079045 0.22904] V.
+PAM4 thresholds: [-0.15205 0.0021394 0.15404] V.
+Reference data/edge phase: 84 / 20 samples.
+BBPD statistical lock phase: 15 samples.
+Steady-state phase range: 14.000 to 15.000 samples.
+Mean steady-state phase error: -0.344 samples.
+Selected transition count: 1032 of 4096 UI.
+Saved PNG: D:\Work\serdes_modeling\results\CDR\cdr_top_ctle_convergence.png
+MMPD CTLE diagnostic: reference data phase = 84, lock = 82, initial = 74, Kp = 0.5, Ki = 0.005, polarity = +1, mean error = -0.250, span = 0.500, valid = 1667.
+test_cdr_top_ctle_waveform_mmpd passed.
+Saved PNG: D:\Work\serdes_modeling\results\CDR\cdr_top_ctle_convergence_mmpd.png
+Weighted MMPD v1: power phase=84, lock=83, initial=99.0 (distance=16.0), Kp=0.5, Ki=0.0002, polarity=+1, mean=0.500, span=1.000, drift=0.000, valid=1187, cadence=32 UI/block.
+test_cdr_top_ctle_waveform_mmpd_v1 passed.

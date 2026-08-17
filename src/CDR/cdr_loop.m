@@ -18,21 +18,31 @@ classdef cdr_loop < handle
         % FrequencyMax  积分状态上限，单位为 code / block。
         FrequencyMax = Inf
 
+        % MaxDeltaCode  每次更新允许输出的最大 PI code 步长。
+        % 默认 1，对应硬件相邻 PI code 逐步旋转。
+        MaxDeltaCode = 1
+
         % FrequencyState  当前积分状态，单位为 code / block。
         FrequencyState = 0
 
         % CodeResidue  尚未形成完整整数 PI code 的累计余量。
         CodeResidue = 0
 
+        % PendingCode  已形成整数、但受 MaxDeltaCode 限制尚未执行的 code。
+        PendingCode = 0
+
         % LastControl  最近一次量化前的 PI 控制量，单位为 code / block。
         LastControl = 0
+
+        % LastRawDeltaCode  最近一次限幅前的整数 PI code 增量。
+        LastRawDeltaCode = 0
 
         % LastDeltaCode  最近一次输出的整数 PI code 增量。
         LastDeltaCode = 0
     end
 
     methods
-        function obj = cdr_loop(Kp, Ki, frequencyMin, frequencyMax)
+        function obj = cdr_loop(Kp, Ki, frequencyMin, frequencyMax, maxDeltaCode)
             % cdr_loop  构造 CDR 环路滤波器。
             %
             % Kp 和 Ki 必须显式配置，避免模型包含未经验证的默认环路增益。
@@ -48,9 +58,13 @@ classdef cdr_loop < handle
             if nargin < 4
                 frequencyMax = Inf;
             end
+            if nargin < 5
+                maxDeltaCode = 1;
+            end
 
             obj.setGains(Kp, Ki);
             obj.setFrequencyLimits(frequencyMin, frequencyMax);
+            obj.setMaxDeltaCode(maxDeltaCode);
         end
 
         function deltaCode = update(obj, phaseError)
@@ -69,11 +83,18 @@ classdef cdr_loop < handle
             frequencyState = min(max(obj.FrequencyState + obj.Ki * phaseError, obj.FrequencyMin), obj.FrequencyMax);
             control = obj.Kp * phaseError + frequencyState;
             residueAccum = obj.CodeResidue + control;
-            deltaCode = fix(residueAccum);
+            rawDeltaCode = fix(residueAccum);
+            pendingAccum = obj.PendingCode + rawDeltaCode;
+            deltaCode = min(max(pendingAccum, -obj.MaxDeltaCode), ...
+                obj.MaxDeltaCode);
 
             obj.FrequencyState = frequencyState;
-            obj.CodeResidue = residueAccum - deltaCode;
+            % CodeResidue 始终只保留不足一个 code 的小数部分；受 slew
+            % limit 限制而未执行的完整整数 code 由 PendingCode 单独保存。
+            obj.CodeResidue = residueAccum - rawDeltaCode;
+            obj.PendingCode = pendingAccum - deltaCode;
             obj.LastControl = control;
+            obj.LastRawDeltaCode = rawDeltaCode;
             obj.LastDeltaCode = deltaCode;
         end
 
@@ -104,12 +125,28 @@ classdef cdr_loop < handle
                 obj.FrequencyMin), obj.FrequencyMax);
         end
 
+        function setMaxDeltaCode(obj, maxDeltaCode)
+            % setMaxDeltaCode  配置每个 block 最大 PI code 输出步长。
+            isPositiveInteger = isnumeric(maxDeltaCode) && isreal(maxDeltaCode) && ...
+                isscalar(maxDeltaCode) && isfinite(maxDeltaCode) && ...
+                maxDeltaCode >= 1 && maxDeltaCode == round(maxDeltaCode);
+            isUnlimited = isnumeric(maxDeltaCode) && isreal(maxDeltaCode) && ...
+                isscalar(maxDeltaCode) && maxDeltaCode == Inf;
+            if ~(isPositiveInteger || isUnlimited)
+                error('cdr_loop:InvalidMaxDeltaCode', ...
+                    'maxDeltaCode must be a positive integer or Inf.');
+            end
+            obj.MaxDeltaCode = double(maxDeltaCode);
+        end
+
         function resetState(obj)
             % resetState  清零动态状态，不改变增益和积分限幅配置。
 
             obj.FrequencyState = min(max(0, obj.FrequencyMin), obj.FrequencyMax);
             obj.CodeResidue = 0;
+            obj.PendingCode = 0;
             obj.LastControl = 0;
+            obj.LastRawDeltaCode = 0;
             obj.LastDeltaCode = 0;
         end
 
@@ -121,9 +158,12 @@ classdef cdr_loop < handle
             state.Ki = obj.Ki;
             state.FrequencyMin = obj.FrequencyMin;
             state.FrequencyMax = obj.FrequencyMax;
+            state.MaxDeltaCode = obj.MaxDeltaCode;
             state.FrequencyState = obj.FrequencyState;
             state.CodeResidue = obj.CodeResidue;
+            state.PendingCode = obj.PendingCode;
             state.LastControl = obj.LastControl;
+            state.LastRawDeltaCode = obj.LastRawDeltaCode;
             state.LastDeltaCode = obj.LastDeltaCode;
         end
     end
