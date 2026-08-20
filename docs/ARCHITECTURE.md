@@ -4,6 +4,8 @@
 
 The current modeling scope documented here is limited to:
 
+- `src/TX+Channel`
+- `src/AFE`
 - `src/ADC`
 - `src/CDR`
 
@@ -12,7 +14,10 @@ The current modeling scope documented here is limited to:
 ## Current subsystem flow
 
 ```text
-Oversampled RX waveform
+Voltage symbols
+  -> ideal zero-order-hold TX waveform
+  -> differential S-parameter channel waveform
+  -> fixed CTLE waveform filtering
   -> sampling-phase/index generation (TI ADC clock and future CDR loop)
   -> TAH / TI ADC sampling
   -> SAR ADC conversion
@@ -29,9 +34,28 @@ CDR data-symbol decision + edge-bit decision
 
 The ADC and CDR components exist, but a closed-loop CDR-to-ADC top-level model has not yet been assembled in the current source.
 
-The CDR timing path will use a dedicated FFE rather than reusing the data-recovery
-FFE/DFE path. That CDR FFE and its downstream slicers remain upstream of the
-current digital CDR top level and are not yet implemented in the current source.
+The CDR timing path uses a dedicated FFE rather than reusing the data-recovery
+FFE/DFE path. The CDR FFE is implemented as a standalone upstream component;
+its slicers and connection to the current digital CDR top level remain external.
+
+## TX and channel module: `src/TX+Channel`
+
+- `tx_channel.m`: minimal batch symbol-source and S-parameter channel model.
+  - Accepts already-mapped finite real voltage symbols.
+  - Applies ideal zero-order hold at a configurable integer samples/UI value.
+  - Uses the configured four-port Touchstone file as a differential channel.
+  - Returns a complete channel waveform and matching time vector for direct CTLE input.
+  - Does not implement PRBS generation, symbol mapping, TX FFE, pre-emphasis, jitter, noise, or streaming state.
+
+## AFE module: `src/AFE`
+
+- `ctle.m`: minimal fixed one-zero, two-pole CTLE for MMPD debugging.
+  - Processes one complete oversampled waveform per call.
+  - Uses 0 dB DC gain and configurable gain at the symbol Nyquist frequency.
+  - Defaults to 56 GBd, 128 samples/UI, and 4.5 dB Nyquist peaking.
+  - Accepts samples/UI and derives sample rate from symbol rate internally.
+  - Directly exposes the continuous-time transfer function and uses `lsim` for waveform processing.
+  - Does not implement adaptation, AGC/VGA, or plotting.
 
 ## ADC modules
 
@@ -77,6 +101,27 @@ These implementations are retained for comparison. The TI ADC-local `sar_adc_cor
 This directory contains CTLE/TX/PRBS waveform inputs, eye-diagram and delay-analysis functions, SAR sampling analysis, and historical generated results. It is validation/study material rather than reusable ADC model code and should eventually move out of `src`.
 
 ## CDR modules: `src/CDR`
+
+### `cdr_ffe.m`
+
+Floating-point symbol-spaced FIR for the dedicated CDR path with:
+
+- Default six-tap configuration containing two precursor, one fixed unit main,
+  and three postcursor taps.
+- Configurable coefficient vector and precursor count.
+- One real sample stream per object; data and edge scheduling remains external.
+- Cross-block input history and explicit precursor-count output latency.
+- Validated and reduced-overhead block processing paths.
+
+### `cdr_ffe_lms.m`
+
+Standalone block LMS adaptation engine with:
+
+- Explicit step size, configurable tap count, main-tap index, block size, and
+  adaptation-enable mask.
+- Data-decision-error-driven coefficient updates normalized by block size.
+- A fixed main tap excluded from adaptation.
+- Coefficient deltas applied by the caller after a block, for use by the next block.
 
 ### `cdr_pd.m`
 

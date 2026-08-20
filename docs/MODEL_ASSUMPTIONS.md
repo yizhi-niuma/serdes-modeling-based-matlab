@@ -1,6 +1,6 @@
 # Model Assumptions
 
-This document is derived only from `src/ADC` and `src/CDR`. It records current code behavior, not verified silicon accuracy.
+This document is derived only from `src/TX+Channel`, `src/AFE`, `src/ADC`, and `src/CDR`. It records current code behavior, not verified silicon accuracy.
 
 ## Common numerical conventions
 
@@ -8,6 +8,55 @@ This document is derived only from `src/ADC` and `src/CDR`. It records current c
 - `SamplesPerSymbol`/oversampling converts phase in UI to waveform sample index.
 - Timing impairments are ultimately applied as integer sample-index changes in the TI ADC clock path; arbitrary sub-sample interpolation is not modeled there.
 - Fixed random seeds are used by validation scripts where repeatability is required.
+
+## Minimal TX and S-parameter channel assumptions
+
+- `src/TX+Channel/tx_channel.m` processes one complete symbol vector per call and retains no streaming state.
+- Input values are already-mapped real voltage symbols. The model does not define NRZ/PAM4 symbol coding or voltage normalization.
+- The TX is an ideal zero-order hold with no output bandwidth limit, finite rise/fall time, impedance variation, jitter, noise, or nonlinearity.
+- The defaults are 56 GBd and 128 samples/UI. The waveform sample interval is `1/(SymbolRate*SamplesPerSymbol)`.
+- `data/Channel/DPO_4in_Meg7_THRU.s4p` is interpreted as a differential four-port channel using port order `[1 2 3 4]` and 50-ohm source/load terminations.
+- Additional TX and RX termination capacitances are set to zero; package and termination parasitics are not modeled.
+- The S-parameter impulse response is generated for 1000 UI, scaled by the sample interval, and applied as a causal FIR response with `fftfilt`.
+- The returned waveform is truncated to the TX waveform length. Channel tail energy after the final input sample is not returned.
+
+## Fixed CTLE assumptions
+
+- `src/AFE/ctle.m` is a debug-oriented fixed CTLE, not a circuit-accurate or adaptive AFE model.
+- The default configuration assumes 56 GBd PAM4 and 128 samples/UI.
+- Sample rate is not a CTLE input; `process` derives it as `SymbolRate*SamplePerSymbol`.
+- The transfer function is `H(s)=k1*(s+wz)/((s+wp1)*(s+wp2))` with one zero and two real poles.
+- The fixed default frequencies are `fz=7 GHz`, `fp1=14.315815 GHz`, and `fp2=56 GHz`. They produce 4.5 dB gain at the 28 GHz symbol Nyquist frequency relative to DC.
+- DC gain defaults to 0 dB, with `k1` selected directly from the DC-gain requirement.
+- `process` uses the continuous-time model with Control System Toolbox `lsim` and zero initial state. Any startup transient must be excluded by the consuming debug simulation.
+- CTLE adaptation, AGC/VGA amplitude restoration, noise, saturation, and PVT variation are not modeled.
+
+### Channel and CTLE co-simulation assumptions
+
+- `validation/AFE/test_channel_ctle_cosim.m` uses a 2048-symbol PRBS20 preview for eye and impulse-response diagnostics. It discards the first 512 UI and uses the following 1024 UI for the maximum-power phase statistic and 512 non-overlapping 2-UI eye traces.
+- The current validation-specific CTLE is `fz=6 GHz`, `fp1=28 GHz`, `fp2=50 GHz`, and `0 dB` DC gain. It is a user-tuned debug setting, not an optimized product CTLE or a noise-aware SNR optimum.
+- A validation-local six-tap, symbol-spaced TX FFE is placed before `tx_channel`, with tap offsets `[-2,-1,0,+1,+2,+3] UI`. Its coefficients are solved offline from the Channel+CTLE symbol-pulse response over cursors `[-3,+6] UI`, then normalized so `sum(abs(taps))=1` and the main tap is positive. It does not change `tx_channel.m` and does not model coefficient quantization or adaptation.
+- Consecutive PRBS20 bits use natural PAM4 mapping `00/01/10/11 -> -3/-1/+1/+3`.
+- When configured with `prbs20PeriodBits=2^20-1`, the binary MAT cache contains one PRBS20 bit period. Because the period length is odd, the first bit is appended once to complete the last PAM4 pair, producing 524288 PAM4 symbols and 67108864 waveform samples at 128 samples/UI. Shorter debug exports retain their requested bit count in `prbs20BitCount` and set `isCompletePrbs20Period=false`.
+- Full-period channel processing uses causal FFT blocks with `numel(channelImpulse)-1` samples of input history. CTLE processing carries the continuous-time `lsim` state and the preceding input sample across blocks so its default linear intersample behavior is preserved.
+- The v7.3 MAT cache stores the unscaled TX-FFE+Channel+CTLE output waveform as a `1xN single` variable named `ctleOutput`. Time is reconstructed from the double-precision scalar `sampleInterval`; the cache also stores symbol rate, samples/UI, waveform dimensions, PAM4 levels, channel path, CTLE configuration, and TX FFE tap metadata.
+- The cached CTLE waveform is not rescaled to the current `[-0.3,+0.3] V` ADC range.
+- The channel impulse response is the sample-interval-scaled FIR kernel already used by `tx_channel`; applying the CTLE to that kernel preserves the scaling for the cascade response.
+- The TX-FFE-plus-channel-plus-CTLE unit impulse response is aligned to its maximum-absolute-value sample, divided by that signed main-cursor value, and plotted from three precursor UI through six postcursor UI. Integer-UI cursor samples are marked explicitly.
+- Because `tx_channel` applies a one-UI zero-order hold, symbol-spaced ISI is evaluated from the one-UI rectangular symbol-pulse response, obtained by convolving the final unit impulse response with `ones(SamplesPerSymbol,1)`. This pulse is aligned to the exact main index selected by the TX FFE optimizer, normalized to main cursor one, and plotted over `[-3,+6] UI`; the unit impulse plot is retained only as an analog-kernel diagnostic.
+- Eye diagrams discard the first 512 UI and contain 512 non-overlapping two-UI traces, covering 1024 UI total. No amplitude normalization is applied; the CTLE eye marks the two occurrences of the maximum-power phase in its 2-UI window.
+
+### Channel, CTLE, TI ADC, and CDR FFE pulse-response assumptions
+
+- `validation/AFE/test_channel_ctle_ti_adc_cdr_ffe.m` is an open-loop diagnostic and does not run online LMS adaptation or a CDR feedback loop.
+- The channel and CTLE pulse response is scaled so its absolute analog peak is `0.24 V`, leaving headroom inside the ideal 7-bit TI ADC range of `[-0.3,+0.3] V`.
+- The ideal 64-lane TI ADC samples once per UI at the absolute peak phase of the channel and CTLE response. Physical-lane outputs are reordered into chronological UI order before entering the DSP FFE.
+- The zero-input reconstructed ADC voltage is subtracted from the converted pulse response to remove the quantizer midscale baseline before normalization.
+- Because the ADC is quantized and may saturate for other amplitudes, the ADC-plus-FFE result is a specified-amplitude sampled pulse response rather than a unique LTI unit impulse response.
+- The six-tap CDR FFE main coefficient is fixed to one. The other five coefficients are solved offline from the ADC sampled pulse response.
+- The offline constrained least-squares objective minimizes output cursor energy from `-3` through `+8 UI`, excluding `pre1`, main, and `post1`, while enforcing normalized output targets `pre1=post1=+0.1` relative to main cursor one.
+- A small relative Tikhonov regularization of `1e-8` is applied to the variable-tap normal matrix. This stabilizes the solve but is not an RTL or LMS behavior.
+- The current optimized tap vector is approximately `[0.01028,-0.1499,1,0.06785,-0.06457,0.0006814]`. Its standalone unit impulse response is this tap vector at cursor offsets `[-2,-1,0,+1,+2,+3] UI`.
 
 ## SAR ADC assumptions
 
@@ -62,6 +111,10 @@ This document is derived only from `src/ADC` and `src/CDR`. It records current c
 ## Offline waveform-study assumptions
 
 - The CTLE waveform studies assume 112 Gb/s PAM4, hence 56 GBd and 128 samples/UI.
+- `validation/AFE/test_channel_s21_eye.m` uses PRBS20 polynomial `x^20+x^3+1` with an all-ones initial state and takes 16384 bits to form 8192 PAM4 symbols.
+- Consecutive PRBS bits are mapped without Gray coding to normalized PAM4 voltage levels `[-1,-1/3,+1/3,+1]`.
+- The channel plot converts single-ended four-port data with input pair `(1,3)` and output pair `(2,4)` to differential `Sdd21`.
+- The channel eye validation discards the first 1000 UI and overlays 2000 traces of 2 UI each. It does not add TX FFE, CTLE, DFE, noise, or jitter.
 - Eye diagrams span two UI.
 - Leading delay is estimated either from an amplitude threshold or normalized TX-to-CTLE cross-correlation.
 - The threshold method uses 3% of global peak amplitude and requires a run of valid samples.
@@ -118,6 +171,18 @@ This document is derived only from `src/ADC` and `src/CDR`. It records current c
 - One top-level call processes exactly one voter block. The phase entering that block is the sampling phase for that block.
 - The block's voter and loop-filter result updates the PI after the decisions are processed, so the updated local PI index applies to the following block.
 - `processBlockFast` assumes caller-validated digital vectors and intentionally does not update the top-level debug snapshot.
+
+## Dedicated CDR FFE assumptions
+
+- The CDR timing path uses its own FFE and does not share coefficients or dynamic state with the data-recovery FFE/DFE path.
+- `cdr_ffe` is a floating-point, one-sample-per-UI FIR. It models no coefficient quantization, multiplier width, truncation, saturation, or DFE.
+- The default coefficient vector is `[0, 0, 1, 0, 0, 0]`, with two precursor taps, one fixed unit main tap, and three postcursor taps. Tap count and precursor count are configurable.
+- A single `cdr_ffe` object processes one stream. If data and edge samples are both filtered, the top level owns separate stream state and coefficient synchronization.
+- Precursor filtering is implemented causally by delaying output by `PreTapCount` UI. The first `PreTapCount` outputs after reset are marked invalid; cross-block history avoids later boundary padding.
+- `cdr_ffe_lms` uses only data-sample decision error, defined by the caller as desired sliced level minus equalizer output. Edge samples do not contribute to adaptation.
+- The LMS update is `mu/BlockSize` times the block sum of error multiplied by the input regressor. The main tap is masked from adaptation.
+- The current block uses the existing coefficients; the caller applies the returned coefficient delta after the block so the update affects the following block.
+- LMS step size is intentionally required at construction because no channel-independent stable or optimal default has been established.
 
 ### Ideal-edge convergence validation assumptions
 
@@ -180,8 +245,35 @@ This document is derived only from `src/ADC` and `src/CDR`. It records current c
 
 ## Current validity limits
 
-- The digital CDR component chain is integrated at block rate, but no waveform/ADC closed loop has yet validated acquisition, tracking bandwidth, jitter transfer, jitter tolerance, or BER.
+- The digital CDR component chain and one validation-only Channel+CTLE+TI-ADC+fixed-FFE+MMPD loop are integrated at block rate. This validates deterministic initial-phase acquisition only; tracking bandwidth, jitter transfer, jitter tolerance, and BER remain unvalidated.
 - No sub-sample interpolation is implemented in the TI ADC sampling path.
 - No correlation target against transistor simulation, measurement, or a product specification is documented.
 - Multiple SAR implementations coexist and may use different state and boundary conventions.
 - Offline CTLE phase selection must not be treated as proof of CDR lock.
+
+### Fixed-FFE MMPD lock-range validation assumptions
+
+- `validation/AFE/test_channel_ctle_ti_adc_cdr_ffe_mmpd_lock.m` explicitly composes `cdr_pd.mmpdFast`, `cdr_voter`, `cdr_loop`, and `cdr_pi`; it does not change the BBPD-oriented `cdr_top` interface.
+- The timing FFE is open loop with fixed coefficients `[0.01028,-0.1499,1,0.06785,-0.06457,0.0006814]`, two precursor taps, and a fixed unit main tap. LMS is not active.
+- The waveform is deterministic PRBS20 natural-mapped PAM4 at 56 GBd and 128 samples/UI. Channel+CTLE output is scaled to a settled peak of `0.27 V` before the ideal 7-bit `[-0.3,+0.3] V` TI ADC.
+- The loop uses 64 UI per update, 80 updates per run, ideal PI phase mapping, integer waveform sampling, and group weights `[2,1,2,1]`.
+- The offline MMPD characteristic uses a 13-sample circular moving average only to select a negative-slope zero crossing. Dynamic lock is determined separately from the closed-loop scan.
+- One fixed loop configuration is selected from starts at `-3` and `+3` samples around the selected lock, then frozen for all 128 integer initial-phase cases.
+- A case passes when its final 20 blocks have absolute mean phase error no greater than 3 samples, phase span no greater than 8 samples, absolute mean drift no greater than 0.25 sample/block, and overall valid-transition density at least 5%.
+- The post-FFE maximum-eye diagnostic scans all 128 integer sample phases. At each phase it clusters the valid FFE outputs into four ordered voltage centers and defines eye opening as the minimum of the three adjacent center spacings.
+- The histogram assigns each valid FFE output to its nearest center, uses common voltage-bin edges for all four colored traces, and marks the four centers plus their three midpoint thresholds. This is an unlabeled voltage-cluster diagnostic, not a BER or symbol-conditioned eye measurement.
+
+### MMPD-v1 cached Channel+CTLE and fixed-segment S-curve assumptions
+
+- `validation/AFE/test_mmpd_v1/test_channel_ctle_cosim.m` models `PRBS20 PAM4 -> optional TX FFE -> S-parameter channel -> CTLE` only. Its TX FFE code is retained under `if false`, so the default cache has no TX equalization.
+- The complete cache contains 524288 natural-mapped PAM4 symbols at 56 GBd and 128 samples/UI. Its 67,108,864-sample CTLE waveform is stored as `single`; the Channel+CTLE impulse response and scalar metadata retain double precision.
+- Full waveform generation uses 8192-symbol streaming chunks. Channel input history, CTLE continuous-time state, and the preceding CTLE input sample are carried across chunk boundaries.
+- `mmpd_s_curve_own_data.m` reads CTLE UI `[512,16896)` once into memory. All phases use this same 16384-UI vector and differ only in integer sample offset.
+- The ADC is ideal except for 7-bit quantization and the `[-4,+4] V` range. Each phase has a fresh ADC/FFE state and processes 256 consecutive 64-UI blocks.
+- The CDR FFE uses offsets `[-3,+6] UI` with its coefficient at offset zero fixed to one. The other nine coefficients are solved offline from a quantized one-unit-amplitude Channel+CTLE symbol-pulse response.
+- The constrained solve forces normalized total-path `pre1=post1=0.1` relative to main one and minimizes the remaining output cursors over `[-3,+9] UI`. Relative Tikhonov regularization of `1e-8` is applied to the free-tap normal matrix.
+- Raw ADC codes are centered by subtracting code 64. CDR-FFE output values are floating-point centered codes; their histogram must not be interpreted as raw 7-bit integer codes.
+- The plotted total unit-UI response quantizes a one-unit-amplitude Channel+CTLE symbol pulse at phase 19 before applying the CDR FFE. Because the ADC is nonlinear, this response is amplitude-specific rather than a unique LTI impulse response.
+- PAM4 slicer centers are estimated from phase-19 equalized codes. A linear fit maps those centers to full PAM4 amplitudes `[-3,-1,+1,+3]`, and that mapping remains fixed across the scan.
+- The offline classic Mueller-Muller diagnostics use signed full-amplitude residuals in `tau[n]=d[n-1]*e[n]-d[n]*e[n-1]`, with `e[n]=y[n]-d[n]`. The unfiltered curve remakes `d` at every phase. A fixed-decision reference instead freezes the phase-19 decision sequence, while a symmetric-live curve retains only current-phase decisions satisfying `d[n]=-d[n-1]` (`-3<->+3` and `-1<->+1`). The comparison axis is centered on phase 19 over `[-0.5,+0.5) UI`; fixed decisions are shifted by one symbol when the raw ADC phase wraps across a UI boundary.
+- The CTLE eye diagnostic reads the exact first 1024 cached UI `[0,1024)`; unlike the S-curve analysis segment, it intentionally includes the beginning of the cached waveform.
