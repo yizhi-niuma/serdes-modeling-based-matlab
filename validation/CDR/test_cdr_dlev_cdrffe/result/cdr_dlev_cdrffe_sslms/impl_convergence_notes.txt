@@ -1,0 +1,122 @@
+================================================================================
+cdr_dlev_cdrffe_sslms.m  实现说明与收敛分析
+================================================================================
+生成日期: 2026-09-01
+对应结果: result/cdr_dlev_cdrffe_sslms/cdr_dlev_cdrffe_sslms_result.mat
+运行配置: FfeInitMode = planB(冷启动) , FfeTrainingBlocks = 1000(前 1000 block 数据辅助训练)
+          FfeStepSize = 1e-4 , FfeStepSizeSettle = 2e-5
+仿真规模: samplePerSymbol = 128 , numBlocks = 6000 , startPhaseList = 0:4:127 (32 个起始相位)
+          训练 1000 block + 判决引导自收敛 5000 block
+直方图观测相位: HistogramPhaseIndex -> startPhase = 20 -> 实际锁定相位码 = 16
+
+================================================================================
+一、整体结构
+================================================================================
+本脚本对 PAM4 SerDes 接收机做全相位闭环仿真，三个自适应环路共享同一个
+判决器(single slicer)产生的 (d, e):
+  d = 判决电平(符号) ; e = 判决误差(残差)
+三个环路同时更新:
+
+  1) CDR / MMPD 相位环 (Mueller-Muller Phase Detector)
+     - 逐 block 用 MM 相位误差驱动 PI 控制器(cdr_pd / cdr_pi / cdr_top)。
+     - 输出相位码 phaseCode，锁定后对应最佳采样点。
+     - 32 个起始相位并行跑，最后统计公共锁定相位 commonLockPhase。
+
+  2) dLev / 判决电平环 (符号级 SS-LMS)
+     - 对 PAM4 内外电平(DlevInner / DlevOuter)做符号级最小均方自适应。
+     - 采用 |x| - |DLev| 折叠更新: 在只读的 dlev_loop.m 中 sign(d).*e
+       在训练期等价于以 mean(|x|) 为定点的 |x|-|DLev|，避免训练期塌陷。
+
+  3) CDR FFE 系数环 (block-rate 目标脉冲 LMS)
+     - 6 抽头 FFE，block 速率更新，LMS 期望信号采用目标脉冲:
+         r_n = d_n + c*(d_{n-1} + d_{n+1})   , c = targetCursor ≈ 0.05
+       目标脉冲保留 pre1/post1 游标，使 MMPD 增益不被 FFE 拉平(不塌相位环)。
+     - planB 冷启动初值 = [0 0 1 0 0 0](主抽头=1)；planA 为离线最优+偏置。
+
+================================================================================
+二、数据流与关键步骤
+================================================================================
+  1. 读入 cache(CTLE/ADC 段)，校验 samplePerSymbol == 128。
+  2. 按 analysisStartUi / analysisNumUi 截取分析段，切分为 numBlocks 个 block。
+  3. 训练模式(前 ffeTrainingBlocks=1000 block): 数据辅助(golden-symbol)，
+     dlevDecision = sign(ffeOutput).*goldenMagnitude，为三环提供可靠参考。
+     ★ golden 取样必须扣除信道+CTLE 主光标群延迟(见第五节)。
+  4. 训练结束后转入判决引导(decision-directed)，继续自适应到 block 6000。
+  5. 每 block: FFE 滤波 -> 单判决器出 (d,e) -> 同时喂给相位环 / dLev 环 / FFE 环。
+  6. 在 HistogramPhaseIndex 相位上累积 ffeOutput:
+       - 训练结束后首个 2048 UI -> 第一排直方图(post-training)
+       - 稳态尾段 2048 样本      -> 第二排直方图(converged)
+  7. 收敛后用在线收敛的 ffeCoeffMean 计算 total-path 单位 UI 响应
+     (channel->CTLE->ADC->CDR FFE)，注意这不是离线 planA 响应。
+
+================================================================================
+三、收敛情况(本次 6000 block 运行, 观测相位 startPhase=20 -> 锁定码 16)
+================================================================================
+全相位结果: locked 32/32 , AllPhaseLock = 1 , commonLockPhase = 16 , spread = 1
+          DlevConsistent = 1 (innErr = -0.13 , outErr = -0.70) , FfeConsistent = 1
+
+判据: 以各序列末 200 block 均值为终值，取连续 50 block 落入容差带的首个 block。
+
+  ┌────────────┬───────────────┬────────────────────────────────────────────┐
+  │ 环路        │ 收敛起始 block │ 终值 / 说明                                   │
+  ├────────────┼───────────────┼─────────────────────────────────────────────┤
+  │ CDR 相位环  │ 环级几十 block │ 相位码终值 ≈ 16.9 ; commonLockPhase=16       │
+  │             │ 内即锁实       │ spread=1(±2 码含终值残余微漂的严判在 ~5507)   │
+  ├────────────┼───────────────┼────────────────────────────────────────────┤
+  │ dLev 内电平 │ ~ block 3331  │ DlevInner 终值 ≈ 12.12(容差 ±0.5)           │
+  │ dLev 外电平 │ ~ block 4415  │ DlevOuter 终值 ≈ 36.17(容差 ±0.8)           │
+  ├────────────┼───────────────┼────────────────────────────────────────────┤
+  │ CDR FFE 系数│ ~ block 5439  │ 全抽头进入 ±0.01 带并稳定 50 block           │
+  │             │ (全抽头齐入带) │ 终值 = [0.0776 -0.3007 1.0000 0.1838         │
+  │             │               │         0.0188 0.0260]                       │
+  └────────────┴───────────────┴──────────────────────────────────────────────┘
+
+  FFE 抽头轨迹(观测相位):
+    - block 1     (冷启动)   = [0      0      1  0       0       0     ]
+    - block 1000  (训练结束) = [0.3508 -0.6890 1  0.6474 -0.0037  0.0858]  <- 训练期过冲
+    - 末200均值   (收敛)     = [0.0776 -0.3007 1  0.1838  0.0188  0.0260]
+
+  收敛次序小结:
+    - CDR 相位环最快(环级几十 block 内锁实)，为其余两环提供稳定采样点。
+    - 训练期(1000 block)大步长把 FFE 迅速拉起但有过冲(pre1/post1 明显偏大)。
+    - 训练结束后转小步长(2e-5)判决引导，5000 block 内 FFE 由过冲缓慢回落到稳态，
+      dLev 内/外电平也随之在 block 3000~4500 段进入紧容差带。这正是本次把自收敛段
+      加长到 5000 block 想观察的"训练后长期弛豫"过程。
+    - FfeConstraintHeld 仍为 0: 稳态 pre1/post1 未精确回到归一化 0.05/0.05(pre1 偏负、
+      post1 偏大),属锁定后的精度指标,非三环收敛门槛;如需精确需再延长 DD 段或调 mu。
+
+================================================================================
+四、本次(2026-09-01)整体实现改动
+================================================================================
+  [根因修复] 训练 golden 与接收样本对齐
+    - 接收端全局 UI u 采到的样本携带的是发送符号 UI (u - channelMainCursorUi)
+      的主光标; 原代码假设零延迟, golden 整体错位 105 UI(实测相关性 0.9222),
+      三环拿到去相关随机标签故无法收敛。
+    - 新增 channelMainCursorUi(由符号脉冲峰值按 samplePulseAtPhase 口径计算=105),
+      golden 窗口改为 goldenFirst = analysisStartUi + firstUi - channelMainCursorUi + 1。
+
+  [默认模式] 脚本默认切换到 planB 冷启动训练
+    - FfeInitMode: planA -> planB(冷启动 [0 0 1 0 0 0])
+    - FfeTrainingBlocks: 0 -> 1000
+    - FfeStepSize: 1e-6 -> 1e-4 ; FfeStepSizeSettle: 2e-7 -> 2e-5
+      (planA 精修档 1e-6 对冷启动太小, 抽头几乎不动 -> 0/32 锁定)
+    - 回退纯决策导向: 传参 'FfeInitMode','planA','FfeTrainingBlocks',0,
+      'FfeStepSize',1e-6,'FfeStepSizeSettle',2e-7
+
+  [仿真规模] 加长观测
+    - analysisNumUi: 192512 -> 384512, numBlocks: 3000 -> 6000
+      (训练 1000 block + 判决引导自收敛 5000 block)
+
+  [绘图] 三处调整
+    - 取消 cdr_block_timing_error.png 的绘制(timingErrorTrace 仍存 result 备查),
+      旧 png 已删除。
+    - cdr_ffe_output_histogram.png 改为 2 行 tiledlayout:
+        第一排 = 训练结束后首个 2048 UI 的 CDR FFE 输出 code 直方图(橙)
+        第二排 = 收敛稳态尾段 2048 样本(蓝, 原图)
+      (非训练模式下第一排显示 N/A 占位)
+    - cdr_ffe_convergence.png 纵轴标签由 "tap N" 改为具体 pre/post 命名:
+        offset<0 -> preN tap , 0 -> main tap , >0 -> postN tap(附 offset)
+
+  验证: MATLAB R2025b 无参运行(即上面 6000/1000 配置) -> locked 32/32, AllPhaseLock=1,
+        block1 FFE = [0 0 1 0 0 0](确认冷启动), PostTrainSamples/HistogramSamples 各 2048。
+================================================================================
