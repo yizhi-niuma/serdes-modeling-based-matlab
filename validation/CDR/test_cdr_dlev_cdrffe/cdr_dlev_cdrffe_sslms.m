@@ -816,10 +816,18 @@ if saveOutputs
         histogram(ax1, postTrainSamples, 'BinMethod', 'integers', ...
             'FaceColor', [0.85 0.45 0.1], 'EdgeColor', 'none');
         hold(ax1, 'on');
-        xline(ax1, levelCenter(1), 'r--', 'LineWidth', 1.0);
-        xline(ax1, levelCenter(2), 'r--', 'LineWidth', 1.0);
-        xline(ax1, levelCenter(3), 'r--', 'LineWidth', 1.0);
-        xline(ax1, levelCenter(4), 'r--', 'LineWidth', 1.0);
+        hRefLine1 = xline(ax1, levelCenter(1), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
+        xline(ax1, levelCenter(2), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
+        xline(ax1, levelCenter(3), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
+        xline(ax1, levelCenter(4), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
+        % 收敛后真实 dlev(观测相位)电平中心,红虚线:
+        hConvLine1 = xline(ax1, -dlevOuterFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
+        xline(ax1, -dlevInnerFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
+        xline(ax1, dlevInnerFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
+        xline(ax1, dlevOuterFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
+        legend(ax1, [hRefLine1 hConvLine1], ...
+            {'offline-optimal reference level', 'online-converged dlev level'}, ...
+            'Location', 'best', 'AutoUpdate', 'off', 'FontSize', 8);
         hold(ax1, 'off');
         title(ax1, sprintf(['Post-training CDR FFE Output Histogram ' ...
             '(first %d UI = blocks %d-%d, after %d training blocks, phase code %d)'], ...
@@ -842,10 +850,18 @@ if saveOutputs
     histogram(ax2, histogramSamples, 'BinMethod', 'integers', ...
         'FaceColor', [0.2 0.4 0.8], 'EdgeColor', 'none');
     hold(ax2, 'on');
-    xline(ax2, levelCenter(1), 'r--', 'LineWidth', 1.0);
-    xline(ax2, levelCenter(2), 'r--', 'LineWidth', 1.0);
-    xline(ax2, levelCenter(3), 'r--', 'LineWidth', 1.0);
-    xline(ax2, levelCenter(4), 'r--', 'LineWidth', 1.0);
+    hRefLine2 = xline(ax2, levelCenter(1), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
+    xline(ax2, levelCenter(2), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
+    xline(ax2, levelCenter(3), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
+    xline(ax2, levelCenter(4), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
+    % 收敛后真实 dlev(观测相位)电平中心,红虚线:
+    hConvLine2 = xline(ax2, -dlevOuterFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
+    xline(ax2, -dlevInnerFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
+    xline(ax2, dlevInnerFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
+    xline(ax2, dlevOuterFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
+    legend(ax2, [hRefLine2 hConvLine2], ...
+        {'offline-optimal reference level', 'online-converged dlev level'}, ...
+        'Location', 'best', 'AutoUpdate', 'off', 'FontSize', 8);
     hold(ax2, 'off');
     grid(ax2, 'on');
     xlabel(ax2, 'Converged CDR FFE Output (code domain)');
