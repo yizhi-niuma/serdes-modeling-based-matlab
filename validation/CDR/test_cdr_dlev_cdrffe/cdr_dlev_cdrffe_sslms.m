@@ -176,7 +176,8 @@ displayMainRow = find(displayEvalOffset == 0, 1);
 % LMS 以“判决流 ⊛ g_target”为期望信号,把最优点搬到这个带非零对称游标的脉冲上,
 % 既给 MMPD 保活鉴相增益(斜率 ∝ 残余 pre1/post1),又让 h1=h-1=targetCursor 的
 % 锁定点落在 FFE 可行域内。仍保留 regressor 行索引,供收敛后核算归一化光标使用。
-ffeRegressorMatrix = cdrFfeDesign.Regressor;
+% 注:ffeRegressorMatrix 在环路跑完后按实际锁定相位重建(见 commonLockPhase 之后),
+% 此处不再用 referencePhase 版本预置(该赋值已成死赋值)。
 ffePre1Row = find(cdrFfeEvalOffset == -1, 1);
 ffeMainRow = find(cdrFfeEvalOffset == 0, 1);
 ffePost1Row = find(cdrFfeEvalOffset == 1, 1);
@@ -633,6 +634,22 @@ phaseSpread = max(lockedPhaseCode(lockedFlag)) - ...
 allPhaseLock = all(lockedFlag) && ...
     all(abs(lockedPhaseCode - commonLockPhase) <= 2);
 
+% 收敛后总通路响应/游标核算改用实际锁定相位(全相位锁定用 commonLockPhase,否则回退
+% referencePhase),在实际采样点上重建 ffeRegressorMatrix 与 displayRegressor。
+if allPhaseLock
+    evalPhase = commonLockPhase;
+else
+    evalPhase = referencePhase;
+end
+pathAdcParams = struct('LaneCount', adcLaneCount, 'SarPerTah', adcSarPerTah, ...
+    'ResolutionBits', adcResolutionBits, 'FullRange', adcFullRange);
+ffeRegressorMatrix = buildPathRegressor(channelCtleSymbolPulse, samplePerSymbol, ...
+    evalPhase, cdrFfeEvalOffset, cdrFfeTapOffset, pathAdcParams, ...
+    laneToTimeOrder, nominalBlockLength, adcZeroCode);
+displayRegressor = buildPathRegressor(channelCtleSymbolPulse, samplePerSymbol, ...
+    evalPhase, displayEvalOffset, cdrFfeTapOffset, pathAdcParams, ...
+    laneToTimeOrder, nominalBlockLength, adcZeroCode);
+
 % dlev 一致性。
 dlevInnerFinal = dlevInnerTrace(:, end).';
 dlevOuterFinal = dlevOuterTrace(:, end).';
@@ -902,7 +919,8 @@ if saveOutputs
     xlabel('Cursor Offset (UI, 0 = main)');
     ylabel('Normalized Total-Path Response (main = 1)');
     title(sprintf(['Total-Path Unit-UI Response (channel->CTLE->ADC->CDR FFE): ' ...
-        '3 pre + 1 main + 8 post, %s'], ffeInitMode));
+        '3 pre + 1 main + 8 post, %s, evaluated @ phase %d (S-curve ref %d)'], ...
+        ffeInitMode, evalPhase, referencePhase));
     exportgraphics(fig, totalPathResponseFigurePath, 'Resolution', 150);
     close(fig);
 end
@@ -968,6 +986,7 @@ result.LockedPhaseCode = lockedPhaseCode;
 result.LockedFlag = lockedFlag;
 result.FfeReleasePhaseCode = ffeReleasePhaseCodeTrace;
 result.CommonLockPhase = commonLockPhase;
+result.EvalPhase = evalPhase;
 result.PhaseSpread = phaseSpread;
 result.AllPhaseLock = allPhaseLock;
 result.DlevInnerFinal = dlevInnerFinal;
@@ -1037,6 +1056,8 @@ else
         'post1=%.4f. Retune FfeTargetCursor/ffe mu.\n'], ...
         ffeTargetCursor, ffePre1Final, ffePost1Final);
 end
+fprintf('pre1/post1 cursors evaluated @ lock phase %d (S-curve ref %d).\n', ...
+    evalPhase, referencePhase);
 fprintf(['dLev vs offline truth: inner ref=%.2f (err %+.2f), ' ...
     'outer ref=%.2f (err %+.2f) code.\n'], dlevInnerReference, ...
     dlevInnerTruthError, dlevOuterReference, dlevOuterTruthError);
@@ -1227,6 +1248,30 @@ sampleIndex = mainIndex + offset * samplePerSymbol;
 assert(sampleIndex(1) >= 1 && sampleIndex(end) <= numel(pulse), ...
     'Requested symbol-pulse cursor window exceeds available data.');
 sample = reshape(pulse(sampleIndex), 1, []);
+end
+
+function regressor = buildPathRegressor(symbolPulse, samplePerSymbol, ...
+    phase, evalOffset, tapOffset, adc, laneToTimeOrder, ...
+    nominalBlockLength, adcZeroCode)
+%BUILDPATHREGRESSOR 在任意采样相位重建 channel->CTLE->ADC 通路的 code 域 regressor。
+%   在相位 phase 采样信道符号脉冲、经 TI ADC 量化后,按 evalOffset(评估光标)与
+%   tapOffset(FFE 抽头)组装 [numel(evalOffset) x numel(tapOffset)] regressor,口径与
+%   顶部设计/显示窗口完全一致。收敛后用它在实际锁定相位上核算总通路单位 UI 响应。
+channelOffset = (evalOffset(1) - tapOffset(end)):(evalOffset(end) - tapOffset(1));
+analog = samplePulseAtPhase(symbolPulse, samplePerSymbol, phase, channelOffset);
+code = quantizeSamplesWithTiAdc(analog, adc.LaneCount, adc.SarPerTah, ...
+    adc.ResolutionBits, adc.FullRange, samplePerSymbol, laneToTimeOrder, ...
+    nominalBlockLength);
+centered = code - adcZeroCode;
+regressor = zeros(numel(evalOffset), numel(tapOffset));
+for row = 1:numel(evalOffset)
+    for col = 1:numel(tapOffset)
+        idx = find(channelOffset == evalOffset(row) - tapOffset(col), 1);
+        assert(~isempty(idx), ...
+            'buildPathRegressor: required channel cursor is unavailable.');
+        regressor(row, col) = centered(idx);
+    end
+end
 end
 
 function code = quantizeSamplesWithTiAdc(sample, adcLaneCount, ...
