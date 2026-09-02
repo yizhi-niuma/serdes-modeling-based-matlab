@@ -120,3 +120,45 @@ cdr_dlev_cdrffe_sslms.m  实现说明与收敛分析
   验证: MATLAB R2025b 无参运行(即上面 6000/1000 配置) -> locked 32/32, AllPhaseLock=1,
         block1 FFE = [0 0 1 0 0 0](确认冷启动), PostTrainSamples/HistogramSamples 各 2048。
 ================================================================================
+
+================================================================================
+五、2026-09-02 更新:收敛性质判定 + PRBS22 长样本 + 块数策略
+================================================================================
+本次回退到"训练期固定锚电平做 FFE 参考尺度"版本(见 commit 10ed321),并把训练
+块数由 1000 缩到 500(FfeInitMode=planB 冷启动 [0 0 1 0 0 0] 不变)。默认无参配置:
+    FfeInitMode=planB , FfeTrainingBlocks=500 , FfeStepSize=1e-4 , Settle=2e-5
+    默认缓存=PRBS20(analysisNumUi=512512 -> 8000 block)
+
+  [固定锚 vs live dlev 结论] 曾尝试把 FFE 参考改为全程跟随 live dlev(去掉训练期固定
+    锚)。8000-block 结果:AllPhaseLock 1->0、相位 spread 1->15、dlev/FFE 一致性丢失、
+    FFE 收敛到非对称脉冲(pre1=+0.19/post1=-0.15)。根因:训练闭眼期让 FFE 参考跟随
+    自估 dlev,构成 dlev<->FFE 互追尺度的退化耦合,且 mean|x| 相位相关,把 32 个相位
+    领进各自的非对称平衡点。固定锚提供"相位无关的稳定标尺",是训练期的合理正则化
+    (业界"朝编程目标电平适配 + 分档使能"惯例)。故保留固定锚,已回退 live dlev 改动。
+
+  [settle mu 扫描] FfeStepSizeSettle in {2e-5,5e-5,1e-4,2e-4}:mu 越大,残余漂移越大、
+    FFE 一致性越差(>=1e-4 时 FfeConsistent=0)、pre1/post1 越偏离目标。2e-5 是最佳
+    工作点。长尾不是"步长太小的收敛慢",而是时间常数很长的弛豫。
+
+  [收敛性质判定 - PRBS22 30000 block] 用 PRBS22 完整周期缓存长跑:
+    - 全部 32 相位 locked, AllPhaseLock=1, spread=1, DlevConsistent=1, FfeConsistent=1。
+    - |x - x_inf| 对 block 的对数线性拟合斜率全为负(phase/dlev/各 FFE 抽头),
+      时间常数 tau ~= 7500..9000 block => 指数收敛弛豫,非发散/偏置。
+    - 行程里程碑:训练结束(block 500)后立即启动弛豫;90% 行程约在 block 12000-13000
+      完成,99% 约在 block 26000。主收敛段 block 500~10000(最陡),之后为慢指数尾。
+    - 边界:30000 block 时相位仍有约 1 码/1000block 残余微漂(渐近,非逐比特静止);
+      要完全静止约需 5*tau ~= 35000..55000 block。这解释 8000 block "看着没收完"
+      (那时才走到约 60-70% 行程)。
+
+  [块数策略]
+    - 日常测试:10000 block(覆盖约 85-90% 行程,足够确认锁定 + 粗略稳态电平)。
+    - 最终验证:25000 block(覆盖约 99% 行程)。
+    - 二者都超过 PRBS20 上限(~8176 block),需用 PRBS22 缓存:
+        test_channel_ctle_cosim(22) 生成 result/channel_ctle_cosim_prbs22/(独立缓存,
+        保留 PRBS20),再以 'CosimDir','channel_ctle_cosim_prbs22','TxFile',
+        'tx_prbs22.mat','AnalysisNumUi',<blocks*64+512> 调用本脚本。
+      (PRBS30 完整周期约 275GB 存不下,故取 PRBS22 完整周期作可存的替代。)
+
+  [直方图] cdr_ffe_output_histogram.png 第二排为收敛稳态尾段 2048 UI(histogramTargetSamples
+    =2048)的 CDR FFE 输出 code 直方图,PAM4 四电平 -> 四个清晰聚类,佐证三环收敛。
+================================================================================

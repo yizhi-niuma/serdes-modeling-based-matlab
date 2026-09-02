@@ -48,9 +48,10 @@ repoRoot = fileparts(validationDir);
 addpath(fullfile(repoRoot, 'src', 'ADC', 'TI_ADC'));
 addpath(fullfile(repoRoot, 'src', 'CDR'));
 
-% CTLE 缓存与蓝本共用,仍在 test_cdr 下,按相对路径解析。
+options = parseLoopOptions(varargin{:});
+% CTLE 缓存:默认 PRBS20 完整周期(CosimDir='channel_ctle_cosim'),可切到独立缓存(如 PRBS22)。
 cachePath = fullfile(cdrValidationDir, 'test_cdr', 'result', ...
-    'channel_ctle_cosim', 'channel_ctle.mat');
+    options.CosimDir, 'channel_ctle.mat');
 assert(isfile(cachePath), ...
     'Run test_channel_ctle_cosim first to generate channel_ctle.mat.');
 cacheFile = matfile(cachePath);
@@ -58,15 +59,15 @@ samplePerSymbol = double(cacheFile.samplePerSymbol);
 numCachedSymbols = double(cacheFile.numSymbols);
 assert(samplePerSymbol == 128, ...
     'The cached CTLE waveform must use 128 samples/UI.');
-assert(logical(cacheFile.isCompletePrbs20Period), ...
+assert(logical(getCachePeriodFlag(cacheFile)), ...
     'The cached CTLE waveform is not a complete PRBS20 period.');
 
 analysisStartUi = 512;
 % 分析段长度决定处理块总数 numBlocks = floor((analysisNumUi-64-192-256)/64)。
-% 取 384512 UI 得到正好 6000 个块:配 FfeTrainingBlocks=1000,训练后仍有 5000 个块
-% 用于判决引导自收敛长观察。384512 为 64 整数倍,且 512+384512 远在缓存 524288
+% 取 512512 UI 得到正好 8000 个块:配 FfeTrainingBlocks=500,训练后仍有 7500 个块
+% 用于判决引导自收敛长观察。512512 为 64 整数倍,且 512+512512=513024 在缓存 524288
 % 符号范围内。
-analysisNumUi = 384512;
+analysisNumUi = options.AnalysisNumUi;  % 默认 512512 (8000 blocks); PRBS22 可加大
 adcBlockUi = 64;
 assert(mod(analysisNumUi, adcBlockUi) == 0, ...
     'The fixed analysis segment must contain complete 64-UI blocks.');
@@ -86,7 +87,7 @@ assert(numel(ctleSegment) == analysisNumUi * samplePerSymbol, ...
 % 同源同长(完整 PRBS20 周期),pam4Symbols(k) 对应全局 UI k-1(即 ctleOutput 第
 % (k-1)*samplePerSymbol+1 个样本起的那个 UI),电平为 {-3,-1,+1,+3}。
 txCachePath = fullfile(cdrValidationDir, 'test_cdr', 'result', ...
-    'channel_ctle_cosim', 'tx_prbs20.mat');
+    options.CosimDir, options.TxFile);
 assert(isfile(txCachePath), ...
     'Run test_channel_ctle_cosim first to generate tx_prbs20.mat.');
 txCacheFile = matfile(txCachePath);
@@ -1066,11 +1067,16 @@ defaults.FfeTargetCursor = 0.05;
 defaults.FfeTargetSkew = 0;
 defaults.FfeSettleDelay = 250;
 defaults.FfeReleaseMode = 'staged';
-% 训练模式块数 N:默认 1000 开启数据辅助冷启动(需配 FfeInitMode='planB')。配
-% numBlocks=6000,训练结束后仍有 5000 个块做判决引导自收敛长观察。设为 0 可关闭训练、
+% 训练模式块数 N:默认 500 开启数据辅助冷启动(需配 FfeInitMode='planB')。~200 块已够张眼,配
+% numBlocks=8000,训练结束后仍有 7500 个块做判决引导自收敛长观察。设为 0 可关闭训练、
 % 退回纯决策导向(此时应同时把 FfeInitMode 改回 'planA')。
-defaults.FfeTrainingBlocks = 1000;
+defaults.FfeTrainingBlocks = 500;
 defaults.SaveOutputs = true;
+% CTLE 缓存选择:默认 PRBS20 完整周期。切 PRBS22 长周期时传
+% 'CosimDir','channel_ctle_cosim_prbs22','TxFile','tx_prbs22.mat' 并加大 'AnalysisNumUi'。
+defaults.CosimDir = 'channel_ctle_cosim';
+defaults.TxFile = 'tx_prbs20.mat';
+defaults.AnalysisNumUi = 512512;
 
 options = defaults;
 if isempty(varargin)
@@ -1088,6 +1094,17 @@ assert(mod(numel(varargin), 2) == 0, ...
     'Loop options must be name/value pairs.');
 for index = 1:2:numel(varargin)
     options.(varargin{index}) = varargin{index + 1};
+end
+end
+
+function flag = getCachePeriodFlag(cacheFile)
+%GETCACHEPERIODFLAG 兼容两种缓存:新缓存有通用字段 isCompletePrbsPeriod;
+%   旧 PRBS20 缓存只有 isCompletePrbs20Period。二者皆表示整周期波形。
+names = who(cacheFile);
+if ismember('isCompletePrbsPeriod', names)
+    flag = cacheFile.isCompletePrbsPeriod;
+else
+    flag = cacheFile.isCompletePrbs20Period;
 end
 end
 
