@@ -1,6 +1,6 @@
 # Current State
 
-Updated: 2026-08-20
+Updated: 2026-09-03
 
 ## Current modeling scope
 
@@ -34,8 +34,8 @@ Updated: 2026-08-20
 
 ## Implemented CDR capabilities
 
-- Dedicated floating-point 1-UI CDR FFE with default six-tap, two-precursor configuration, fixed unit main tap, configurable tap layout, cross-block history, and fast block processing.
-- Separate block LMS engine using data-decision error, block-length normalization, configurable adaptation mask, and next-block coefficient updates.
+- Dedicated floating-point 1-UI `cdr_ffe` with a default six-tap, two-precursor configuration, fixed unit main tap, configurable tap layout, and validated/fast processing paths. It accepts caller-assembled `[postcursor history, target block, precursor look-ahead]` windows and leaves cross-block buffering and stream-boundary validity to the caller.
+- Separate `cdr_ffe_loop` block LMS engine using data-decision error, block-length normalization, configurable adaptation mask, and next-block coefficient updates. Its validated path performs input normalization and diagnostic capture, while its caller-validated fast path returns the coefficient delta and optional raw gradient without updating diagnostic state. The engine now also supports Sign-Sign LMS via `updateSsLms` / `updateSsLmsFast`, which replace the gradient `e*X/N` with `sign(e)*sign(X)/N`.
 - Pure digital NRZ/PAM4 bang-bang phase detector with polarity, transition qualification, compact input/result debug state, and array input.
 - PAM4 BBPD transition selection aligned to the reference RTL's symmetric `00<->11` and `01<->10` edges.
 - Vectorized `int8` BBPD decision kernel with numeric mode selection; the validated path reuses the same kernel and adds only input validation plus debug-state updates, with strict value/type equivalence covered by tests.
@@ -50,6 +50,7 @@ Updated: 2026-08-20
 - `test_cdr_top_ctle_waveform.m` now contains detailed UTF-8 Chinese comments covering the validation boundary, offline phase/threshold calibration, BBPD statistical lock reference, constant-voter and PI-loop configuration, current/next-block timing, error-signal units, acceptance checks, and helper-function behavior; executable behavior is unchanged.
 - `validation/CDR/test_ti_adc_cdr_joint_ctle.m` now closes the CTLE waveform through the 64-lane 7-bit TI ADC, code-domain PAM4 data/error decisions, MMPD, voter, loop filter, and PI. The script explicitly reorders physical TI lanes into time order before the DSP.
 - `validation/AFE/test_channel_ctle_ti_adc_cdr_ffe_mmpd_lock.m` closes the generated Channel+CTLE waveform through the 7-bit TI ADC, the fixed six-tap CDR FFE, PAM4 MMPD, voter, loop filter, and PI, then scans all 128 integer initial phases with one frozen loop configuration.
+- `validation/CDR/test_cdr_dlev_cdrffe/cdr_dlev_cdrffe_sslms.m` runs the three simultaneous loops (MMPD timing, dlev level tracking, adaptive CDR-FFE) over cached Channel+CTLE data with an optional training sequence. The training golden window now compensates the 105-UI Channel+CTLE main-cursor delay (`goldenFirst = analysisStartUi + firstUi - channelMainCursorUi + 1`); without this compensation the golden labels were 105 symbols out of phase and none of the three loops could lock.
 
 ## Not yet implemented or integrated
 
@@ -63,6 +64,7 @@ Updated: 2026-08-20
 - Open-loop Channel+CTLE+TI-ADC+CDR-FFE pulse-response validation passes with a 7-bit `[-0.3,+0.3] V` ADC and automatically optimized fixed FFE taps. The output satisfies `pre1=post1=+0.1`; other fitted cursors have approximately `0.01971` RMS and `0.03813` maximum residual. The aligned cascade response and standalone FFE tap response are saved under `results/AFE/channel_ctle_ti_adc_cdr_ffe`.
 - Closed-loop Channel+CTLE+TI-ADC+fixed-CDR-FFE MMPD validation passes with fixed taps `[0.01028,-0.1499,1,0.06785,-0.06457,0.0006814]`. The frozen loop uses `Kp=0.256`, `Ki=0.002`, polarity `+1`, and has a continuous validated initial-phase interval of `[-3,+16]` samples around the selected MMPD lock, width 19 samples or 0.1484 UI. Results are saved under `results/AFE/channel_ctle_adc_ffe_mmpd_lock`.
 - The same validation now scans the post-FFE four-level voltage separation over all 128 phases. The maximum minimum-adjacent-center spacing is `0.110601 V` at phase 74; the colored voltage histogram and midpoint thresholds are saved as `cdr_ffe_voltage_histogram.png` in the same result directory.
+- Three-loop `cdr_dlev_cdrffe_sslms.m` (training mode, planB cold start) locks all 32 scanned start phases (`AllPhaseLock=1`) after the 105-UI golden-alignment fix, provided the FFE step size is usable. Verified in MATLAB R2025b: `FfeStepSize=1e-4`, `FfeTrainingBlocks=400` gives 32/32 lock with phase-code spread 0 and small dlev truth error; the previous default `FfeStepSize=1e-6` with 150 training blocks locked 0/32. As of 2026-09-01 these training settings are the script defaults (`FfeInitMode='planB'`, `FfeTrainingBlocks=400`, `FfeStepSize=1e-4`, `FfeStepSizeSettle=2e-5`), so a no-argument run performs cold-start training from FFE `[0 0 1 0 0 0]` and draws both the post-training and converged output histograms. The strict `pre1=post1=0.05` FFE constraint is a post-lock precision metric and is not yet met within the default run length.
 - AFE TX-FFE+Channel+CTLE co-simulation uses a 2048-symbol tuning preview, discards 512 UI, and uses 1024 UI for phase diagnostics. Its offline six-tap TX FFE is `[0.0214425,-0.144777,0.671335,-0.0844467,0.0698928,-0.00810601]` for offsets `[-2,-1,0,+1,+2,+3] UI`, with unit L1 norm and positive main. The optimized one-UI symbol-pulse cursors over `[-3,+6] UI` are `[0.009566,-0.002478,0.000473,1,-0.000254,0.001385,0.000376,0.012037,0.018716,-0.008559]`. The best label-conditioned eye phase is 118/128 with separation 10.3661; the maximum-power phase is 20/128 with separation 1.6543. Plots and the opt-in float32 final-output MAT cache are under `results/AFE/channel_ctle_cosim`.
 - AFE channel validation plots the differential `Sdd21` of `DPO_4in_Meg7_THRU.s4p` and a 2-UI channel-output eye using PRBS20 PAM4 at 56 GBd and 128 samples/UI. The 28 GHz Nyquist point is marked with a measured differential insertion loss of approximately 14.09 dB; both plots are saved under `results/AFE`.
 - AFE CTLE frequency-response validation confirms 0 dB DC gain and 4.5 dB gain at the 28 GHz Nyquist frequency for 56 GBd and 128 samples/UI; the diagnostic plot is saved under `results/AFE`.
@@ -73,6 +75,9 @@ Updated: 2026-08-20
 - CDR voter automated regression passed 7/7 checks covering defaults, linear/constant decisions, ties, row/column input, single-block fast-path equivalence, mode updates, invalid input, and invalid configuration.
 - CDR loop-filter automated regression passed 10/10 checks covering PI update order, positive/negative residual quantization, integral saturation and recovery, voter-mode-independent numeric input, scalar fast-path equivalence, PI interface compatibility, default/configurable delta-code limiting, runtime configuration/reset, and invalid inputs.
 - CDR top-level automated regression passed 6/6 checks covering component scheduling, next-block PI update timing, cross-block symbol overlap, row/column handling, coordinated reset, fast-path equivalence, and invalid inputs/configuration.
+- Window-based `cdr_ffe` regression passed 7/7 checks covering default and configured FIR mapping, regressor construction, the fixed row-vector contract, validated/fast equivalence, coefficient update/reset, invalid windows, and invalid configuration.
+- CDR FFE LMS regression passed 8/8 checks covering update sign and block normalization, validated row/column error handling, validated/fast delta equivalence, optional fast-path gradient output, single-output compatibility, fast-path state isolation, adaptation masking, step-size/reset behavior, invalid input/configuration rejection, and minimal `cdr_ffe` integration.
+- Fixed-phase Channel+CTLE/TI-ADC/CDR-FFE adaptation validation passed over 16384 UI. Supervised-only selection chose `mu=0.01` using the primary 8192-supervised/8192-DD split, so fallback was not used; automatic alignment found 105 UI with 0.922208 correlation, and the DD half achieved zero SER, 0.03436 truth MSE, and 1.89755 minimum adjacent known-label level opening.
 - Seeded-free deterministic ideal-edge validation demonstrated `cdr_top` phase search on a 128-samples/UI NRZ waveform, converging from 0 to a true edge at sample 24 and remaining in a 23/24-sample limit cycle.
 - Independent 128-samples/UI PAM4 convergence cases validated both supported symmetric transition families, outer `0<->3` and inner `1<->2`; both converged to the same 23/24-sample limit cycle around the edge at sample 24.
 - CTLE-waveform PAM4 validation now reads the 5000-UI fixture from `data/ADC/TI_ADC/ctle_out.csv`, calibrates slicer thresholds, measures the BBPD S-curve, and closes `cdr_top` over 4096 UI. With `Kp=0.0625` and `Ki=0.0005`, the PI converged from sample 0 to a 14-15 sample steady-state range around the measured BBPD lock phase at sample 15.
@@ -85,8 +90,11 @@ Updated: 2026-08-20
 - CDR PI code/phase/index/wrap behavior has been exercised visually.
 - `tests/CDR` now contains the first automated CDR component regression; broader ADC/CDR regression coverage is still incomplete.
 - The MMPD-v1 validation is split at the CTLE output. `test_channel_ctle_cosim.m` runs one complete PRBS20 period with TX FFE preserved under `if false` and stores 524288 PAM4 symbols plus 67,108,864 `single` CTLE samples in `channel_ctle.mat`. `mmpd_s_curve_own_data.m` loads a single fixed 16384-UI segment `[512,16896)` and reuses that exact segment for all 128 ADC phases before CDR FFE processing.
+- `validation/CDR/test_cdr/test_channel_ctle_cosim.m` also saves the generated TX `pam4Symbols` alone in `result/channel_ctle_cosim/tx_prbs20.mat` for downstream transmitted-symbol reference.
 - The cached-data S-curve uses the classic Mueller-Muller equation with full PAM4 decision amplitudes and signed residual amplitudes. MATLAB R2025b execution passed with a 7-bit `[-4,+4] V` ADC and phase-19 CDR-FFE design reference. The phase-19-centered comparison now overlays fixed-decision reference, unfiltered live, and symmetric-transition live curves over 16384 UI per phase. Their center-region negative-slope crossings are respectively `+0.02562`, `+0.02897`, and `+0.02633 UI`. The first 1024 cached CTLE UI are also plotted as an eye diagram.
 - The `mmpd_s_curve_own_data_0.05.m` comparison passed in MATLAB R2025b with the same phase-19 design point and fixed 8192-UI segment. Its constrained total response achieved `pre1/main/post1=0.05/1/0.05`; the remaining cursor RMS is approximately `0.002959`, the maximum residual is approximately `0.008366`, and outputs are isolated under `validation/AFE/test_mmpd_v1/result/mmpd_s_curve_own_data_0.05`.
+
+- Three-loop `cdr_dlev_cdrffe_sslms_v3.m` (SS-LMS FFE variant) replaces the FFE's standard MMSE LMS with Sign-Sign LMS via `cdr_ffe_loop.updateSsLms`. The SS-LMS gradient `sign(e)*sign(X)/N` is hardware-friendly (comparator-only) but requires ~200× larger step sizes to compensate for gradient magnitude compression. With `FfeStepSize=0.02`, `FfeStepSizeSettle=0.001`, and `FfeTrainingBlocks=500`, all 32 start phases lock (`AllPhaseLock=1`, `PhaseSpread=1`), FFE coefficient spread is 0.0033 (well under 0.01 tolerance), and dLev truth errors are -0.07 (inner) / -0.16 (outer) code. The normalized `post1=-0.028` is slightly larger than MMSE LMS due to the sign-sign approximation's inherent steady-state bias; this is expected SS-LMS behavior.
 
 ## Known issues and technical debt
 
@@ -100,7 +108,7 @@ Updated: 2026-08-20
 
 ## Current blockers
 
-- The fixed-FFE ADC/CDR loop is validated deterministically, but correlation-quality timing recovery remains blocked on adaptive FFE integration and jitter/noise/corner validation.
+- The fixed-FFE ADC/CDR loop is validated deterministically. A script-level adaptive three-loop (`cdr_dlev_cdrffe_sslms.m`) now locks all start phases in training mode after the golden-alignment fix, but correlation-quality timing recovery still requires exposing this through a reusable top and adding jitter/noise/corner validation; the strict FFE cursor-symmetry constraint is not yet met within default run length.
 - Canonical SAR behavior and boundary conventions must be selected before consolidating duplicate models.
 - Required correlation targets and accuracy tolerances are not yet defined.
 

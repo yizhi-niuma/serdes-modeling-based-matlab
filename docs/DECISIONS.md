@@ -202,6 +202,14 @@ The following values appear in current ADC waveform studies but are not yet perm
 - 2026-09-01 follow-up: the script defaults were switched to the training baseline (`FfeInitMode='planB'`, `FfeTrainingBlocks=400`, `FfeStepSize=1e-4`, `FfeStepSizeSettle=2e-5`) so a no-argument run does cold-start data-aided training from FFE `[0 0 1 0 0 0]`. Decision-directed planA behaviour is still available by passing `'FfeInitMode','planA','FfeTrainingBlocks',0,'FfeStepSize',1e-6,'FfeStepSizeSettle',2e-7`.
 - Locked phase code still varies with `(mu, trainingBlocks)` and the strict `FfeConstraintHeld` (normalized `pre1=post1=0.05`) is a post-lock precision metric, not a convergence gate; achieving it exactly requires longer training and is tracked separately from three-loop lock.
 
+## 2026-09-03: SS-LMS for CDR FFE adaptation (v3)
+
+- `cdr_ffe_loop` gains `updateSsLms` and `updateSsLmsFast` methods. The gradient is `sign(errorVector) * sign(dataRegressor) / BlockSize`, replacing the standard LMS product `errorVector * dataRegressor / BlockSize`. The adaptation-mask and step-size semantics are identical.
+- SS-LMS discards error and regressor amplitude information, using only their signs. This makes the gradient magnitude bounded by 1 regardless of signal swing, which is hardware-friendly (only comparators needed) but requires ~200× larger step sizes to achieve comparable convergence speed.
+- The v3 validation script `cdr_dlev_cdrffe_sslms_v3.m` uses `FfeStepSize=0.02` (capture) and `FfeStepSizeSettle=0.001` (settle), compared to v2's `1e-4` / `2e-5`. Phase and dLev loop parameters are unchanged.
+- SS-LMS has slightly larger steady-state misadjustment than MMSE LMS. The normalized `post1` converges to approximately `-0.028` rather than the `< 0.02` achieved by MMSE LMS. This is an inherent property of the sign-sign approximation, not a tuning deficiency.
+- The standard MMSE LMS path (`update` / `updateFast`) is unchanged. Both methods coexist in `cdr_ffe_loop` and callers select by method name.
+
 ## 2026-09-02: Three-loop convergence is a slow relaxation; PRBS22 long-run + block-count policy
 
 - Verified the triple loop (MMPD phase + dlev + CDR-FFE) is a genuinely

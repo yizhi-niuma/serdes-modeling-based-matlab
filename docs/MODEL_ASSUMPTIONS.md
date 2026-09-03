@@ -177,12 +177,32 @@ This document is derived only from `src/TX+Channel`, `src/AFE`, `src/ADC`, and `
 - The CDR timing path uses its own FFE and does not share coefficients or dynamic state with the data-recovery FFE/DFE path.
 - `cdr_ffe` is a floating-point, one-sample-per-UI FIR. It models no coefficient quantization, multiplier width, truncation, saturation, or DFE.
 - The default coefficient vector is `[0, 0, 1, 0, 0, 0]`, with two precursor taps, one fixed unit main tap, and three postcursor taps. Tap count and precursor count are configurable.
-- A single `cdr_ffe` object processes one stream. If data and edge samples are both filtered, the top level owns separate stream state and coefficient synchronization.
-- Precursor filtering is implemented causally by delaying output by `PreTapCount` UI. The first `PreTapCount` outputs after reset are marked invalid; cross-block history avoids later boundary padding.
-- `cdr_ffe_lms` uses only data-sample decision error, defined by the caller as desired sliced level minus equalizer output. Edge samples do not contribute to adaptation.
+- `cdr_ffe` receives a complete chronological window containing `PostTapCount` past samples, the target block, and `PreTapCount` future samples.
+- The class does not retain sample history or mark output validity. The caller owns cross-block window assembly, look-ahead scheduling, and stream-boundary validity.
+- The returned output contains only the target block and has length `numel(inputWindow) - PostTapCount - PreTapCount`.
+- `cdr_ffe_loop` uses only data-sample decision error, defined by the caller as desired sliced level minus equalizer output. Edge samples do not contribute to adaptation.
 - The LMS update is `mu/BlockSize` times the block sum of error multiplied by the input regressor. The main tap is masked from adaptation.
 - The current block uses the existing coefficients; the caller applies the returned coefficient delta after the block so the update affects the following block.
 - LMS step size is intentionally required at construction because no channel-independent stable or optimal default has been established.
+- The validated LMS `update` path accepts row or column error vectors, converts inputs to `double`, and records the latest gradient, applied delta, and update count. `updateFast` assumes a caller-validated `double` `BlockSize`-by-`TapCount` regressor and `1`-by-`BlockSize` error vector, returns the coefficient delta and optional raw gradient, and intentionally does not update diagnostic state.
+
+### Fixed-phase CDR FFE adaptation validation assumptions
+
+- `validation/CDR/test_subBlock/test_cdr_ffe_adaptation.m` reads only the required region of the complete Channel+CTLE MAT cache, samples at fixed zero-based phase 20, and uses the ideal 64-lane, 7-bit TI ADC with `[-4,+4] V` limits. Physical ADC lanes are reordered into chronological UI order before equalization.
+- The run uses 16384 target UI in 256 blocks of 64. Every FFE call receives exactly three past samples, 64 target samples, and two future samples; the coefficient delta computed from one block is applied only after that block.
+- Automatic symbol alignment scans integer delays from `-64` through `+256 UI`, ignores the first 256 sampled UI, and maximizes absolute normalized correlation over the following 4096 UI. The current fixture selects delay 105 UI with correlation approximately 0.922208.
+- ADC codes are centered by subtracting code 64. A single scalar map to the PAM4 `[-3,-1,+1,+3]` domain is fitted from the first 4096 aligned training samples before adaptation and then frozen; the current scale is approximately 0.078439.
+- The primary split is 8192 supervised UI followed by 8192 decision-directed UI. A documented fallback of 12288 supervised plus 4096 decision-directed UI is allowed only when no candidate step size passes supervised convergence checks; the current run does not use the fallback.
+- Step-size selection uses only supervised data and scans `[1e-5,3e-5,1e-4,3e-4,1e-3,3e-3,1e-2,3e-2]`. A candidate must remain finite with main tap exactly one, have tail/head MSE ratio at most 0.85, tail/previous MSE ratio at most 1.10, final supervised 16-block coefficient span at most 0.05, and tail absolute delta at most 0.005. The passing candidate with minimum supervised tail MSE is selected.
+- Independent DD acceptance requires finite state, fixed main tap, final 16-block coefficient span at most 0.08, tail absolute delta at most 0.01, SER at most 0.15, truth MSE at most 1.25, decision-error MSE at most 0.35, and known-label adjacent level opening of at least 1.0. Known symbols are used in DD only for these validation metrics, never for coefficient updates.
+
+### Three-loop (MMPD + dlev + CDR-FFE) training-mode assumptions
+
+- `validation/CDR/test_cdr_dlev_cdrffe/cdr_dlev_cdrffe_sslms.m` runs the MMPD timing loop, the dlev level-tracking loop, and the adaptive CDR-FFE loop simultaneously over the cached Channel+CTLE waveform, scanning 32 integer start phases (`0:4:127`).
+- In training mode the golden TX symbol that aligns with the received/FFE-output sample at global UI `u` is the symbol transmitted at UI `u - channelMainCursorUi`. `channelMainCursorUi` is the integer-UI Channel+CTLE main-cursor group delay, computed with the same convention as `samplePulseAtPhase`: `round((pulsePeakIndex - 1 - referencePhase)/samplePerSymbol)`. For the current cache this equals 105 UI, matching the 105 UI / 0.922208 correlation found by the independent alignment scan of the FFE-adaptation fixture. The golden window is therefore `goldenFirst = analysisStartUi + firstUi - channelMainCursorUi + 1`.
+- The FFE output sample index aligns one-to-one with the centered ADC sample index of the same block (main tap at offset 0, symmetric pre/post window via `pendingPast`/`futureSamples`), so a single integer-UI delay compensation on the golden stream aligns all three loops.
+- planB (cold-start) training requires an FFE step size much larger than a planA precision-trim value such as `1e-6`. A usable range is `1e-5`..`3e-4` with at least 400 supervised training blocks. All 32 start phases lock under these settings; `1e-6`/150 blocks does not lock.
+- As of 2026-09-01 the script defaults were switched to this training baseline: `FfeInitMode='planB'`, `FfeTrainingBlocks=400`, `FfeStepSize=1e-4`, `FfeStepSizeSettle=2e-5`. Running `cdr_dlev_cdrffe_sslms` with no arguments now performs cold-start data-aided training (FFE begins at `[0 0 1 0 0 0]`) and populates the post-training histogram row. To recover the previous decision-directed behaviour pass `'FfeInitMode','planA','FfeTrainingBlocks',0,'FfeStepSize',1e-6,'FfeStepSizeSettle',2e-7`.
 
 ### Ideal-edge convergence validation assumptions
 
@@ -242,6 +262,13 @@ This document is derived only from `src/TX+Channel`, `src/AFE`, `src/ADC`, and `
 - Custom INL and custom phase tables are accepted in UI.
 - PI output sample index is floating point. The downstream sampler must decide whether to round, floor, or interpolate.
 - `updateFast` updates wrapped code and UI slip but intentionally leaves some debug-derived state stale until a full update/state refresh.
+
+## SS-LMS FFE adaptation assumptions
+
+- `cdr_ffe_loop.updateSsLms` computes the sign-sign LMS gradient: `gradient = sign(errorVector) * sign(dataRegressor) / BlockSize`. The `sign()` function returns `{-1, 0, +1}` following MATLAB semantics; zero-valued inputs map to zero gradient contribution.
+- Because both error and regressor amplitudes are discarded, the gradient magnitude per sample is bounded by 1. The effective step size (coefficient delta per block) scales linearly with `StepSize` alone, unlike standard LMS where it also scales with signal power.
+- SS-LMS converges to the same Wiener solution as standard LMS in expectation, but the convergence path is noisier and the steady-state misadjustment is larger for a given effective update rate. The normalized post-cursor residual (`post1`) is typically 0.01–0.03 larger than the MMSE LMS result.
+- The `StepSize` for SS-LMS must be approximately 100–300× larger than for standard LMS to achieve comparable convergence speed, because the standard LMS gradient magnitude includes a factor of `O(error_rms * regressor_rms)` that SS-LMS removes.
 
 ## Current validity limits
 
