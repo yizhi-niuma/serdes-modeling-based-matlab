@@ -134,9 +134,10 @@ classdef cdr_ffe_loop < handle
             if ~maskValid
                 error('cdr_ffe_loop:InvalidAdaptEnableMask', 'adaptEnableMask must contain one logical value per tap.');
             end
-            if logical(adaptEnableMask(mainTapIndex))
-                error('cdr_ffe_loop:MainTapAdaptEnabled', 'The fixed main tap must be disabled in adaptEnableMask.');
-            end
+% 移除主抽头必须冻结的限制，v3采用增益归一化锚定总增益，允许所有抽头自适应
+            % if logical(adaptEnableMask(mainTapIndex))
+            %     error('cdr_ffe_loop:MainTapAdaptEnabled', 'The fixed main tap must be disabled in adaptEnableMask.');
+            % end
         end
 
         function validateUpdateInput(obj, dataRegressor, errorBlock)

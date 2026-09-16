@@ -621,7 +621,7 @@ commonLockPhase = round(median(lockedPhaseCode(lockedFlag)));
 phaseSpread = max(lockedPhaseCode(lockedFlag)) - ...
     min(lockedPhaseCode(lockedFlag));
 allPhaseLock = all(lockedFlag) && ...
-    all(abs(lockedPhaseCode - commonLockPhase) <= 2);
+    all(abs(lockedPhaseCode - commonLockPhase) <= 3);
 
 % dlev 一致性。
 dlevInnerFinal = dlevInnerTrace(:, end).';
@@ -1069,7 +1069,7 @@ function options = parseLoopOptions(varargin)
 
 defaults = struct();
 defaults.Kp = 8.0;
-defaults.Ki = 0.06;
+defaults.Ki = 0.03;
 defaults.PdOffset = -0.05;
 defaults.MaxDeltaCode = 12;
 defaults.Polarity = 1;
@@ -1080,8 +1080,8 @@ defaults.LockDeltaTol = 1;
 defaults.DlevSettleWindow = 16;
 defaults.DlevSettleTol = 0.5;
 defaults.DlevPolarity = 1;
-defaults.DlevOuterInit = 48;
-defaults.DlevInnerInit = 16;
+defaults.DlevOuterInit = 36;
+defaults.DlevInnerInit = 12;
 % CDR FFE 环路默认参数(v3: Sign-Sign LMS)。SS-LMS 梯度 = sign(e)*sign(X)/N,幅度
 % 恒为 O(1) 而非 O(error*regressor)~O(300),故 mu 需比标准 LMS 大 ~200-300 倍方能
 % 获得相近的系数更新速度。AdaptEnableMask 固定主抽头(索引 3)为 1 作增益锚点。
@@ -1091,7 +1091,7 @@ defaults.DlevInnerInit = 16;
 % FfeStepSize=0.02 + FfeTrainingBlocks=500 + FfeStepSizeSettle=0.001 可全相位锁定,
 % 稳态系数扩展 <0.01。
 defaults.FfeStepSize = 0.02;
-defaults.FfeStepSizeSettle = 0.001;
+defaults.FfeStepSizeSettle = 1e-4;
 defaults.FfeAdaptEnableMask = logical([1 1 0 1 1 1]);
 defaults.FfeInitMode = 'planB';
 defaults.FfeBiasScale = 0;

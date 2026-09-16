@@ -282,12 +282,26 @@ and drift of about 0.237 sample/update. The weight comparison is saved to
 
 These studies provide useful diagnostics, but they currently live in `src`, depend on large waveform fixtures, and mostly lack numerical pass/fail limits.
 
-### CDR FFE implementation smoke check
+### Caller-assembled CDR FFE window regression
 
-- MATLAB R2025b loaded `cdr_ffe` and `cdr_ffe_lms`, processed one 64-sample row block, produced a `64-by-6` regressor, and reported 62 valid outputs for the default two-precursor startup latency.
-- A zero-error LMS update preserved the fixed unit main tap.
-- Existing CDR regressions remained unchanged and passed: voter 7/7, loop filter 10/10, digital top level 6/6, and PD including MMPD 10/10.
-- No dedicated CDR FFE test or validation function was added in this minimal implementation.
+- MATLAB R2025b ran `tests/CDR/test_cdr_ffe.m` and passed 7/7 checks.
+- The checks cover the default main-only response, configured six-tap FIR mapping, exact regressor rows, the fixed double row-vector output contract, validated/fast equivalence, fixed-main coefficient update and reset, short or malformed windows, and invalid configuration.
+- MATLAB `checkcode` reported no issue for `src/CDR/cdr_ffe.m`.
+
+### CDR FFE block LMS regression
+
+- MATLAB R2025b ran `tests/CDR/test_cdr_ffe_loop.m` and passed 8/8 checks.
+- The checks cover the `desired-output` update sign, block-length normalization, validated row/column error inputs and `double` conversion, validated/fast delta equivalence, optional fast-path gradient output and single-output compatibility, fast-path diagnostic-state isolation, arbitrary adaptation masks with a fixed main tap, runtime step-size changes and reset, invalid input/configuration rejection, and minimal integration with `cdr_ffe`.
+- MATLAB `checkcode` reported no issue for `src/CDR/cdr_ffe_loop.m` or `tests/CDR/test_cdr_ffe_loop.m`.
+
+### Fixed-phase Channel+CTLE/TI-ADC/CDR-FFE adaptation
+
+- MATLAB R2025b ran `validation/CDR/test_subBlock/test_cdr_ffe_adaptation.m` on 16384 UI from the complete Channel+CTLE fixture at fixed zero-based phase 20. The ideal TI ADC configuration was 64 lanes, 7 bits, and `[-4,+4] V`.
+- The bounded delay scan selected 105 UI with normalized correlation 0.922208. Subtracting ADC zero code 64 and fitting the first 4096 aligned training samples produced one frozen PAM4 scale of approximately 0.078439.
+- The initial step-size list was `[1e-5,3e-5,1e-4,3e-4,1e-3,3e-3,1e-2,3e-2]`. Supervised-only acceptance selected `mu=0.01` with tail MSE 0.0343438; the primary 8192-supervised/8192-DD split passed, so fallback was not used.
+- Final coefficients were approximately `[0.1039,-0.3756,1,0.1728,0.0071,0.0265]`. During the DD half, SER was zero, truth and decision MSE were both approximately 0.0343555, minimum adjacent known-label level opening was 1.89755, final 16-block coefficient span was 0.002199, and maximum tail delta was 0.001158.
+- The machine checks enforce the documented supervised ratios/span/delta thresholds and independent DD SER/MSE/opening/span/delta thresholds. MATLAB `checkcode` reported no issue for the validation file.
+- Outputs are `mu_scan.png`, `coefficient_convergence.png`, `mse_convergence.png`, `before_after_histogram.png`, and `result.mat` under `validation/CDR/test_subBlock/result/test_cdr_ffe_adaptation`.
 
 ## Validation gaps
 
@@ -337,6 +351,19 @@ MATLAB R2025b batch execution and static analysis passed. The run used 64 UI/blo
 - Pass limits: final-20-block absolute mean error at most 3 samples, span at most 8 samples, drift at most 0.25 sample/block, and valid-transition density at least 5%.
 - Outputs: `results/AFE/channel_ctle_adc_ffe_mmpd_lock/ctle_eye.png`, `mmpd_convergence.png`, `mmpd_lock_range.png`, and `result.mat`.
 - A post-FFE voltage-opening scan over all 128 phases selected phase 74. Its ordered centers are approximately `[-0.174857,-0.059284,+0.051317,+0.168335] V`, midpoint thresholds are `[-0.117070,-0.003983,+0.109826] V`, and the limiting adjacent-center spacing is `0.110601 V`. The common-bin, four-cluster histogram is `results/AFE/channel_ctle_adc_ffe_mmpd_lock/cdr_ffe_voltage_histogram.png`; the phase scan, centers, thresholds, and figure path are retained in `result.mat`.
+
+### Fixed-dlev SS-MMPD phase loop + adaptive CDR-FFE SS-LMS
+
+`validation/CDR/test_cdr_cdrffe/cdr_dlev_sslms.m` closes a dual-adaptive loop over the cached PRBS20 Channel+CTLE segment: the dlev decision levels are held fixed (low/inner=12, high/outer=36 code, threshold 24), the phase loop uses the uniform weight-1 SS-MMPD kernel, and the six-tap CDR FFE adapts with sign-sign LMS (`cdr_ffe_loop.updateSsLms`, main tap fixed) from a cold start `[0 0 1 0 0 0]`. The first `FfeTrainingBlocks=500` blocks are data-aided (TX golden from `tx_prbs20.mat`, aligned by `channelMainCursorUi=105`), then the loop switches to decision-directed blind convergence and the FFE step drops from 0.02 to 0.001.
+
+MATLAB R2025b batch execution passed (no-argument default, 32 start phases `0:4:127`, `AnalysisNumUi=512512` ≈ 8000 blocks, ~90 s):
+
+- All 32 start phases locked (`AllPhaseLock=1`) to common phase code 17 with **0-code spread**; each phase's steady-state phase-code std was within the 1.5-code tolerance. Blind (decision-directed) convergence begins at block 500 for every phase.
+- The FFE SS-LMS coefficients converged consistently across phases: max adaptive-tap spread 0.00225 (< 0.01 tolerance). The free taps settled to the true decision-directed MMSE solution (mean pre1 ≈ −0.35, post1 ≈ +0.13), larger than the offline `0.05`-cursor design; SS-MMPD stayed locked throughout, confirming its S-curve does not depend on residual pre1/post1 ISI amplitude.
+- Fixed dlev 12/36 matched the offline four-level cluster truth (inner ≈ 12.2, outer ≈ 36.7); the golden `{±3,±1}` map to `{±36,±12}` during training.
+- `checkcode` reported only the pre-existing `numel(varargin)==1` style suggestion, matching the sibling scripts.
+- Outputs: `cdr_phase_convergence.png`, `cdr_block_timing_error.png`, `cdr_locked_phase_vs_start_phase.png`, `ffe_coeff_convergence.png`, and `cdr_dlev_sslms_result.mat` under `validation/CDR/test_cdr_cdrffe/result/cdr_dlev_sslms/`.
+- This validates deterministic all-start acquisition and joint phase/FFE convergence on a static zero-ppm fixture only; it does not measure BER, jitter tolerance, or noise/PVT robustness.
 
 ### MMPD-v1 complete CTLE cache and fixed-segment S-curve
 

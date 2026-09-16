@@ -1,9 +1,11 @@
 classdef cdr_ffe < handle
-    % cdr_ffe  Dedicated symbol-spaced CDR feed-forward equalizer.
+    % cdr_ffe  由顶层提供完整输入窗口的 CDR 前馈均衡器。
     %
-    % Coefficients are ordered from precursor to postcursor. The causal
-    % implementation delays the equalized output by PreTapCount UI so that
-    % precursor taps do not require future samples at the block interface.
+    % inputWindow 的排列固定为:
+    %   [PostTapCount 个过去样本,目标块,PreTapCount 个未来样本]
+    %
+    % 本类只计算目标块的 FFE 输出,不缓存过去样本、待处理块或未来样本。
+    % 跨块缓存、窗口拼接以及数据流首尾的有效性标记由调用方负责。
 
     properties (SetAccess = private)
         Coefficients
@@ -12,13 +14,11 @@ classdef cdr_ffe < handle
         PreTapCount
         MainTapIndex
         PostTapCount
-        InputHistory
-        ProcessedSampleCount = 0
     end
 
     methods
         function obj = cdr_ffe(initialCoefficients, preTapCount)
-            % cdr_ffe  Construct a floating-point CDR FFE.
+            % cdr_ffe  构造一个无跨块缓存的浮点 CDR FFE。
             if nargin < 1
                 initialCoefficients = [0 0 1 0 0 0];
             end
@@ -35,26 +35,25 @@ classdef cdr_ffe < handle
             obj.resetState();
         end
 
-        function [outputBlock, regressor, validOutput] = processBlock(obj, inputBlock)
-            % processBlock  Validate and filter one CDR sample block.
-            obj.validateInputBlock(inputBlock);
-            [outputBlock, regressor, validOutput] = obj.processBlockFast(inputBlock);
+        function [outputBlock, regressor] = processBlock(obj, inputWindow)
+            % processBlock  校验并处理一个由顶层拼接完成的输入窗口。
+            obj.validateInputWindow(inputWindow);
+            inputWindow = double(inputWindow);
+            [outputBlock, regressor] = obj.processBlockFast(inputWindow);
         end
 
-        function [outputBlock, regressor, validOutput] = processBlockFast(obj, inputBlock)
-            % processBlockFast  Filter one caller-validated CDR sample block.
-            blockLength = numel(inputBlock);
-            processedBeforeBlock = obj.ProcessedSampleCount;
-            [outputBlock, regressor, obj.InputHistory] = obj.filterOneStream(inputBlock, obj.InputHistory);
-
-            globalSampleIndex = processedBeforeBlock + (1:blockLength);
-            validOutput = globalSampleIndex > obj.PreTapCount;
-            validOutput = reshape(validOutput, size(inputBlock));
-            obj.ProcessedSampleCount = processedBeforeBlock + blockLength;
+        function [outputBlock, regressor] = processBlockFast(obj, inputWindow)
+            % processBlockFast  处理一个已由调用方校验的 double 行向量输入窗口。
+            blockLength = numel(inputWindow) - obj.PostTapCount - obj.PreTapCount;
+            firstTapSampleIndex = (obj.TapCount - 1) + (1:blockLength).';
+            tapOffset = 0:obj.TapCount - 1;
+            regressorIndex = firstTapSampleIndex - tapOffset;
+            regressor = inputWindow(regressorIndex);
+            outputBlock = (regressor * obj.Coefficients.').';
         end
 
         function applyCoefficientDelta(obj, deltaCoefficients)
-            % applyCoefficientDelta  Apply one block-rate LMS coefficient update.
+            % applyCoefficientDelta  施加一次块速率 LMS 系数更新。
             isValid = isnumeric(deltaCoefficients);
             isValid = isValid && isreal(deltaCoefficients);
             isValid = isValid && isvector(deltaCoefficients);
@@ -65,22 +64,16 @@ classdef cdr_ffe < handle
             end
 
             deltaCoefficients = reshape(double(deltaCoefficients), 1, []);
-            if deltaCoefficients(obj.MainTapIndex) ~= 0
-                error('cdr_ffe:MainTapUpdate', 'The fixed main tap coefficient cannot be updated.');
-            end
             obj.Coefficients = obj.Coefficients + deltaCoefficients;
         end
 
         function resetState(obj)
-            % resetState  Restore initial coefficients and clear stream history.
-            historyLength = numel(obj.InitialCoefficients) - 1;
+            % resetState  恢复初始系数。
             obj.Coefficients = obj.InitialCoefficients;
-            obj.InputHistory = zeros(1, historyLength);
-            obj.ProcessedSampleCount = 0;
         end
 
         function state = getState(obj)
-            % getState  Return the current FFE configuration and dynamic state.
+            % getState  返回当前 FFE 配置。
             state = struct();
             state.Coefficients = obj.Coefficients;
             state.InitialCoefficients = obj.InitialCoefficients;
@@ -88,31 +81,20 @@ classdef cdr_ffe < handle
             state.PreTapCount = obj.PreTapCount;
             state.MainTapIndex = obj.MainTapIndex;
             state.PostTapCount = obj.PostTapCount;
-            state.InputHistory = obj.InputHistory;
-            state.ProcessedSampleCount = obj.ProcessedSampleCount;
+        end
+        
+        function scaleCoefficients(obj, factor)
+            % scaleCoefficients  按比例缩放所有FFE系数，用于增益归一化
+            % factor: 缩放因子，所有系数乘以该值
+            isValid = isnumeric(factor) && isscalar(factor) && isreal(factor) && isfinite(factor);
+            if ~isValid
+                error('cdr_ffe:InvalidScaleFactor', 'Scale factor must be a finite real scalar.');
+            end
+            obj.Coefficients = obj.Coefficients * factor;
         end
     end
 
     methods (Access = private)
-        function [outputBlock, regressor, nextHistory] = filterOneStream(obj, inputBlock, history)
-            % filterOneStream  Apply the causal form of the precursor-aligned FIR.
-            inputVector = reshape(double(inputBlock), 1, []);
-            extendedInput = [history, inputVector];
-            blockLength = numel(inputVector);
-            currentIndex = (obj.TapCount - 1) + (1:blockLength).';
-            tapOffset = 0:obj.TapCount - 1;
-            regressor = extendedInput(currentIndex - tapOffset);
-            outputVector = regressor * obj.Coefficients.';
-            outputBlock = reshape(outputVector, size(inputBlock));
-
-            historyLength = obj.TapCount - 1;
-            if historyLength == 0
-                nextHistory = zeros(1, 0);
-            else
-                nextHistory = extendedInput(end - historyLength + 1:end);
-            end
-        end
-
         function validateConfiguration(~, initialCoefficients, preTapCount)
             coefficientsValid = isnumeric(initialCoefficients);
             coefficientsValid = coefficientsValid && isreal(initialCoefficients);
@@ -139,14 +121,17 @@ classdef cdr_ffe < handle
             end
         end
 
-        function validateInputBlock(~, inputBlock)
-            isValid = isnumeric(inputBlock);
-            isValid = isValid && isreal(inputBlock);
-            isValid = isValid && isvector(inputBlock);
-            isValid = isValid && ~isempty(inputBlock);
-            isValid = isValid && all(isfinite(inputBlock(:)));
+        function validateInputWindow(obj, inputWindow)
+            isValid = isnumeric(inputWindow);
+            isValid = isValid && isreal(inputWindow);
+            isValid = isValid && isrow(inputWindow);
+            isValid = isValid && ~isempty(inputWindow);
+            isValid = isValid && all(isfinite(inputWindow));
             if ~isValid
-                error('cdr_ffe:InvalidInputBlock', 'inputBlock must be a nonempty finite real numeric vector.');
+                error('cdr_ffe:InvalidInputWindow', 'inputWindow must be a nonempty finite real numeric row vector.');
+            end
+            if numel(inputWindow) < obj.TapCount
+                error('cdr_ffe:InputWindowTooShort', 'inputWindow must contain PostTapCount past samples, at least one target sample, and PreTapCount future samples.');
             end
         end
     end

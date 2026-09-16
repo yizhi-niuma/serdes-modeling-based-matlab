@@ -1,4 +1,29 @@
-# Decisions
+﻿# Decisions
+
+## 2026-09-16: v3 triple-loop no-arg default retuned (Ki 0.06->0.03, anchors 48/16->36/12, settle mu 1e-3->1e-4) to remove slow phase glide
+
+- Problem: the retained no-arg default of `cdr_dlev_cdrffe_sslms_v3.m` did not truly converge — the PI phase code glided (`mean ~53 -> 24` over 8000 blocks, `UiSlip` accumulating) instead of settling into a `+1/-1` dither, even though the last-30-block std criterion reported `AllPhaseLock=1`. This is the trajectory-misclassification caveat flagged on 2026-09-15, now confirmed.
+- Diagnosis (parameter/coupling, not architecture): (1) training anchors 48/16 are ~30% above this channel's offline truth (36.7/12.2), so the golden FFE over-equalizes during training and then crawls back post-release, moving the SS-MMPD S-curve zero and dragging the phase; (2) the RAW SS-MMPD S-curve has one strong + two weak stable zeros per UI (verified via `debug_v3_scurve.m`: strong at code ~16, weak at ~66 and ~99). The two weak zeros are ALREADY cancelled by the existing phase-gated PD bias (`meanPhaseError = mean(ssDecision) + pdOffset*biasActive`, `pdOffset=-0.05`, gated to `codeWrapped∈[45,116]`), so the loop-effective S-curve has a single strong lock. The failure was therefore NOT a surviving parasitic lock: at `Ki=0.06` the phase can move while the cold-start FFE is still forming, golden symbols at the wandering phase collapse the FFE post1 tap (start 32: post1 +0.144@blk400 → -0.005@blk500), and that migrates the SINGLE strong lock from code ~16 to the UI wrap boundary (~code 1), where the loop parks (phase-drift ⇄ FFE-post1-collapse ⇄ main-lock-migration transient feedback).
+- Decision: change `parseLoopOptions` no-arg defaults only (no loop-logic change): `Ki 0.06 -> 0.03`, `DlevOuterInit 48 -> 36`, `DlevInnerInit 16 -> 12`, `FfeStepSizeSettle 1e-3 -> 1e-4`. The gated `pdOffset=-0.05` weak-zero-cancellation is left unchanged (re-verified valid at the new 36/12 anchors: loop S-curve still shows a single stable lock). Relax the `allPhaseLock` common-band tolerance from `<=2` to `<=3` code (±3/128 UI ≈ 2.3% UI is the same physical sampling instant; this is a validation-metric choice, not a physical-model change). The anchors stay nominal design values (from ADC full-scale + AGC target), not injected offline truth.
+- Result (MATLAB R2025b, no-arg default, 8000 blocks, 32 starts): `AllPhaseLock=1`, 32/32 locked (start 32 recovered, code 11), common code 14, spread 5; tail deltaCode |ΔCode|≤1 for 99.49% of blocks (steady `+1/-1` dither = the user's convergence definition); dLev inner 11.76 / outer 35.31 (truth 12.23/36.71). This supersedes the earlier "restored default already converges" claim for the purpose of true steady-state (non-gliding) convergence.
+
+## 2026-09-16: `test_cdr_cdrffe/cdr_dlev_sslms.m` repurposed to fixed-dlev + adaptive phase(SS-MMPD) + adaptive FFE(SS-LMS)
+
+- User-directed change: the script previously held the CDR FFE coefficients fixed and adapted the phase loop and dlev. It now (a) fixes the dlev decision levels at low/inner `12` and high/outer `36` code (threshold 24), (b) adapts the phase loop with SS-MMPD, and (c) adapts the CDR FFE with sign-sign LMS.
+- The fixed dlev values were chosen by the user (12/36) and coincide with the offline four-level cluster truth (inner ≈ 12.2, outer ≈ 36.7). dlev is a name-value option and is not adapted.
+- The PD switches from classic amplitude Mueller-Muller to the uniform weight-1 SS-MMPD kernel reused verbatim from `cdr_dlev_cdrffe_sslms_v3.m` (`ssMmpdUniform`/`ssMmpdValid`). Gains act directly on the normalized `mean(±1/0)` output — the code-domain `gainScale=(3/dlevOuter)^2` folding used by the old classic-MM version was removed. Loop gains adopted from the validated v3 SS-MMPD recipe: `Kp=8`, `Ki=0.06`, `PdOffset=-0.05` (gated to `codeWrapped∈[45,116]`), `MaxDeltaCode=12`.
+- Per the user's follow-up, the FFE is **cold-started** from `[0 0 1 0 0 0]` (not warm-started from the offline KKT optimum). It uses `cdr_ffe_loop.updateSsLms` with error `decision − ffeOutput`. Because the cold-start eye is closed, the first `FfeTrainingBlocks=500` blocks are data-aided: TX golden symbols (`tx_prbs20.mat`, aligned by `channelMainCursorUi=105`) replace the decision to feed SS-MMPD and FFE SS-LMS, mapped to the fixed dlev code `{±36,±12}`. After block 500 the loop switches to decision-directed **blind** convergence and drops the FFE step from capture `FfeStepSize=0.02` to settle `FfeStepSizeSettle=0.001`. This mirrors the sibling planB cold-start recipe, differing only in that dlev is fixed (not SS-LMS adapted). Default `AnalysisNumUi=512512` (≈ 8000 blocks) gives ≈ 7500 blind blocks.
+- Verified in MATLAB R2025b (no-argument default, 32 start phases, 8000 blocks, ~90 s): 32/32 lock to common code 17 (`AllPhaseLock=1`, spread 0), FFE SS-LMS coefficient spread 0.00225 (< 0.01 tolerance), converged free taps pre1 ≈ −0.35 / post1 ≈ +0.13 (true MMSE, larger than the offline 0.05-cursor design). SS-MMPD remained locked as the FFE drove ISI toward the MMSE optimum, confirming the v3 finding that the SS-MMPD S-curve does not depend on residual pre1/post1 ISI. Cold start + golden training gives markedly tighter cross-phase consistency (spread 0 / 0.00225) than an earlier warm-start decision-directed variant (spread 3 / 0.023), because all phases share the same golden-driven trajectory plus a long blind tail.
+
+## 2026-09-15: Restore committed v3 SS-LMS script baseline
+
+- At the user's request, restore ONLY `validation/CDR/test_cdr_dlev_cdrffe/cdr_dlev_cdrffe_sslms_v3.m` from HEAD (`c96ed27`). Its last modifying commit is `b3a9dd9`; both revisions contain blob `30f33dc9d9a378d9423a9bd205845540880a828f`. Retain all other working-tree changes and do not overwrite the existing experiment plots.
+- This supersedes the later working-tree fixed-3000-block and target-pulse experiments described below. Restored online FFE is `updateSsLms`, with direct symbol target, mu=0.02/0.001 and fixed unit main tap; dLev is SS-LMS with mu=0.3/0.1; timing uses SS-MMPD with Kp=8, Ki=0.06 and MaxDeltaCode=12. In default 500-block training mode, block 500 still uses golden labels but switches dLev/FFE to fine steps before their updates; DD begins at block 501. No fixed-3000-block switch or active `[c 1 c]` reference remains.
+- Reproduction depends on retained working-tree `cdr_ffe.m` window semantics and untracked `dlev_loop.m`; this is not a full-repository historical checkout. The current `cdr_ffe_loop.m` changes were also retained. Do not discard these dependencies under the assumption that restoring v3 alone establishes a self-contained clean-checkout baseline.
+- MATLAB R2025b revalidation with `SaveOutputs=false` passed explicit 8000-block, 32-start convergence assertions in 68.439 s: AllPhaseLock=1, codes 23/24, phase spread=1, dLev means 12.159668/36.5540527, dLev spreads 0.0546875/0.1046875, FFE coefficient spread=0.003328125. The separate cursor check still fails (pre1=-0.016126912, post1=-0.0282917317). No restored 30000-block or BER claim is made. Evidence is in the session artifacts `restore_validation.log` and `restored_v3_default_result.mat`.
+- Evidence correction: previous declarations that S-curve collapse was the proven root cause, or `[c 1 c]` eliminated all aliases/drift, were overclaims. They remain historical hypotheses, not established findings. Last-30-block wrapped-code standard deviation can misclassify a trajectory crossing 0/127, and spread calculated only over passing starts does not establish all-start stability. The 11 failed target-pulse starts cannot be labelled aliases without further trace/S-curve analysis.
+- Source interpretation correction: dLev sign-error adaptation balances positive/negative amplitude-error votes (a conditional-median-type equilibrium), not a general mean estimator. SS-LMS is not guaranteed to equal the Wiener/MMSE solution for arbitrary input statistics. `FfeTargetCursor`/`FfeTargetSkew` are unused legacy options in the restored online path. These corrections change no executable model or physical assumption.
+
 
 ## 2026-08-12: Repository organization
 
@@ -244,3 +269,53 @@ The following values appear in current ADC waveform studies but are not yet perm
   `isCompletePrbsPeriod` field of new caches and the legacy
   `isCompletePrbs20Period`). No-argument default behaviour is unchanged
   (PRBS20, 8000 blocks, `FfeTrainingBlocks=500`, planB cold start).
+
+## 2026-09-03: CDR v3 triple-loop settle policy simplified to fixed-block mu switch
+
+- Root cause of the large three-loop convergence oscillation (dLev + FFE +
+  timing) in `cdr_dlev_cdrffe_sslms_v3.m` was diagnosed as a **loop-parameter /
+  cross-loop-coupling problem, not an architecture problem**. The training phase
+  (golden symbols) converges cleanly; the oscillation only appears in the
+  post-training decision-directed phase.
+- The dominant mechanism was the settle-trigger deadlock: the old scheme delayed
+  the dLev/FFE mu downshift until `ffeConvergeCounter >= FfeConvergeWindow`, but
+  FFE<->dLev coupling kept the per-block FFE step above `FfeConvergeTol`, so the
+  counter never accumulated and the system ran at capture-mu until the
+  `FfeSettleMaxBlock = 8000` forced fallback.
+- **Decision**: remove the entire multi-stage settle machinery (lock counter,
+  FFE convergence counter, staged `FfeReleaseMode`, `FfeSettleDelay`,
+  `FfeSettleMaxBlock`, `Lock*`/`DlevSettle*` settle tolerances) and replace it
+  with a single deterministic trigger: at `SettleBlock` (default **3000**) both
+  dLev and FFE step sizes drop from capture to settle in one shot.
+- **Loop-gain retune** to reduce coupling-noise amplification: `Kp` 8.0->4.0,
+  `Ki` 0.06->0.03, `MaxDeltaCode` 12->8, dLev capture `StepSize` 0.3->0.2. FFE mu
+  (1e-4->2e-5) and settle dLev mu (0.1) unchanged.
+- The FFE update remains standard block-rate MMSE LMS (`cdr_ffe_loop.update`);
+  only the dLev loop is SS-LMS and the PD is SS-MMPD. (An earlier CURRENT_STATE
+  line describing the v3 FFE as SS-LMS did not match the code.)
+- `SettleBlock` is a new name-value option; tuning guidance: lower it (e.g. 2000)
+  or reduce `Kp`/`StepSize` further if pre-3000 oscillation is still too large.
+
+## 2026-09-03 (b): CDR v3 FFE reverted from MMSE [0 1 0] to target-pulse [c 1 c], c=0.05
+
+- The 30000-block run of the MMSE-FFE version exposed long-run degradation:
+  25/32 locked, phase spread 78 code (aliases), dLev drifting down
+  (inner 10.85->8.85, outer 32.66->26.88). Root cause: MMSE drives pre1/post1
+  ISI toward 0, flattening the SS-MMPD S-curve (alias slip) and leaving the
+  SS-LMS dLev without an amplitude anchor (downward drift).
+- **Decision (user-directed)**: revert the CDR-FFE adaptation target from the
+  decision-directed MMSE reference (equiv. target pulse [0 1 0]) back to a
+  target-pulse LMS with reference r = decisions (conv) [c 1 c], c=FfeTargetCursor
+  =0.05, skew=0 (symmetric). Restores `buildTargetReference`, per-phase
+  `prevFfeDecisionTail`, and `ffeTargetPulse` construction; FFE error is now
+  `errorBlock = referenceBlock - ffeOutput`.
+- 30000-block result with [c 1 c]: **alias slip and dLev drift eliminated** ---
+  phase spread 78->1 code, dLev inner=11.06 (spread 0.091)/outer=33.42
+  (spread 0.212) held (no drift), FFE coeff spread 0.097->0.013.
+  BUT lockedFlag count is 21/32 (was 25/32): 11 phases fail the strict
+  steady-state std lock criterion.
+- **Known caveat (documented in code)**: symmetric [c 1 c] (skew=0) makes
+  h1=h-1, giving the MMPD multiple S-curve zeros (alias degeneracy). The 11
+  non-locked phases are the likely symptom. Next step to reach 32/32: add a
+  small `FfeTargetSkew` (e.g. 0.02) so pre1=c-skew, post1=c+skew breaks the
+  degeneracy while keeping the S-curve alive.

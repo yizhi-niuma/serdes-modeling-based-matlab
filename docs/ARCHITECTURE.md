@@ -109,11 +109,13 @@ Floating-point symbol-spaced FIR for the dedicated CDR path with:
 - Default six-tap configuration containing two precursor, one fixed unit main,
   and three postcursor taps.
 - Configurable coefficient vector and precursor count.
-- One real sample stream per object; data and edge scheduling remains external.
-- Cross-block input history and explicit precursor-count output latency.
+- Caller-assembled input windows containing postcursor history, the target block,
+  and precursor look-ahead.
+- Coefficient and FIR state only; cross-block buffering and boundary validity
+  remain external.
 - Validated and reduced-overhead block processing paths.
 
-### `cdr_ffe_lms.m`
+### `cdr_ffe_loop.m`
 
 Standalone block LMS adaptation engine with:
 
