@@ -1,5 +1,13 @@
 ﻿# Decisions
 
+## 2026-09-17: separate dlev initial state from supervised FFE reference
+
+- User approved independent parameters: `DlevOuterInit=48`, `DlevInnerInit=16` initialize only the dlev loop; `FfeTrainingOuterRef=36`, `FfeTrainingInnerRef=12` set the fixed golden-symbol amplitudes used only by FFE during training. Changing dlev initialization no longer implicitly changes the programmed FFE target. No automatic derivation or fallback from initial values is retained.
+- Require finite real positive scalar references with `FfeTrainingOuterRef > FfeTrainingInnerRef`; do not require an exact3:1 ratio or cap references at the ADC input-code range. Reference values refer to the floating-point post-FFE code domain. Validate before cache access, for default, struct and name/value invocations.
+- Keep the phase/dlev training decisions based on their existing live levels; keep DD FFE reference equal to the existing live decision. No changes to update equations, main-tap constraint, gain scheduling, waveform alignment, freeze gate or final-lock criterion. Current PRBS22/8000-block and1000-block training defaults remain.
+- Export both programmed FFE references explicitly in the result and `RunOptions`. Historical coupled behavior can be reproduced by explicitly passing FFE references equal to the desired dlev initial values. Pin the freeze integration regression's36/12 reference so later default changes do not redefine that fixture.
+- This implements the previously validated fixed-reference diagnostic intervention in production; it is not an AGC, adaptive amplitude estimator, or a claim that36/12 is a universal optimum for every channel. Full-default phase/FFE results are recorded separately without retuning or relaxing thresholds.
+
 ## 2026-09-17: retain48/16 anchors and tune update rates for final all-start lock
 
 - Preserve the task-entry user choices of PRBS22/16000 blocks,1000 training blocks, online freeze500 occurrences/100 events, and dlev/FFE anchor48/16. Evaluate real trajectories without relaxing final mode/count/common-phase gates or changing PD polarity/bias, ADC/channel scaling, tap constraints, or update equations.

@@ -1,0 +1,5 @@
+OuterInit,InnerInit,OriginalMode,SignedMode,FixedTrainingAnchorMode,FixedFfeMode,FreezeBlock,FinalUiSlip,OriginalEyeStartUi
+20,6.66666666666667,123,-5,13,22,7316,-140,510068
+36,12,13,13,13,22,4658,-58,510150
+48,16,20,20,13,22,5324,-71,510137
+20,7,126,-2,13,NaN,5688,-99,510109

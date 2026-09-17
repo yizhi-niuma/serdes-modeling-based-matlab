@@ -1,4 +1,5 @@
-﻿function result = cdr_dlev_cdrffe_sslms_v3(varargin)
+﻿function result = cdr_anchor_control(varargin)
+% Diagnostic control: fixed FFE training anchors (inner=12, outer=36).
 %CDR_DLEV_CDRFFE_SSLMS_V3 CDR+DLEV+CDRFFE+SSLMS 链路验证脚本 (v3: SS-MMPD + FFE SS-LMS 版本)
 %   本版本在 v2 基础上将 FFE 自适应算法从标准 MMSE LMS 替换为 Sign-Sign LMS (SS-LMS) (Sign-Sign MMPD, uniform weight-1)。
 %   核心改进点：
@@ -17,7 +18,6 @@
 %       result: 结构体，包含所有相位的收敛状态、环路参数、误码率等信息。
 %
 %   配置选项可通过 options 结构体传入，默认参数见 parseLoopOptions 函数。
-%   FfeTrainingOuterRef/FfeTrainingInnerRef 独立设置监督式 FFE 训练参考电平。
 %
 %   See also: CDR_DLEV_CDRFFE_SSLMS_V2, cdr_pd, loop_filter, phase_interpolator
 %
@@ -45,11 +45,13 @@ thisFile = mfilename('fullpath');
 testDir = fileparts(thisFile);
 cdrValidationDir = fileparts(testDir);
 validationDir = fileparts(cdrValidationDir);
-repoRoot = fileparts(validationDir);
+repoRoot = 'C:\Work\MatLab_Lib';
+cdrValidationDir = fullfile(repoRoot,'validation','CDR');
+addpath(fullfile(cdrValidationDir,'test_cdr_dlev_cdrffe'));
 addpath(fullfile(repoRoot, 'src', 'ADC', 'TI_ADC'));
 addpath(fullfile(repoRoot, 'src', 'CDR'));
 
-options = parseLoopOptions(varargin{:});
+options = parseLoopOptions(varargin{:}); options.SaveOutputs=false; options.EyeDiagramEnable=false;
 validateFreezeEyeOptions(options);
 % CTLE 缓存:默认 PRBS20 完整周期(CosimDir='channel_ctle_cosim'),可切到独立缓存(如 PRBS22)。
 cachePath = fullfile(cdrValidationDir, 'test_cdr', 'result', ...
@@ -200,15 +202,13 @@ piCodeCount = 2^piNumBit;
 assert(piCodeCount == samplePerSymbol, ...
     'The PI code count must equal the samples per UI.');
 
-options = parseLoopOptions(varargin{:});
+options = parseLoopOptions(varargin{:}); options.SaveOutputs=false; options.EyeDiagramEnable=false;
 validateFreezeEyeOptions(options);
 
-% dlev 初值仅设置 dlev 跟踪器的启动状态,不作为监督式 FFE 训练参考。
+% dlev 初值:硬件可实现的标称值,由 ADC 满量程与 AGC 目标决定,不依赖离线扫描。
 dlevOuterNominal = options.DlevOuterInit;
 dlevInnerInit = options.DlevInnerInit;
 dlevOuterInit = dlevOuterNominal;
-ffeTrainingOuterRef = double(options.FfeTrainingOuterRef);
-ffeTrainingInnerRef = double(options.FfeTrainingInnerRef);
 
 loopKp = options.Kp;
 loopKi = options.Ki;
@@ -474,15 +474,15 @@ for startIndex = 1:numStartPhase
                 sliceError = ffeOutput - decision;
             end
 
-            % Data-aided FFE uses independent programmed training levels, not dlev initial state.
-            % Phase/dlev use live levels; after training FFE returns to the shared DD decision.
-            % dlev estimates retain their amplitude sign-vote equilibrium.
-
-
-            % Training references are programmed constants; DD levels remain live estimates.
+            % FFE 目标脉冲参考专用判决流。训练期(闭眼、dlev 未稳)FFE 参考若跟随 live
+            % dlev,会与 dlev 构成“一起缩到 0”的正反馈(|x-r|^2 的平凡零解吸引子)。故训练
+            % 期把 golden 按固定锚电平 dlevOuterInit/dlevInnerInit(48/16,设计标称值、上电
+            % 前已知,非离线真值)缩放,给 FFE 一个不随自身缩放的稳定标尺,拆掉缩零耦合;
+            % dlev 仍独立估 mean|x|。训练结束/非训练时 ffeDecision 等同 decision,FFE 参考
+            % 回到 live dlev 正常跟踪——此时眼已张开、非零工作点已是稳定不动点,零解不再吸引。
             if trainingActive
-                ffeMagnitude = ffeTrainingInnerRef + ...
-                    (ffeTrainingOuterRef - ffeTrainingInnerRef) .* goldenIsOuter;
+                ffeMagnitude = 12 + ...
+                    (36 - 12) .* goldenIsOuter;
                 ffeDecision = sign(goldenValid) .* ffeMagnitude;
             else
                 ffeDecision = decision;
@@ -1151,8 +1151,6 @@ result.DlevInnerReference = dlevInnerReference;
 result.DlevOuterReference = dlevOuterReference;
 result.DlevInnerInit = dlevInnerInit;
 result.DlevOuterInit = dlevOuterInit;
-result.FfeTrainingOuterRef = ffeTrainingOuterRef;
-result.FfeTrainingInnerRef = ffeTrainingInnerRef;
 result.DlevOuterNominal = dlevOuterNominal;
 result.PdType = 'ss-mmpd';
 result.PdOffset = pdOffset;
@@ -1421,10 +1419,8 @@ defaults.LockDeltaTol = 1;
 defaults.DlevSettleWindow = 16;
 defaults.DlevSettleTol = 0.5;
 defaults.DlevPolarity = 1;
-defaults.DlevOuterInit = 48;
-defaults.DlevInnerInit = 16;
-defaults.FfeTrainingOuterRef = 36;
-defaults.FfeTrainingInnerRef = 12;
+defaults.DlevOuterInit = 40;
+defaults.DlevInnerInit = 13;
 % CDR FFE 环路默认参数(v3: Sign-Sign LMS)。SS-LMS 梯度 = sign(e)*sign(X)/N,幅度
 % 恒为 O(1) 而非 O(error*regressor)~O(300),故 mu 需比标准 LMS 大 ~200-300 倍方能
 % 获得相近的系数更新速度。AdaptEnableMask 固定主抽头(索引 3)为 1 作增益锚点。
@@ -1443,7 +1439,7 @@ defaults.FfeTargetSkew = 0;
 defaults.FfeSettleDelay = 250;
 defaults.FfeReleaseMode = 'staged';
 % 训练模式块数 N:当前默认 1000 块数据辅助冷启动(需配 FfeInitMode='planB')。
-% 默认 PRBS22/8000 块中余下 7000 块做判决导向更新与冻结监测。设为 0 可关闭训练、
+% 默认 PRBS22/16000 块中余下 15000 块做判决导向更新与冻结监测。设为 0 可关闭训练、
 % 退回纯决策导向(此时应同时把 FfeInitMode 改回 'planA')。
 defaults.FfeTrainingBlocks = 1000;
 defaults.FfeFreezeEnable = true;
@@ -1455,7 +1451,7 @@ defaults.EyeDiagramUiCount = 2048;
 defaults.SaveOutputs = true;
 defaults.ResultDir = '';
 defaults.StartPhaseList = [];
-% CTLE 缓存选择:默认 PRBS22 长周期、NumBlock=8000。切换缓存时传
+% CTLE 缓存选择:默认 PRBS22 长周期、NumBlock=16000。切换缓存时传
 % 'CosimDir','channel_ctle_cosim_prbs22','TxFile','tx_prbs22.mat' 并加大 'AnalysisNumUi'。
 defaults.CosimDir = 'channel_ctle_cosim_prbs22';
 defaults.TxFile = 'tx_prbs22.mat';
@@ -1717,17 +1713,6 @@ end
 
 function validateFreezeEyeOptions(options)
 %VALIDATEFREEZEEYEOPTIONS Validate freeze diagnostics and eye controls.
-for refName = {'FfeTrainingOuterRef', 'FfeTrainingInnerRef'}
-    value = options.(refName{1});
-    if ~(isnumeric(value) && isreal(value) && isscalar(value) && isfinite(value) && value > 0)
-        error('cdr_dlev_cdrffe_sslms_v3:InvalidFfeTrainingReference', ...
-            '%s must be a finite positive real scalar.', refName{1});
-    end
-end
-if options.FfeTrainingOuterRef <= options.FfeTrainingInnerRef
-    error('cdr_dlev_cdrffe_sslms_v3:InvalidFfeTrainingReference', ...
-        'FFE training outer reference must exceed inner reference.');
-end
 validateattributes(options.FfeFreezeEnable, {'numeric', 'logical'}, ...
     {'scalar', 'finite', 'real'}, mfilename, 'FfeFreezeEnable');
 assert(ismember(double(options.FfeFreezeEnable), [0 1]), ...

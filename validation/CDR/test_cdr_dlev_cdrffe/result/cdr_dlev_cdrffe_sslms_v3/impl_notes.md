@@ -1,6 +1,46 @@
 # CDR v3 implementation and convergence notes
 
-## 2026-09-17: current commit snapshot (40/13, PRBS22,8000 blocks)
+## 2026-09-17: current results use independent initial48/16 and FFE training reference36/12
+
+### Parameter roles and implementation
+
+The user approved separating the dlev estimator's initial state from the FFE supervised training target:
+
+```matlab
+defaults.DlevOuterInit = 48;
+defaults.DlevInnerInit = 16;
+defaults.FfeTrainingOuterRef = 36;
+defaults.FfeTrainingInnerRef = 12;
+```
+
+Only the `FfeTraining*Ref` values scale golden symbols for the FFE training error. The existing phase/dlev training paths still use live dlev; after training, FFE still uses the shared live decision. Changing dlev initialization no longer implicitly changes the FFE target. References must be finite real positive scalars with outer>inner, but need not have an exact3:1 ratio. Both programmed values are stored in top-level result fields and `RunOptions`, distinct from offline measured `DlevInnerReference/DlevOuterReference`.
+
+No change was made to main-tap1, SS-LMS equations, gains, cache/time alignment, freeze criterion or final phase-lock checks. This is not an AGC or a new adaptive reference estimator. The default36/12 target is a user-selected nominal reference for this experiment, not asserted as universal truth.
+
+### Run and verification
+
+- Current run: PRBS22,8000 blocks,32 starts `0:4:124`,1000 training blocks; phase Kp/Ki8/0.03, dlev mu0.3/0.1, FFE mu0.0018/0.0002, online freeze500 occurrences/100 events. Runtime113.757s in MATLAB R2025b.
+- All32 starts begin with dlev outer48/inner16; all32 final phase locks and FFE freezes pass. `AllPhaseLock=1`, common13, modes11..14, spread3, final-window event counts138..175 and no out-of-band samples.
+- Mean final inner/outer dlev11.730664/35.124023; dlev consistency passes. Separate FFE checks fail: max cross-start coefficient spread0.020369 exceeds0.02; normalized pre1/post1=-0.036527/-0.070715 exceed +/-0.02. The successful phase criterion must not be confused with passing all equalization-quality checks.
+- Selected slowest first-capture start36, first capture3076, freeze4655. Freeze eye begins at the next complete block4656/segment UI298117. Final eye starts segment UI510149. Both use2048UI and mark phase13. All standard output figures, MAT and CSVs now correspond to this split-reference run; older sections below are historical.
+- All eight suites pass59 groups. New reference tests cover state/reference independence, active training behavior, exact DD-only invariance, invalid inputs and struct/name-value options. Existing freeze fixture pins36/12 references independently of future defaults.
+- Full start124 trajectory matches the earlier diagnostic copy with initial48/16 and fixed36/12 target. Explicit initial36/12/reference36/12 reproduces eight original coupled36/12 arrays exactly. The numerical comparisons demonstrate correct parameter wiring, not guaranteed convergence uniqueness for arbitrary systems.
+
+### Reproduction
+
+```matlab
+addpath('validation/CDR/test_cdr_dlev_cdrffe');
+result = cdr_dlev_cdrffe_sslms_v3(); % now initial48/16, training reference36/12
+
+% Equivalent explicit settings, without relying on those defaults:
+result = cdr_dlev_cdrffe_sslms_v3( ...
+    'DlevOuterInit',48, 'DlevInnerInit',16, ...
+    'FfeTrainingOuterRef',36, 'FfeTrainingInnerRef',12);
+```
+
+To reproduce historical coupled training, explicitly pass the FFE references equal to the chosen dlev initial values. The two groups are no longer automatically linked. Test/run logs: session artifacts `split_ffe_reference_tests.log` and `split_ffe_reference_noarg.log`. No commit was automatically created.
+
+## 2026-09-17: historical commit snapshot (40/13, PRBS22,8000 blocks)
 
 The user subsequently changed the executable defaults to outer/inner40/13 and `NumBlock=8000`, retaining PRBS22,1000 training blocks, dlev mu0.3/0.1, FFE mu0.0018/0.0002 and freeze500/100. These latest settings are preserved in the requested commit. The existing MAT identifies the same40/13/8000 configuration and reports32/32 phase locks, `AllPhaseLock=1`, modes15..17; it was inspected, not regenerated during the commit task. The current first-capture/freeze CSVs accompany this snapshot. Binary MAT/PNG outputs are intentionally not committed under project policy.
 
