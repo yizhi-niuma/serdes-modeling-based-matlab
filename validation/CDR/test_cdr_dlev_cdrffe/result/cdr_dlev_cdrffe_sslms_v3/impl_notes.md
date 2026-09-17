@@ -1,6 +1,62 @@
 # CDR v3 implementation and convergence notes
 
-## 2026-09-17: current outputs switched back to PRBS20/8000 blocks
+## 2026-09-17: current commit snapshot (40/13, PRBS22,8000 blocks)
+
+The user subsequently changed the executable defaults to outer/inner40/13 and `NumBlock=8000`, retaining PRBS22,1000 training blocks, dlev mu0.3/0.1, FFE mu0.0018/0.0002 and freeze500/100. These latest settings are preserved in the requested commit. The existing MAT identifies the same40/13/8000 configuration and reports32/32 phase locks, `AllPhaseLock=1`, modes15..17; it was inspected, not regenerated during the commit task. The current first-capture/freeze CSVs accompany this snapshot. Binary MAT/PNG outputs are intentionally not committed under project policy.
+
+Seven regression suites (54 groups) passed again before commit. Their pinned integration fixture does not establish a new all-default40/13 run. The following48/16/16000 tuning result and its two dedicated tuning CSVs remain historical evidence for that distinct configuration. Executable defaults and `result.RunOptions`, not older comments or reproduction snippets, identify the current run.
+
+## 2026-09-17: historical no-argument48/16 all-start tuning result
+
+### Scope and fixed conditions
+
+The user requested all-phase lock with dlev initial values48/16. These parameters also remain the FFE training anchors. At task entry, the user's working-copy configuration had changed to PRBS22/16000 blocks,1000 training blocks, online freeze500 modal occurrences/100 center events, dlev mu0.3/0.6 and FFE mu0.02/0.01. The initial no-argument baseline produced21/32 individual locks and14/32 freezes. The older36/12 andPRBS20 records below are historical, not this experiment.
+
+All tests retained the SS-MMPD equation, PD offset/polarity, ADC/channel scale, fixed main tap, final2000-block modal-center +/-3 band/51-event count, and common-center +/-3 tolerance. The freeze thresholds500/100 were also fixed rather than relaxed to manufacture a pass. Eight/nine representative starts screened21 candidate configurations; promising cases were rechecked over all32 starts `0:4:124`.
+
+### Applied parameters
+
+Only three numerical defaults changed relative to task entry:
+
+| Parameter | Before | Selected |
+|---|---:|---:|
+| dlev `StepSizeSettle` | 0.6 | **0.1** |
+| FFE `FfeStepSize` | 0.02 | **0.0018** |
+| FFE `FfeStepSizeSettle` | 0.01 | **0.0002** |
+
+Retained: `Kp=8`, `Ki=0.03`, `MaxDeltaCode=12`, `StepSize=0.3`, `DlevOuterInit=48`, `DlevInnerInit=16`, `FfeTrainingBlocks=1000`, freeze500 occurrences/100events/+/-3, PRBS22 and `NumBlock=16000`. The lower FFE training rate reduces the high-anchor adaptation excursion, and the lower post-training update rates permit stable detector statistics and eventual freeze. This is measured behavioral tuning, not a proof of global optimality.
+
+### Current result and caveats
+
+- Direct no-argument execution completed in159.318s, matching the parameterized D03 finalist in seven checked arrays. **32/32 locked,32/32 frozen,AllPhaseLock=1**. Common21, modes20..22, spread2. Final-window events141..174 and0 violations.
+- dlev final means inner/outer12.0440/36.2132; spreads0.1078125/0.2484375, consistency passes. An initial outer48 is not a commanded final48 level: the live dlev tracks the equalized output.
+- FFE coefficient spread0.013181 passes0.02. Normalized pre1/post1+0.003673/-0.010433 pass the existing +/-0.02 tests. These are existing finite-run checks, not BER or exact ISI elimination.
+- Slowest first-capture start104: block3973, freeze5086, freeze/final markers22/21. Freeze range4867..6027. Both eyes use2048UI; freeze eye starts5087 at segment UI325692; final eye starts1022140. Selected frozen taps `[0.1142344,-0.3796844,1,0.1651656,0.008615625,0.02570937]`.
+- Acquisition is not slip-free: final accumulated slip ranges-73..-66UI, and the last slip occurs2331..2569 before freezing. This tune achieves eventual stable lock but can cycle through many UI during acquisition. Do not interpret it as shortest-acquisition, symbol-sync, jitter-tolerance, or BER qualification.
+- The final selected start's mean phase stays around21.5 after freeze. Main plots/MAT/first-capture and freeze CSVs now correspond to this PRBS22/16000,48/16 no-argument configuration.
+
+### Independent PRBS20/8000 holdout
+
+Identical gains/anchors/training/freeze thresholds, changed only code source and run length, give32/32 locks and32/32 freezes,AllPhaseLock=1,common21,modes19..21,spread2,min139events/no violations. FFE spread0.013025 and pre1/post1+0.004559/-0.012932 pass. Runtime51.80s, latest freeze5746. This separate test does not overwrite the primary PRBS22 figures. Per-start results are retained in `tuning_48_16_prbs20_holdout.csv`.
+
+### Reproduction and evidence
+
+```matlab
+addpath('validation/CDR/test_cdr_dlev_cdrffe');
+result = cdr_dlev_cdrffe_sslms_v3();  % current48/16, PRBS22,16000-block defaults
+
+% Independent shorter-code holdout without overwriting the main output:
+prbs20 = cdr_dlev_cdrffe_sslms_v3( ...
+    'CosimDir','channel_ctle_cosim', 'TxFile','tx_prbs20.mat', ...
+    'AnalysisNumUi',8000*64+512, 'NumBlock',8000, ...
+    'SaveOutputs',false, 'EyeDiagramEnable',false);
+```
+
+`AnalysisNumUi` remains the actual scheduler input; the user's `NumBlock` is used to derive its default inside the parser, not as a standalone post-parse override. Pass `AnalysisNumUi` explicitly when overriding length as above.
+
+`tuning_48_16_search.csv` contains21 candidate rows; `tuning_48_16_prbs20_holdout.csv` contains the independent32-start result. Session artifacts retain baseline, batch and finalist MAT/logs (`tune48_baseline`, `tune48_screen_a/b/c/d`, `tune48_full_c05`, `tune48_full_d03`, `tune48_noarg_final`, `tune48_prbs20_holdout`). All seven regression suites passed54 groups. The freeze-integration test now pins its original numerical fixture independently of defaults; no assertions were loosened. No commit was created automatically.
+
+## 2026-09-17: outputs switched back to PRBS20/8000 blocks (historical36/12 result)
 
 - User requested PRBS20 and8000 blocks rather than PRBS22/20000. Only run options changed: `CosimDir='channel_ctle_cosim'`, `TxFile='tx_prbs20.mat'`, `AnalysisNumUi=512512`. The same32 initial phases, explicit36/12 anchors, gains, training, online freeze thresholds and2048UI eyes were retained. These cache/length choices already are the script defaults; no source algorithm changed.
 - MATLAB R2025b runtime151.295s. All32 FFEs freeze and all32 individual phase-lock criteria pass; event counts154..192, no final-window band violations. Freeze blocks1229..1573. The all-start common-phase check fails: modes11..17, common15, starts28/32 at11 lie outside common15+/-3. Thus `AllStartsConverged=1` but `AllPhaseLock=0`; do not label the whole validation as all metrics passing.

@@ -1416,18 +1416,18 @@ defaults.LockDeltaTol = 1;
 defaults.DlevSettleWindow = 16;
 defaults.DlevSettleTol = 0.5;
 defaults.DlevPolarity = 1;
-defaults.DlevOuterInit = 48;
-defaults.DlevInnerInit = 16;
+defaults.DlevOuterInit = 40;
+defaults.DlevInnerInit = 13;
 % CDR FFE 环路默认参数(v3: Sign-Sign LMS)。SS-LMS 梯度 = sign(e)*sign(X)/N,幅度
 % 恒为 O(1) 而非 O(error*regressor)~O(300),故 mu 需比标准 LMS 大 ~200-300 倍方能
 % 获得相近的系数更新速度。AdaptEnableMask 固定主抽头(索引 3)为 1 作增益锚点。
 % FfeInitMode 选择方案 B(冷启动),FfeBiasScale 默认 0。
 % 默认 planB 冷启动训练模式:planB 从 [0 0 1 0 0 0] 冷启动,配训练序列由 golden
-% 符号驱动三环。SS-LMS 梯度量级小,捕获档 mu=0.02、稳态档 mu=0.001。实测
-% FfeStepSize=0.02 + FfeTrainingBlocks=500 + FfeStepSizeSettle=0.001 可全相位锁定,
+% 符号驱动三环。当前调优采用捕获档 mu=0.0018、稳态档 mu=0.0002、训练 T=1000。
+% 旧基线 mu=0.02/0.001、T=500 曾实现全相位锁定,
 % 稳态系数扩展 <0.01。
-defaults.FfeStepSize = 0.02;
-defaults.FfeStepSizeSettle = 1e-4;
+defaults.FfeStepSize = 0.0018;
+defaults.FfeStepSizeSettle = 0.0002;
 defaults.FfeAdaptEnableMask = logical([1 1 0 1 1 1]);
 defaults.FfeInitMode = 'planB';
 defaults.FfeBiasScale = 0;
@@ -1435,24 +1435,25 @@ defaults.FfeTargetCursor = 0.05;
 defaults.FfeTargetSkew = 0;
 defaults.FfeSettleDelay = 250;
 defaults.FfeReleaseMode = 'staged';
-% 训练模式块数 N:默认 500 开启数据辅助冷启动(需配 FfeInitMode='planB')。~200 块已够张眼,配
-% numBlocks=8000,训练结束后仍有 7500 个块做判决引导自收敛长观察。设为 0 可关闭训练、
+% 训练模式块数 N:当前默认 1000 块数据辅助冷启动(需配 FfeInitMode='planB')。
+% 默认 PRBS22/16000 块中余下 15000 块做判决导向更新与冻结监测。设为 0 可关闭训练、
 % 退回纯决策导向(此时应同时把 FfeInitMode 改回 'planA')。
-defaults.FfeTrainingBlocks = 500;
+defaults.FfeTrainingBlocks = 1000;
 defaults.FfeFreezeEnable = true;
-defaults.FfeFreezeMinModeOccurrences = 100;
-defaults.FfeFreezeMinEvents = 50;
+defaults.FfeFreezeMinModeOccurrences = 500;
+defaults.FfeFreezeMinEvents = 100;
 defaults.FfeFreezeBandHalfWidth = 3;
 defaults.EyeDiagramEnable = true;
 defaults.EyeDiagramUiCount = 2048;
 defaults.SaveOutputs = true;
 defaults.ResultDir = '';
 defaults.StartPhaseList = [];
-% CTLE 缓存选择:默认 PRBS20 完整周期。切 PRBS22 长周期时传
+% CTLE 缓存选择:默认 PRBS22 长周期、NumBlock=16000。切换缓存时传
 % 'CosimDir','channel_ctle_cosim_prbs22','TxFile','tx_prbs22.mat' 并加大 'AnalysisNumUi'。
-defaults.CosimDir = 'channel_ctle_cosim';
-defaults.TxFile = 'tx_prbs20.mat';
-defaults.AnalysisNumUi = 512512;
+defaults.CosimDir = 'channel_ctle_cosim_prbs22';
+defaults.TxFile = 'tx_prbs22.mat';
+defaults.NumBlock = 8000;
+defaults.AnalysisNumUi = defaults.NumBlock * 64 + 512;
 
 options = defaults;
 if isempty(varargin)

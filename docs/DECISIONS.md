@@ -1,5 +1,12 @@
 ﻿# Decisions
 
+## 2026-09-17: retain48/16 anchors and tune update rates for final all-start lock
+
+- Preserve the task-entry user choices of PRBS22/16000 blocks,1000 training blocks, online freeze500 occurrences/100 events, and dlev/FFE anchor48/16. Evaluate real trajectories without relaxing final mode/count/common-phase gates or changing PD polarity/bias, ADC/channel scaling, tap constraints, or update equations.
+- Adopt dlev settle mu0.1, FFE capture mu0.0018 and FFE settle mu0.0002 in place of0.6/0.02/0.01. Retain Kp8, Ki0.03, dlev capture mu0.3 and MaxDeltaCode12. Twenty-one representative-start candidates were screened; simply lowering gains enough to pin modes at44/45 near the PD-bias boundary, or achieving per-start locks without all freezes/common-center agreement, was not treated as a sufficient final result.
+- Selected candidate D03 passes the32-start no-argument fixture: modes20..22/common21, all32lock/freeze, FFE coefficient spread0.013181<0.02 and pre1/post1+0.003673/-0.010433 within existing bounds. Same gains pass an independent PRBS20/8000 holdout with modes19..21 and FFE/cursor gates passing. Original integration-test numerical fixture is now explicit so future default tuning does not redefine that test.
+- Limit: capture entails66..73 accumulated UI slips before settling; the selection optimizes demonstrated final lock/consistency, not minimum acquisition time/slip or BER. No final-lock criterion is replaced by zero coefficient variance caused by freezing. Full records are in CURRENT_STATE, VALIDATION and result-directory tuning CSVs.
+
 ## 2026-09-17: causal FFE write-freeze with two 2048-UI post-FFE eyes
 
 - User approved an online, per-start FFE write gate: monitoring starts only after training; cumulative current-search mode must appear at least100 times before its center is latched; then50 center-touch/direct-cross events inside inclusive +/-3 codes trigger permanent freeze. Candidate violations clear both modal search and event history. This is distinct from the final retrospective lock criterion (last2000 samples, at least51 events), which remains unchanged.

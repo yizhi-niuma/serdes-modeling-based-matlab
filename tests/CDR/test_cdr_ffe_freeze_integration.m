@@ -11,6 +11,8 @@ cleanup = onCleanup(@() restoreEnvironment(oldPath, oldRng, outputDir)); %#ok<NA
 addpath(fullfile(repoRoot, 'validation', 'CDR', 'test_cdr_dlev_cdrffe'));
 
 opts = struct();
+% Pin behavioral write-freeze regression independently of tuned defaults.
+opts.CosimDir = 'channel_ctle_cosim'; opts.TxFile = 'tx_prbs20.mat'; opts.Kp = 8; opts.Ki = .03; opts.MaxDeltaCode = 12; opts.PdOffset = -.05; opts.StepSize = .3; opts.StepSizeSettle = .1; opts.FfeStepSize = .02; opts.FfeStepSizeSettle = 1e-4; opts.FfeTrainingBlocks = 500;
 opts.AnalysisNumUi = 2500 * 64 + 512;
 opts.StartPhaseList = [20 96];
 opts.DlevOuterInit = 36;
