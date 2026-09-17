@@ -49,6 +49,7 @@ addpath(fullfile(repoRoot, 'src', 'ADC', 'TI_ADC'));
 addpath(fullfile(repoRoot, 'src', 'CDR'));
 
 options = parseLoopOptions(varargin{:});
+validateFreezeEyeOptions(options);
 % CTLE 缓存:默认 PRBS20 完整周期(CosimDir='channel_ctle_cosim'),可切到独立缓存(如 PRBS22)。
 cachePath = fullfile(cdrValidationDir, 'test_cdr', 'result', ...
     options.CosimDir, 'channel_ctle.mat');
@@ -199,6 +200,7 @@ assert(piCodeCount == samplePerSymbol, ...
     'The PI code count must equal the samples per UI.');
 
 options = parseLoopOptions(varargin{:});
+validateFreezeEyeOptions(options);
 
 % dlev 初值:硬件可实现的标称值,由 ADC 满量程与 AGC 目标决定,不依赖离线扫描。
 dlevOuterNominal = options.DlevOuterInit;
@@ -243,6 +245,15 @@ ffeReleaseMode = options.FfeReleaseMode;
 % [0 0 1 0 0 0] 撑开眼图;第 N 块后一次性切回决策导向并降档 mu。N=0 关闭训练模式,
 % 退化为纯决策导向(原行为)。训练模式需配 planB 冷启动使用。
 ffeTrainingBlocks = options.FfeTrainingBlocks;
+% 在线 FFE 写冻结:训练结束后的第一个块起,用进入当前处理块的未展开 PI code 做因果
+% 模态/中心事件检测。一旦触发便永久禁止系数写入,但 SS-LMS 原始增量仍照常计算并记录。
+ffeFreezeEnable = logical(options.FfeFreezeEnable);
+ffeFreezeMinModeOccurrences = options.FfeFreezeMinModeOccurrences;
+ffeFreezeMinEvents = options.FfeFreezeMinEvents;
+ffeFreezeBandHalfWidth = options.FfeFreezeBandHalfWidth;
+ffeFreezeStartBlock = max(ffeTrainingBlocks + 1, 1);
+eyeDiagramEnable = logical(options.EyeDiagramEnable);
+eyeDiagramUiCount = options.EyeDiagramUiCount;
 % 训练模式总开关:N>0 时启用数据辅助冷启动。训练模式要求 planB 冷启动,并从第 1 块起
 % 就让 FFE 自适应(由 golden 符号驱动),不再走 staged/concurrent 的锁定释放逻辑。
 trainingMode = ffeTrainingBlocks > 0;
@@ -275,7 +286,17 @@ maxFirstUi = analysisNumUi - adcBlockUi - uiGuard;
 numBlocks = floor((maxFirstUi - baseUi) / adcBlockUi);
 assert(numBlocks > 60, 'The analysis segment is too short for the loop run.');
 
-startPhaseList = 0:4:samplePerSymbol - 1;
+if isempty(options.StartPhaseList)
+    startPhaseList = 0:4:samplePerSymbol - 1;
+else
+    startPhaseList = options.StartPhaseList;
+    assert(isnumeric(startPhaseList) && isreal(startPhaseList) && ...
+        isvector(startPhaseList) && ~isempty(startPhaseList) && ...
+        all(isfinite(startPhaseList)) && all(startPhaseList == fix(startPhaseList)) && ...
+        all(startPhaseList >= 0) && all(startPhaseList < samplePerSymbol), ...
+        'StartPhaseList must be a finite real integer vector with values in [0, samplePerSymbol).');
+    startPhaseList = double(startPhaseList(:).');
+end
 numStartPhase = numel(startPhaseList);
 
 phaseCodeTrace = zeros(numStartPhase, numBlocks);
@@ -288,8 +309,24 @@ dlevInnerTrace = zeros(numStartPhase, numBlocks);
 dlevOuterTrace = zeros(numStartPhase, numBlocks);
 dlevThresholdTrace = zeros(numStartPhase, numBlocks);
 ffeCoeffTrace = zeros(numStartPhase, numBlocks, cdrFfeTapCount);
-lockedPhaseCode = zeros(1, numStartPhase);
+ffeRawDeltaTrace = nan(numStartPhase, numBlocks, cdrFfeTapCount);
+ffeProposedCoefficientTrace = nan(numStartPhase, numBlocks, cdrFfeTapCount);
+ffeAppliedDeltaTrace = zeros(numStartPhase, numBlocks, cdrFfeTapCount);
+ffeAdaptationCalculatedTrace = false(numStartPhase, numBlocks);
+ffeWriteAppliedTrace = false(numStartPhase, numBlocks);
+ffeFrozenTrace = false(numStartPhase, numBlocks);
+ffeFreezeBlock = nan(1, numStartPhase);
+ffeFreezeCenterUnwrapped = nan(1, numStartPhase);
+ffeFreezeCenterWrapped = nan(1, numStartPhase);
+ffeFreezeModeOccurrences = zeros(1, numStartPhase);
+ffeFreezeEventCount = zeros(1, numStartPhase);
+ffeFreezeResetCount = zeros(1, numStartPhase);
+ffeFrozenCoefficients = nan(numStartPhase, cdrFfeTapCount);
+ffeFreezeState = cell(1, numStartPhase);
+lockedPhaseCode = nan(1, numStartPhase);
 lockedFlag = false(1, numStartPhase);
+piCenterDiagnostics = cell(1, numStartPhase);
+phaseSettleStd = nan(1, numStartPhase);
 ffeReleasePhaseCodeTrace = -ones(1, numStartPhase);
 
 % 直方图取样相位:选离参考相位最近的起始相位,收敛后的输出分布与相位无关,任取一
@@ -302,7 +339,9 @@ histogramOutputHistory = [];
 postTrainOutputHistory = [];
 
 settleBlocks = 30;
-lockStdTolerance = 2.0;
+piLockWindowBlocks = 2000;
+piLockMinEvents = 51;
+piLockBandHalfWidth = 3;
 dlevSettleStdTolerance = 1.0;
 % FFE 判据:稳态窗口内各自由抽头系数的 std 需低于此阈值,判断 FFE 是否收敛稳定。
 ffeSettleStdTolerance = 0.01;
@@ -339,6 +378,9 @@ for startIndex = 1:numStartPhase
         adcResolutionBits, adcSarPerTah, samplePerSymbol);
     adcModel.setInputMargin(0);
     ffeModel = cdr_ffe(ffeInitCoefficients, cdrFfePreTapCount);
+    % 每个起始相位独立检测并冻结,不跨相位继承候选、计数或已冻结状态。
+    freezeMonitor = ffe_freeze_monitor(ffeFreezeMinModeOccurrences, ...
+        ffeFreezeMinEvents, ffeFreezeBandHalfWidth, ffeFreezeStartBlock);
 
     % cdr_ffe 无跨块缓存,采样与处理错开一个块。pendingCentered 暂存待处理块整块
     % code,pendingPast 暂存其 PostTap 个过去样本,pendingHasPast 标记冷启动首块。
@@ -541,11 +583,32 @@ for startIndex = 1:numStartPhase
             %   - mu 需比标准 LMS 大 ~100-300 倍以补偿梯度量级压缩。
             % 训练期 ffeDecision 仍用固定锚缩放,避免与 dlev 构成缩零正反馈。主抽头由
             % AdaptEnableMask 固定为增益锚点,增量里主抽头分量末了强制归零。
+            % 冻结检测严格使用进入当前处理块的 pending 采样 code,且在本块输出已经由
+            % 当前有效抽头算出后、任何系数写入前更新一次(末尾部分有效块也更新)。
+            if ffeFreezeEnable
+                unwrappedCode = uiSlip * samplePerSymbol + codeWrapped;
+                freezeTriggered = freezeMonitor.update(unwrappedCode, blockIndex);
+                if freezeTriggered
+                    ffeFrozenCoefficients(startIndex, :) = ffeModel.Coefficients;
+                end
+            end
+
             if ffeReleased && numel(ffeOutput) == adcBlockUi
                 errorBlock = ffeDecision - ffeOutput;
                 rawDelta = ffeLoop.updateSsLms(blockRegressor, errorBlock);
                 rawDelta(cdrFfeMainTapIndex) = 0;
-                ffeModel.applyCoefficientDelta(rawDelta);
+                proposedCoefficients = ffeModel.Coefficients + rawDelta;
+                ffeAdaptationCalculatedTrace(startIndex, blockIndex) = true;
+                ffeRawDeltaTrace(startIndex, blockIndex, :) = ...
+                    reshape(rawDelta, 1, 1, cdrFfeTapCount);
+                ffeProposedCoefficientTrace(startIndex, blockIndex, :) = ...
+                    reshape(proposedCoefficients, 1, 1, cdrFfeTapCount);
+                if ~freezeMonitor.Frozen
+                    ffeModel.applyCoefficientDelta(rawDelta);
+                    ffeAppliedDeltaTrace(startIndex, blockIndex, :) = ...
+                        reshape(rawDelta, 1, 1, cdrFfeTapCount);
+                    ffeWriteAppliedTrace(startIndex, blockIndex) = true;
+                end
 
                 % 直方图相位:累积稳态阶段的整块 FFE 输出 code,后续取尾段约 2048 个。
                 if startIndex == histogramPhaseIndex
@@ -572,6 +635,8 @@ for startIndex = 1:numStartPhase
             dlevThresholdTrace(startIndex, blockIndex) = dlevLoop.Threshold;
             ffeCoeffTrace(startIndex, blockIndex, :) = ...
                 reshape(ffeModel.Coefficients, 1, 1, cdrFfeTapCount);
+            ffeFrozenTrace(startIndex, blockIndex) = ...
+                ffeFreezeEnable && freezeMonitor.Frozen;
         end
 
         if sampleBlockIndex <= numBlocks
@@ -591,37 +656,107 @@ for startIndex = 1:numStartPhase
         end
     end
 
-    settleWindow = phaseCodeTrace(startIndex, end - settleBlocks + 1:end);
-    lockedPhaseCode(startIndex) = round(mean(settleWindow));
+    freezeState = freezeMonitor.getState();
+    ffeFreezeState{startIndex} = freezeState;
+    ffeFreezeResetCount(startIndex) = freezeState.ResetCount;
+    if freezeState.Frozen
+        ffeFreezeBlock(startIndex) = freezeState.FreezeBlock;
+        ffeFreezeCenterUnwrapped(startIndex) = freezeState.CenterUnwrapped;
+        if isfinite(freezeState.CenterUnwrapped)
+            ffeFreezeCenterWrapped(startIndex) = ...
+                mod(freezeState.CenterUnwrapped, samplePerSymbol);
+        end
+        ffeFreezeModeOccurrences(startIndex) = freezeState.ModeOccurrences;
+        ffeFreezeEventCount(startIndex) = freezeState.EventCount;
+        ffeFreezeResetCount(startIndex) = freezeState.ResetCount;
+    end
+
+    settleWindow = unwrappedPhaseTrace(startIndex, ...
+        end - settleBlocks + 1:end);
+    phaseSettleStd(startIndex) = std(settleWindow);
+    [lockedFlag(startIndex), lockedPhaseCode(startIndex), ...
+        piCenterDiagnostics{startIndex}] = detect_pi_center_touch_lock( ...
+        unwrappedPhaseTrace(startIndex, :), piLockWindowBlocks, ...
+        piLockMinEvents, piLockBandHalfWidth, samplePerSymbol);
     ffeReleasePhaseCodeTrace(startIndex) = ffeReleasePhaseCode;
     dlevInnerSettleStd = std(dlevInnerTrace(startIndex, ...
         end - settleBlocks + 1:end));
     dlevOuterSettleStd = std(dlevOuterTrace(startIndex, ...
         end - settleBlocks + 1:end));
-    % FFE 稳态判据:各自由抽头系数在稳态窗口内的 std 取最大值,低于阈值判收敛。
+    % dlev/FFE 稳态 std 继续作为独立诊断输出,不参与 PI 相位锁定门控。
     ffeSettleStdPerTap = std(ffeCoeffTrace(startIndex, ...
         end - settleBlocks + 1:end, :), 0, 2);
     ffeSettleStdPerTap = reshape(ffeSettleStdPerTap, 1, cdrFfeTapCount);
     ffeSettleStdMax = max(ffeSettleStdPerTap);
-    lockedFlag(startIndex) = std(settleWindow) <= lockStdTolerance && ...
-        dlevInnerSettleStd <= dlevSettleStdTolerance && ...
-        dlevOuterSettleStd <= dlevSettleStdTolerance && ...
-        ffeSettleStdMax <= ffeSettleStdTolerance;
 
-    fprintf(['Start phase %3d/%d: locked=%d, steady phase code=%d, ' ...
+    centerDiag = piCenterDiagnostics{startIndex};
+    fprintf(['  FFE freeze: enabled=%d, frozen=%d, block=%g, center=%g/%g, ' ...
+        'mode occurrences=%d, events=%d, resets=%d.\n'], ...
+        ffeFreezeEnable, freezeState.Frozen, ffeFreezeBlock(startIndex), ...
+        ffeFreezeCenterUnwrapped(startIndex), ffeFreezeCenterWrapped(startIndex), ...
+        ffeFreezeModeOccurrences(startIndex), ffeFreezeEventCount(startIndex), ...
+        ffeFreezeResetCount(startIndex));
+    fprintf(['Start phase %3d/%d: locked=%d, modal phase code=%g, ' ...
+        'final events=%d, total events=%d, outside=%d, phase std=%.3f, ' ...
         'final SS-MM error=%.4g, dLev=[%.2f %.2f] (std=[%.3f %.3f]), ' ...
         'ffe std max=%.4g.\n'], ...
         startPhase, samplePerSymbol, lockedFlag(startIndex), ...
-        lockedPhaseCode(startIndex), timingErrorTrace(startIndex, end), ...
+        lockedPhaseCode(startIndex), centerDiag.FinalCount, ...
+        centerDiag.TotalEvents, centerDiag.OutOfBandCount, ...
+        phaseSettleStd(startIndex), timingErrorTrace(startIndex, end), ...
         dlevInnerTrace(startIndex, end), dlevOuterTrace(startIndex, end), ...
         dlevInnerSettleStd, dlevOuterSettleStd, ffeSettleStdMax);
 end
 
-commonLockPhase = round(median(lockedPhaseCode(lockedFlag)));
-phaseSpread = max(lockedPhaseCode(lockedFlag)) - ...
-    min(lockedPhaseCode(lockedFlag));
-allPhaseLock = all(lockedFlag) && ...
-    all(abs(lockedPhaseCode - commonLockPhase) <= 3);
+% Select the finally locked start whose first full-trajectory PI capture is
+% latest. Each row uses its fixed final-window unwrapped modal center; the
+% helper records the first accumulation of piLockMinEvents inside the band,
+% so later outlier resets do not erase an earlier capture time.
+centerUnwrapped = cellfun(@(diagnostic) diagnostic.CenterUnwrapped, ...
+    piCenterDiagnostics);
+[firstCaptureBlock, slowestIndex] = select_slowest_pi_capture( ...
+    unwrappedPhaseTrace, centerUnwrapped, lockedFlag, ...
+    piLockMinEvents, piLockBandHalfWidth);
+selectionFlag = isfinite(slowestIndex);
+selectedStartPhase = NaN;
+selectedCaptureBlock = NaN;
+selectedModalPhaseCode = NaN;
+if selectionFlag
+    selectedStartPhase = startPhaseList(slowestIndex);
+    selectedCaptureBlock = firstCaptureBlock(slowestIndex);
+    selectedModalPhaseCode = lockedPhaseCode(slowestIndex);
+    fprintf(['Convergence plots select slowest first PI capture: start phase %d, ' ...
+        'first capture block %d, modal phase code %d.\n'], ...
+        selectedStartPhase, selectedCaptureBlock, selectedModalPhaseCode);
+else
+    warning('cdr_dlev_cdrffe_sslms_v3:NoEligibleCapture', ...
+        ['No finally locked start phase has a qualifying first PI capture; ' ...
+        'the three convergence figures will contain placeholders.']);
+end
+
+% Aggregate locked PI centers on the phase ring. A deterministic circular
+% medoid (first minimum in start-phase order) supplies the reference branch;
+% all centers are lifted to their nearest copy before the median and spread
+% are calculated, so codes 127 and 0 remain one code apart rather than 127.
+lockedCodeList = lockedPhaseCode(lockedFlag);
+if isempty(lockedCodeList)
+    commonLockPhase = NaN;
+    phaseSpread = NaN;
+else
+    circularSeparation = abs(mod(lockedCodeList(:) - ...
+        lockedCodeList(:).' + samplePerSymbol / 2, samplePerSymbol) - ...
+        samplePerSymbol / 2);
+    [~, medoidIndex] = min(sum(circularSeparation, 2));
+    medoidCode = lockedCodeList(medoidIndex);
+    liftedLockedCode = medoidCode + mod(lockedCodeList - medoidCode + ...
+        samplePerSymbol / 2, samplePerSymbol) - samplePerSymbol / 2;
+    commonLockPhase = mod(floor(median(liftedLockedCode) + 0.5), ...
+        samplePerSymbol);
+    phaseSpread = max(liftedLockedCode) - min(liftedLockedCode);
+end
+commonDistance = abs(mod(lockedPhaseCode - commonLockPhase + ...
+    samplePerSymbol / 2, samplePerSymbol) - samplePerSymbol / 2);
+allPhaseLock = all(lockedFlag) && all(commonDistance <= 3);
 
 % dlev 一致性。
 dlevInnerFinal = dlevInnerTrace(:, end).';
@@ -693,6 +828,9 @@ else
 end
 
 resultDir = fullfile(testDir, 'result', 'cdr_dlev_cdrffe_sslms_v3');
+if ~isempty(options.ResultDir)
+    resultDir = options.ResultDir;
+end
 if saveOutputs && ~exist(resultDir, 'dir')
     mkdir(resultDir);
 end
@@ -712,20 +850,43 @@ resultMatPath = fullfile(resultDir, 'cdr_dlev_cdrffe_sslms_v3_result.mat');
 if saveOutputs
     fig = figure('Visible', 'off', 'Color', 'w', ...
         'Position', [100 100 1000 650]);
-    plot(blockAxis, phaseCodeTrace.', 'LineWidth', 1.0);
-    hold on;
-    yline(commonLockPhase, 'k--', sprintf('common lock code %d', ...
-        commonLockPhase), 'LineWidth', 1.2);
-    yline(referencePhase, 'm:', 'S-curve reference phase 19', ...
-        'LineWidth', 1.1);
-    hold off;
-    grid on;
-    xlim([blockAxis(1) blockAxis(end)]);
-    ylim([0 samplePerSymbol - 1]);
-    xlabel('CDR Block Index (64 UI per block)');
-    ylabel('PI Sampling Phase Code (wrapped, sample index)');
-    title(sprintf(['Triple-loop CDR Phase Convergence: %d start phases, ' ...
-        'Kp=%.3g, Ki=%.3g'], numStartPhase, loopKp, loopKi));
+    if selectionFlag
+        plot(blockAxis, phaseCodeTrace(slowestIndex, :), ...
+            'Color', [0.10 0.40 0.80], 'LineWidth', 1.0);
+        hold on;
+        yline(selectedModalPhaseCode, 'k--', ...
+            sprintf('selected modal code %d', selectedModalPhaseCode), ...
+            'LineWidth', 1.2);
+        yline(referencePhase, 'm:', ...
+            sprintf('S-curve reference phase %d', referencePhase), ...
+            'LineWidth', 1.1);
+        xline(selectedCaptureBlock, 'r--', ...
+            sprintf('first capture block %d', selectedCaptureBlock), ...
+            'LineWidth', 1.2);
+        hold off;
+        if ffeFrozenTrace(slowestIndex, end)
+            xline(ffeFreezeBlock(slowestIndex), '--', ...
+                sprintf('FFE frozen block %d', ffeFreezeBlock(slowestIndex)), ...
+                'Color', [0.1 0.6 0.2], 'LineWidth', 1.1, ...
+                'LabelVerticalAlignment', 'bottom');
+        end
+        title(sprintf(['Triple-loop CDR Phase Convergence: slowest first PI capture, ' ...
+            'start phase %d, first capture block %d, Kp=%.3g, Ki=%.3g'], ...
+            selectedStartPhase, selectedCaptureBlock, loopKp, loopKi));
+    else
+        axis off;
+        text(0.5, 0.5, ['No finally locked start phase has a qualifying ' ...
+            'first PI capture.'], 'Units', 'normalized', ...
+            'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+        title('Triple-loop CDR Phase Convergence: no eligible capture');
+    end
+    if selectionFlag
+        grid on;
+        xlim([blockAxis(1) blockAxis(end)]);
+        ylim([0 samplePerSymbol - 1]);
+        xlabel('CDR Block Index (64 UI per block)');
+        ylabel('PI Sampling Phase Code (wrapped, sample index)');
+    end
     exportgraphics(fig, convergenceFigurePath, 'Resolution', 150);
     close(fig);
 
@@ -733,83 +894,127 @@ if saveOutputs
 
     fig = figure('Visible', 'off', 'Color', 'w', ...
         'Position', [100 100 1000 620]);
-    plot(startPhaseList, lockedPhaseCode, 'bo-', 'LineWidth', 1.3, ...
-        'MarkerFaceColor', 'b');
+    plot(startPhaseList, lockedPhaseCode, '-', 'Color', [0.65 0.65 0.65], ...
+        'LineWidth', 1.0);
     hold on;
-    yline(commonLockPhase, 'k--', sprintf('common lock code %d', ...
-        commonLockPhase), 'LineWidth', 1.2);
+    plot(startPhaseList(lockedFlag), lockedPhaseCode(lockedFlag), 'bo', ...
+        'LineWidth', 1.3, 'MarkerFaceColor', 'b');
+    plot(startPhaseList(~lockedFlag), lockedPhaseCode(~lockedFlag), 'rx', ...
+        'LineWidth', 1.5, 'MarkerSize', 8);
+    if isfinite(commonLockPhase)
+        yline(commonLockPhase, 'k--', sprintf('common lock code %d', ...
+            commonLockPhase), 'LineWidth', 1.2);
+    end
     hold off;
     grid on;
-    xlim([startPhaseList(1) startPhaseList(end)]);
+    xlim([min(startPhaseList) - 0.5 max(startPhaseList) + 0.5]);
     xlabel('Initial Sampling Phase Code');
-    ylabel('Steady-state Locked Phase Code');
-    title(sprintf(['Locked Phase vs Start Phase (all-phase lock = %d, ' ...
-        'spread = %d code)'], allPhaseLock, phaseSpread));
+    ylabel('Modal PI code (last 2000 blocks)');
+    title(sprintf(['Modal PI Code vs Start Phase (%d/%d locked, ' ...
+        'all-phase lock = %d, spread = %g code)'], sum(lockedFlag), ...
+        numStartPhase, allPhaseLock, phaseSpread));
     exportgraphics(fig, lockSummaryFigurePath, 'Resolution', 150);
     close(fig);
 
     fig = figure('Visible', 'off', 'Color', 'w', ...
         'Position', [100 100 1000 650]);
-    plot(blockAxis, dlevOuterTrace.', 'LineWidth', 1.0);
-    hold on;
-    plot(blockAxis, dlevInnerTrace.', 'LineWidth', 1.0);
-    yline(dlevOuterReference, 'r--', ...
-        sprintf('outer ref %.2f', dlevOuterReference), 'LineWidth', 1.2);
-    yline(dlevInnerReference, 'r:', ...
-        sprintf('inner ref %.2f', dlevInnerReference), 'LineWidth', 1.2);
-    yline(dlevOuterInit, 'k--', sprintf('outer init %.2f', dlevOuterInit), ...
-        'LineWidth', 1.0);
-    yline(dlevInnerInit, 'k:', sprintf('inner init %.2f', dlevInnerInit), ...
-        'LineWidth', 1.0);
-    hold off;
-    grid on;
-    xlim([blockAxis(1) blockAxis(end)]);
-    xlabel('CDR Block Index (64 UI per block)');
-    ylabel('Adapted dLev (code domain)');
-    title(sprintf(['dLev Convergence: mu=%.4g->%.4g, inner spread=%.3g, ' ...
-        'outer spread=%.3g code'], dlevStepSize, dlevStepSizeSettle, ...
-        dlevInnerSpread, dlevOuterSpread));
+    if selectionFlag
+        plot(blockAxis, dlevOuterTrace(slowestIndex, :), ...
+            'Color', [0.10 0.40 0.80], 'LineWidth', 1.0);
+        hold on;
+        plot(blockAxis, dlevInnerTrace(slowestIndex, :), ...
+            'Color', [0.85 0.35 0.10], 'LineWidth', 1.0);
+        yline(dlevOuterReference, 'r--', ...
+            sprintf('outer ref %.2f', dlevOuterReference), 'LineWidth', 1.2);
+        yline(dlevInnerReference, 'r:', ...
+            sprintf('inner ref %.2f', dlevInnerReference), 'LineWidth', 1.2);
+        yline(dlevOuterInit, 'k--', sprintf('outer init %.2f', dlevOuterInit), ...
+            'LineWidth', 1.0);
+        yline(dlevInnerInit, 'k:', sprintf('inner init %.2f', dlevInnerInit), ...
+            'LineWidth', 1.0);
+        xline(selectedCaptureBlock, 'r--', ...
+            sprintf('PI first capture block %d', selectedCaptureBlock), ...
+            'LineWidth', 1.2);
+        hold off;
+        grid on;
+        xlim([blockAxis(1) blockAxis(end)]);
+        xlabel('CDR Block Index (64 UI per block)');
+        ylabel('Adapted dLev (code domain)');
+        if ffeFrozenTrace(slowestIndex, end)
+            xline(ffeFreezeBlock(slowestIndex), '--', ...
+                sprintf('FFE frozen block %d', ffeFreezeBlock(slowestIndex)), ...
+                'Color', [0.1 0.6 0.2], 'LineWidth', 1.1, ...
+                'LabelVerticalAlignment', 'bottom');
+        end
+        title(sprintf(['dLev Trace at Slowest PI First-Capture Start: phase %d, ' ...
+            'PI first capture block %d, mu=%.4g->%.4g'], ...
+            selectedStartPhase, selectedCaptureBlock, dlevStepSize, ...
+            dlevStepSizeSettle));
+    else
+        axis off;
+        text(0.5, 0.5, ['No finally locked start phase has a qualifying ' ...
+            'first PI capture.'], 'Units', 'normalized', ...
+            'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+        title('dLev Trace: no eligible PI capture');
+    end
     exportgraphics(fig, dlevConvergenceFigurePath, 'Resolution', 150);
     close(fig);
 
-    % FFE 系数收敛图:自由抽头各占一个子图,叠画全部起始相位的收敛轨迹,并标注
-    % 离线最优系数作为参考线,直观展示三环并发下 FFE 系数的收敛与跨相位一致性。
+    % FFE coefficient traces: one subplot per free tap and only the start
+    % selected by the slowest first PI-capture criterion.
     freeTapIndexList = find(logical(ffeAdaptEnableMask));
     numFreeTap = numel(freeTapIndexList);
     fig = figure('Visible', 'off', 'Color', 'w', ...
         'Position', [100 100 1100 720]);
-    tiledLayout = tiledlayout(fig, numFreeTap, 1, ...
-        'TileSpacing', 'compact', 'Padding', 'compact');
-    for freeIdx = 1:numFreeTap
-        tapIndex = freeTapIndexList(freeIdx);
-        nexttile(tiledLayout);
-        tapTrace = reshape(ffeCoeffTrace(:, :, tapIndex), ...
-            numStartPhase, numBlocks);
-        plot(blockAxis, tapTrace.', 'LineWidth', 0.8);
-        hold on;
-        yline(cdrFfeCoefficients(tapIndex), 'k--', ...
-            sprintf('offline %.4f', cdrFfeCoefficients(tapIndex)), ...
-            'LineWidth', 1.1);
-        hold off;
-        grid on;
-        xlim([blockAxis(1) blockAxis(end)]);
-        thisOffset = cdrFfeTapOffset(tapIndex);
-        if thisOffset < 0
-            tapName = sprintf('pre%d tap', -thisOffset);
-        elseif thisOffset > 0
-            tapName = sprintf('post%d tap', thisOffset);
-        else
-            tapName = 'main tap';
+    if selectionFlag
+        tiledLayout = tiledlayout(fig, numFreeTap, 1, ...
+            'TileSpacing', 'compact', 'Padding', 'compact');
+        for freeIdx = 1:numFreeTap
+            tapIndex = freeTapIndexList(freeIdx);
+            nexttile(tiledLayout);
+            tapTrace = reshape(ffeCoeffTrace(slowestIndex, :, tapIndex), ...
+                1, numBlocks);
+            plot(blockAxis, tapTrace, 'Color', [0.10 0.40 0.80], ...
+                'LineWidth', 0.9);
+            hold on;
+            yline(cdrFfeCoefficients(tapIndex), 'k--', ...
+                sprintf('offline %.4f', cdrFfeCoefficients(tapIndex)), ...
+                'LineWidth', 1.1);
+            xline(selectedCaptureBlock, 'r--', ...
+                sprintf('PI capture %d', selectedCaptureBlock), ...
+                'LineWidth', 1.0);
+            hold off;
+            grid on;
+            xlim([blockAxis(1) blockAxis(end)]);
+            if ffeFrozenTrace(slowestIndex, end)
+                xline(ffeFreezeBlock(slowestIndex), '--', ...
+                    'Color', [0.1 0.6 0.2], 'LineWidth', 1.0);
+            end
+            thisOffset = cdrFfeTapOffset(tapIndex);
+            if thisOffset < 0
+                tapName = sprintf('pre%d tap', -thisOffset);
+            elseif thisOffset > 0
+                tapName = sprintf('post%d tap', thisOffset);
+            else
+                tapName = 'main tap';
+            end
+            ylabel(sprintf('%s (offset %+d)', tapName, thisOffset));
+            if freeIdx == 1
+                title(tiledLayout, sprintf(['CDR FFE Trace at Slowest PI First-Capture ' ...
+                    'Start: phase %d, PI first capture block %d, %s, mu=%.3g->%.3g'], ...
+                    selectedStartPhase, selectedCaptureBlock, ffeInitMode, ...
+                    ffeStepSize, ffeStepSizeSettle));
+            end
+            if freeIdx == numFreeTap
+                xlabel('CDR Block Index (64 UI per block)');
+            end
         end
-        ylabel(sprintf('%s (offset %+d)', tapName, thisOffset));
-        if freeIdx == 1
-            title(tiledLayout, sprintf(['CDR FFE Coefficient Convergence ' ...
-                '(%s, mu=%.3g->%.3g)'], ffeInitMode, ffeStepSize, ...
-                ffeStepSizeSettle));
-        end
-        if freeIdx == numFreeTap
-            xlabel('CDR Block Index (64 UI per block)');
-        end
+    else
+        axis off;
+        text(0.5, 0.5, ['No finally locked start phase has a qualifying ' ...
+            'first PI capture.'], 'Units', 'normalized', ...
+            'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+        title('CDR FFE Trace: no eligible PI capture');
     end
     exportgraphics(fig, ffeConvergenceFigurePath, 'Resolution', 150);
     close(fig);
@@ -972,8 +1177,49 @@ result.DlevInnerTrace = dlevInnerTrace;
 result.DlevOuterTrace = dlevOuterTrace;
 result.DlevThresholdTrace = dlevThresholdTrace;
 result.FfeCoeffTrace = ffeCoeffTrace;
+result.FfeFreezeEnable = ffeFreezeEnable;
+result.FfeFreezeMinModeOccurrences = ffeFreezeMinModeOccurrences;
+result.FfeFreezeMinEvents = ffeFreezeMinEvents;
+result.FfeFreezeBandHalfWidth = ffeFreezeBandHalfWidth;
+result.FfeFreezeStartBlock = ffeFreezeStartBlock;
+result.FfeFrozenFlag = ffeFrozenTrace(:, end).';
+result.FfeFreezeBlock = ffeFreezeBlock;
+result.FfeFreezeCenterUnwrapped = ffeFreezeCenterUnwrapped;
+result.FfeFreezeCenterWrapped = ffeFreezeCenterWrapped;
+result.FfeFreezeModeOccurrences = ffeFreezeModeOccurrences;
+result.FfeFreezeEventCount = ffeFreezeEventCount;
+result.FfeFreezeResetCount = ffeFreezeResetCount;
+result.FfeFrozenCoefficients = ffeFrozenCoefficients;
+result.FfeFreezeState = [ffeFreezeState{:}];
+result.FfeRawDeltaTrace = ffeRawDeltaTrace;
+result.FfeProposedCoefficientTrace = ffeProposedCoefficientTrace;
+result.FfeAppliedDeltaTrace = ffeAppliedDeltaTrace;
+result.FfeAdaptationCalculatedTrace = ffeAdaptationCalculatedTrace;
+result.FfeWriteAppliedTrace = ffeWriteAppliedTrace;
+result.FfeFrozenTrace = ffeFrozenTrace;
 result.SettleBlocks = settleBlocks;
-result.LockStdTolerance = lockStdTolerance;
+result.LockCriterion = ['last-2000-block fixed unwrapped modal center; all samples ' ...
+    'within center +/-3 and final continuous run has at least 51 center-touch ' ...
+    'or strict side-cross events'];
+result.LockWindowBlocks = piLockWindowBlocks;
+result.LockMinEvents = piLockMinEvents;
+result.LockBandHalfWidth = piLockBandHalfWidth;
+result.PiCenterDiagnostics = [piCenterDiagnostics{:}];
+result.PiCenterFinalCount = [result.PiCenterDiagnostics.FinalCount];
+result.PiCenterTotalEvents = [result.PiCenterDiagnostics.TotalEvents];
+result.PiCenterOutOfBandCount = [result.PiCenterDiagnostics.OutOfBandCount];
+result.PiCenterOnsetBlock = [result.PiCenterDiagnostics.OnsetBlock];
+result.FirstCaptureBlock = firstCaptureBlock;
+result.SlowestCapturePhaseIndex = slowestIndex;
+result.SlowestCaptureStartPhase = selectedStartPhase;
+result.SlowestFirstCaptureBlock = selectedCaptureBlock;
+result.ConvergencePlotPhaseIndex = slowestIndex;
+result.ConvergencePlotStartPhase = selectedStartPhase;
+result.CaptureTimeCriterion = ['full-trajectory first accumulation of 51 center-touch ' ...
+    'or strict side-cross events within the fixed final-2000-block unwrapped modal ' ...
+    'center +/-3 band; outliers reset the active count, but later resets do not ' ...
+    'erase the first capture time; slowest selection considers only finally locked starts'];
+result.PhaseSettleStd = phaseSettleStd;
 result.DlevSettleStdTolerance = dlevSettleStdTolerance;
 result.FfeSettleStdTolerance = ffeSettleStdTolerance;
 result.LockedPhaseCode = lockedPhaseCode;
@@ -982,6 +1228,9 @@ result.FfeReleasePhaseCode = ffeReleasePhaseCodeTrace;
 result.CommonLockPhase = commonLockPhase;
 result.PhaseSpread = phaseSpread;
 result.AllPhaseLock = allPhaseLock;
+result.AllStartsConverged = all(lockedFlag);
+result.FfeTrainingBlocks = ffeTrainingBlocks;
+result.RunOptions = options;
 result.DlevInnerFinal = dlevInnerFinal;
 result.DlevOuterFinal = dlevOuterFinal;
 result.DlevInnerSpread = dlevInnerSpread;
@@ -1009,7 +1258,90 @@ result.DlevConvergenceFigurePath = dlevConvergenceFigurePath;
 result.FfeConvergenceFigurePath = ffeConvergenceFigurePath;
 result.FfeHistogramFigurePath = ffeHistogramFigurePath;
 result.TotalPathResponseFigurePath = totalPathResponseFigurePath;
+result.EyeDiagramEnable = eyeDiagramEnable;
+result.EyeDiagramUiCountRequested = eyeDiagramUiCount;
+freezeEye = struct('Valid', false, 'Reason', 'Eye diagrams disabled.');
+finalEye = struct('Valid', false, 'Reason', 'Eye diagrams disabled.');
+eyeMeta = struct();
+eyeFigurePaths = struct('Freeze', '', 'Final', '', 'Comparison', '');
+if eyeDiagramEnable
+    if selectionFlag
+        eyeInfo = struct();
+        eyeInfo.SelectedStartPhase = selectedStartPhase;
+        eyeInfo.SamplesPerUi = samplePerSymbol;
+        eyeInfo.NumBlocks = numBlocks;
+        eyeInfo.AdcBlockUi = adcBlockUi;
+        eyeInfo.BaseUi = baseUi;
+        eyeInfo.AnalysisStartUi = analysisStartUi;
+        eyeInfo.UiSlipTrace = uiSlipTrace(slowestIndex, :);
+        eyeInfo.PreTapCount = cdrFfePreTapCount;
+        eyeInfo.AdcBits = adcResolutionBits;
+        eyeInfo.AdcRange = [-adcFullRange adcFullRange];
+        eyeInfo.FinalCoefficients = ffeFinalCoefficients(slowestIndex, :);
+        eyeInfo.Frozen = logical(ffeFrozenTrace(slowestIndex, end));
+        eyeInfo.FreezeBlock = ffeFreezeBlock(slowestIndex);
+        eyeInfo.FrozenCoefficients = ffeFrozenCoefficients(slowestIndex, :);
+        eyeInfo.FreezeCenterCode = ffeFreezeCenterWrapped(slowestIndex);
+        eyeInfo.FinalLockCode = lockedPhaseCode(slowestIndex);
+        [freezeEye, finalEye, eyeMeta] = build_cdr_ffe_eye_pair( ...
+            ctleSegment, eyeInfo, eyeDiagramUiCount);
+    else
+        noSelectionReason = 'No finally locked start selected.';
+        freezeEye = struct('Valid', false, 'Reason', noSelectionReason);
+        finalEye = struct('Valid', false, 'Reason', noSelectionReason);
+        eyeMeta = struct('SelectedStartPhase', NaN);
+    end
+
+    eyePlotConfig = struct();
+    eyePlotConfig.ResultDir = resultDir;
+    eyePlotConfig.SelectedStartPhase = selectedStartPhase;
+    eyePlotConfig.FreezeBlock = NaN;
+    eyePlotConfig.FreezeCenterCode = NaN;
+    eyePlotConfig.FinalLockCode = NaN;
+    if selectionFlag
+        eyePlotConfig.FreezeBlock = ffeFreezeBlock(slowestIndex);
+        eyePlotConfig.FreezeCenterCode = ffeFreezeCenterWrapped(slowestIndex);
+        eyePlotConfig.FinalLockCode = lockedPhaseCode(slowestIndex);
+        if ffeFrozenTrace(slowestIndex, end)
+            eyePlotConfig.FixedFfeLabel = 'Frozen taps';
+        else
+            eyePlotConfig.FixedFfeLabel = 'Final live taps snapshot';
+        end
+    else
+        eyePlotConfig.FixedFfeLabel = 'Final live taps snapshot';
+    end
+    eyePlotConfig.UiCountRequested = eyeDiagramUiCount;
+    eyePlotConfig.SaveOutputs = saveOutputs;
+    eyeFigurePaths = plot_cdr_ffe_eyes(freezeEye, finalEye, eyePlotConfig);
+end
+result.EyeDiagramFreeze = freezeEye;
+result.EyeDiagramFinal = finalEye;
+result.EyeDiagramMetadata = eyeMeta;
+result.FreezeFigurePath = eyeFigurePaths.Freeze;
+result.FinalFigurePath = eyeFigurePaths.Final;
+result.ComparisonFigurePath = eyeFigurePaths.Comparison;
 result.ResultMatPath = resultMatPath;
+result.EyeDiagramFreezeFigurePath = eyeFigurePaths.Freeze;
+result.EyeDiagramFinalFigurePath = eyeFigurePaths.Final;
+result.EyeDiagramComparisonFigurePath = eyeFigurePaths.Comparison;
+result.FirstCaptureSummaryPath = fullfile(resultDir, 'first_capture_summary.csv');
+result.FfeFreezeSummaryPath = fullfile(resultDir, 'ffe_freeze_summary.csv');
+if saveOutputs
+    writetable(table(result.StartPhaseList(:), result.LockedPhaseCode(:), ...
+        result.LockedFlag(:), result.FirstCaptureBlock(:), ...
+        result.PiCenterFinalCount(:), 'VariableNames', ...
+        {'StartPhase', 'TailMode', 'FinalLocked', 'FirstCaptureBlock', ...
+        'FinalWindowEventCount'}), result.FirstCaptureSummaryPath);
+    writetable(table(result.StartPhaseList(:), result.FfeFreezeBlock(:), ...
+        result.FfeFreezeCenterWrapped(:), result.FfeFreezeModeOccurrences(:), ...
+        result.FfeFreezeEventCount(:), result.FfeFreezeResetCount(:), ...
+        result.LockedPhaseCode(:), result.LockedFlag(:), ...
+        result.PiCenterFinalCount(:), result.FirstCaptureBlock(:), ...
+        'VariableNames', {'StartPhase', 'FreezeBlock', 'FreezeCenter', ...
+        'CenterOccurrences', 'FreezeEvents', 'SearchResets', 'FinalMode', ...
+        'FinalLocked', 'FinalWindowEvents', 'FirstCaptureBlock'}), ...
+        result.FfeFreezeSummaryPath);
+end
 if saveOutputs
     save(resultMatPath, 'result', '-v7.3');
 end
@@ -1021,7 +1353,7 @@ if allPhaseLock
         commonLockPhase, phaseSpread, referencePhase);
 else
     fprintf(['CDR triple loop did NOT reach full-phase lock: %d/%d ' ...
-        'phases stable, spread %d code. Retune gains/mu/polarity.\n'], ...
+        'phases modal-center locked, spread %g code.\n'], ...
         sum(lockedFlag), numStartPhase, phaseSpread);
 end
 if dlevConsistent
@@ -1058,7 +1390,11 @@ fprintf(['Total-path unit-UI response (norm to main): pre=[%s], ' ...
     'post=[%s].\n'], ...
     strtrim(sprintf('%.3f ', displayNormalizedCursor(displayEvalOffset < 0))), ...
     strtrim(sprintf('%.3f ', displayNormalizedCursor(displayEvalOffset > 0))));
-fprintf('Results saved to %s.\n', resultDir);
+if saveOutputs
+    fprintf('Results saved to %s.\n', resultDir);
+else
+    fprintf('Outputs not saved (SaveOutputs=false).\n');
+end
 end
 
 function options = parseLoopOptions(varargin)
@@ -1080,8 +1416,8 @@ defaults.LockDeltaTol = 1;
 defaults.DlevSettleWindow = 16;
 defaults.DlevSettleTol = 0.5;
 defaults.DlevPolarity = 1;
-defaults.DlevOuterInit = 36;
-defaults.DlevInnerInit = 12;
+defaults.DlevOuterInit = 48;
+defaults.DlevInnerInit = 16;
 % CDR FFE 环路默认参数(v3: Sign-Sign LMS)。SS-LMS 梯度 = sign(e)*sign(X)/N,幅度
 % 恒为 O(1) 而非 O(error*regressor)~O(300),故 mu 需比标准 LMS 大 ~200-300 倍方能
 % 获得相近的系数更新速度。AdaptEnableMask 固定主抽头(索引 3)为 1 作增益锚点。
@@ -1103,7 +1439,15 @@ defaults.FfeReleaseMode = 'staged';
 % numBlocks=8000,训练结束后仍有 7500 个块做判决引导自收敛长观察。设为 0 可关闭训练、
 % 退回纯决策导向(此时应同时把 FfeInitMode 改回 'planA')。
 defaults.FfeTrainingBlocks = 500;
+defaults.FfeFreezeEnable = true;
+defaults.FfeFreezeMinModeOccurrences = 100;
+defaults.FfeFreezeMinEvents = 50;
+defaults.FfeFreezeBandHalfWidth = 3;
+defaults.EyeDiagramEnable = true;
+defaults.EyeDiagramUiCount = 2048;
 defaults.SaveOutputs = true;
+defaults.ResultDir = '';
+defaults.StartPhaseList = [];
 % CTLE 缓存选择:默认 PRBS20 完整周期。切 PRBS22 长周期时传
 % 'CosimDir','channel_ctle_cosim_prbs22','TxFile','tx_prbs22.mat' 并加大 'AnalysisNumUi'。
 defaults.CosimDir = 'channel_ctle_cosim';
@@ -1361,6 +1705,30 @@ polarity = int8(polarity);
 decision = zeros(size(valid), 'int8');
 decision(valid) = -polarity;
 decision(early) = polarity;
+end
+
+function validateFreezeEyeOptions(options)
+%VALIDATEFREEZEEYEOPTIONS Validate freeze diagnostics and eye controls.
+validateattributes(options.FfeFreezeEnable, {'numeric', 'logical'}, ...
+    {'scalar', 'finite', 'real'}, mfilename, 'FfeFreezeEnable');
+assert(ismember(double(options.FfeFreezeEnable), [0 1]), ...
+    'FfeFreezeEnable must be a scalar logical value or numeric 0/1.');
+validateattributes(options.FfeFreezeMinModeOccurrences, {'numeric'}, ...
+    {'scalar', 'finite', 'real', 'integer', '>=', 1}, mfilename, ...
+    'FfeFreezeMinModeOccurrences');
+validateattributes(options.FfeFreezeMinEvents, {'numeric'}, ...
+    {'scalar', 'finite', 'real', 'integer', '>=', 1}, mfilename, ...
+    'FfeFreezeMinEvents');
+validateattributes(options.FfeFreezeBandHalfWidth, {'numeric'}, ...
+    {'scalar', 'finite', 'real', 'integer', '>=', 0}, mfilename, ...
+    'FfeFreezeBandHalfWidth');
+validateattributes(options.EyeDiagramEnable, {'numeric', 'logical'}, ...
+    {'scalar', 'finite', 'real'}, mfilename, 'EyeDiagramEnable');
+assert(ismember(double(options.EyeDiagramEnable), [0 1]), ...
+    'EyeDiagramEnable must be a scalar logical value or numeric 0/1.');
+validateattributes(options.EyeDiagramUiCount, {'numeric'}, ...
+    {'scalar', 'finite', 'real', 'integer', '>=', 2}, mfilename, ...
+    'EyeDiagramUiCount');
 end
 
 function valid = ssMmpdValid(dataPrev, errorPrev, dataCurr, errorCurr)
