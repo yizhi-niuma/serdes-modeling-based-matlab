@@ -79,7 +79,6 @@ compareFields(live, unused, {'PhaseCodeTrace', 'FfeCoeffTrace', ...
 noTraining = opts;
 noTraining.FfeTrainingBlocks = 0;
 noTraining.FfeInitMode = 'planA';
-noTraining.FfeReleaseMode = 'concurrent';
 noTraining.FfeTrainingReferenceMode = 'fixed';
 noTrainingFixed = runCase(noTraining);
 noTraining.FfeTrainingReferenceMode = 'live-dlev';

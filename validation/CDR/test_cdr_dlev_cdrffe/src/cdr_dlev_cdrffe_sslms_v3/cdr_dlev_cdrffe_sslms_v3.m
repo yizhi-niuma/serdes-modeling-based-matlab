@@ -35,7 +35,7 @@
 %      方案 A(FfeInitMode='planA'):以离线最优解 cdrFfeCoefficients 为基准,在自由
 %      抽头上人为叠加偏差 FfeBiasScale 作为收敛压力测试。两方案均不再做任何投影。
 %
-%   5) 三档协同的 mu 换挡:相位环锁定且 dlev 收敛后,dlev 与 FFE 同时从捕获档大 mu
+%   5) 三环并发启动并协同换挡:训练结束且 dlev 收敛后,dlev 与 FFE 同时从捕获档大 mu
 %      降到稳态档小 mu,压低稳态抖动;只降一次,不设强制兜底,避免在相位尚未收敛时
 %      把电平/系数冻结在错值上。
 %
@@ -231,8 +231,6 @@ pdOffset = options.PdOffset;
 phaseDetector = cdr_pd('pam4', pdPolarity);
 dlevStepSize = options.StepSize;
 dlevStepSizeSettle = options.StepSizeSettle;
-lockWindow = options.LockWindow;
-lockDeltaTol = options.LockDeltaTol;
 dlevSettleWindow = options.DlevSettleWindow;
 dlevSettleTol = options.DlevSettleTol;
 dlevPolarity = options.DlevPolarity;
@@ -244,12 +242,6 @@ ffeStepSizeSettle = options.FfeStepSizeSettle;
 ffeAdaptEnableMask = options.FfeAdaptEnableMask;
 ffeInitMode = options.FfeInitMode;
 ffeBiasScale = options.FfeBiasScale;
-% FFE 放开后至少再自适应 ffeSettleDelay 个块才允许降档,给目标脉冲 LMS 留足重塑时间。
-ffeSettleDelay = options.FfeSettleDelay;
-% FFE 释放时机。'staged':阶段一冻结 FFE,先让相位/dlev 捕获,锁定后再放开(要求起步
-% 眼图已张开,配 planA 使用)。'concurrent':三环从第 1 块起并发自适应,FFE 目标脉冲
-% LMS 在捕获期就把眼图撑开,支持 planB 冷启动 [0 0 1 0 0 0] 的真正三环并发收敛。
-ffeReleaseMode = options.FfeReleaseMode;
 % 训练模式块数 N:前 N 个处理块用发送端 golden 符号做数据辅助自适应(MMPD 与 FFE
 % 参考流均以 TX 真值符号代替判决),让相位/FFE 在闭眼期也拿到正确梯度,从冷启动
 % [0 0 1 0 0 0] 撑开眼图;第 N 块后一次性切回决策导向并降档 mu。N=0 关闭训练模式,
@@ -264,8 +256,8 @@ ffeFreezeBandHalfWidth = options.FfeFreezeBandHalfWidth;
 ffeFreezeStartBlock = max(ffeTrainingBlocks + 1, 1);
 eyeDiagramEnable = logical(options.EyeDiagramEnable);
 eyeDiagramUiCount = options.EyeDiagramUiCount;
-% 训练模式总开关:N>0 时启用数据辅助冷启动。训练模式要求 planB 冷启动,并从第 1 块起
-% 就让 FFE 自适应(由 golden 符号驱动),不再走 staged/concurrent 的锁定释放逻辑。
+% 训练模式总开关:N>0 时启用数据辅助冷启动。FFE 始终从第 1 块起与相位/dlev
+% 并发自适应;训练期由 golden 符号驱动,训练结束后切换为判决导向。
 trainingMode = ffeTrainingBlocks > 0;
 assert(~trainingMode || strcmpi(ffeInitMode, 'planb'), ...
     'Training mode (FfeTrainingBlocks>0) requires FfeInitMode=''planB''.');
@@ -340,7 +332,6 @@ lockedPhaseCode = nan(1, numStartPhase);
 lockedFlag = false(1, numStartPhase);
 piCenterDiagnostics = cell(1, numStartPhase);
 phaseSettleStd = nan(1, numStartPhase);
-ffeReleasePhaseCodeTrace = -ones(1, numStartPhase);
 
 % 直方图取样相位:选离参考相位最近的起始相位,收敛后的输出分布与相位无关,任取一
 % 个锁定相位即可,这里固定用该相位的稳态尾段累积约 2048 个 FFE 输出 code。
@@ -348,7 +339,7 @@ ffeReleasePhaseCodeTrace = -ones(1, numStartPhase);
 histogramTargetSamples = 2048;
 histogramOutputHistory = [];
 % 训练期刚结束后的输出分布:从 blockIndex > ffeTrainingBlocks 起累积首个 2048 UI 的
-% FFE 输出 code,与稳态尾段直方图并排对比,观察释放训练后分布是否已经四簇分离。
+% FFE 输出 code,与稳态尾段直方图并排对比,观察训练结束后分布是否已经四簇分离。
 postTrainOutputHistory = [];
 
 settleBlocks = 30;
@@ -374,18 +365,8 @@ for startIndex = 1:numStartPhase
     ffeLoop = cdr_ffe_loop(ffeStepSize, cdrFfeTapCount, ...
         cdrFfeMainTapIndex, adcBlockUi, ffeAdaptEnableMask);
 
-    % 两档 mu 换挡状态。lockCounter 累计连续满足 |deltaCode|<=lockDeltaTol 的块数,
-    % 达到 lockWindow 且 dlev 收敛即判定锁定,dlev 与 FFE 同时降档,只降一次。
-    lockCounter = 0;
     settleDone = false;
-    % 分阶段释放状态:ffeReleased=false 时冻结 FFE,先让相位与 dlev 捕获;相位锁定且
-    % dlev 收敛后置 true 放开 FFE 目标脉冲 LMS,并记录释放块号 ffeReleaseBlock。
-    % 并发模式下 FFE 从第 1 块起即放开,与相位/dlev 三环同时自适应(冷启动开眼)。
-    concurrentRelease = strcmpi(ffeReleaseMode, 'concurrent');
-    % 训练模式下三环从第 1 块起并发自适应(FFE 由 golden 符号驱动),等效于立即释放。
-    ffeReleased = concurrentRelease || trainingMode;
-    ffeReleaseBlock = 0;
-    ffeReleasePhaseCode = -1;
+    % 三环并发启动:FFE 自第 1 块起即与相位/dlev 同时自适应(不再分阶段冻结释放)。
 
     adcModel = ti_adc_top(adcLaneCount, -adcFullRange, adcFullRange, ...
         adcResolutionBits, adcSarPerTah, samplePerSymbol);
@@ -536,59 +517,16 @@ for startIndex = 1:numStartPhase
             deltaCode = loopFilter.update(meanPhaseError);
             phaseInterpolator.update(deltaCode);
 
-            % FFE 释放策略 + 稳态 mu 换挡。ffeReleased = concurrentRelease||trainingMode
-            % (见上文初始化),决定 FFE 何时开始 SS-LMS 自适应:
-            %   · 默认=训练模式(FfeTrainingBlocks>0):ffeReleased 自第 1 块即为 true,
-            %     相位/dlev/FFE 三环并发自适应。FFE 从冷启动 [0 0 1 0 0 0] 起就更新,由
-            %     golden 符号驱动(闭眼期真判决不可靠,改用 TX 真值给三环正确梯度),
-            %     不冻结,不走下面 ~ffeReleased 的锁定释放分支。
-            %   · concurrent 模式(FfeReleaseMode='concurrent',非训练):同样第 1 块即放开
-            %     三环并发,靠目标脉冲 LMS 在捕获期把眼图撑开。
-            %   · staged 模式(FfeReleaseMode='staged' 且 FfeTrainingBlocks=0,配 planA):
-            %     阶段一先冻结 FFE 在 [0 0 1 0 0 0],让相位环(借信道残余 pre/post 光标提供
-            %     SS-MMPD 鉴相增益)与 dlev 先行捕获——此时眼图未张开、判决不可靠,让 FFE
-            %     自适应会拿错误判决喂 LMS 致发散;阶段二待相位锁定且 dlev 收敛后,才在下面
-            %     ~ffeReleased 分支放开 FFE,缓慢把 ISI 收敛到最优(pre1/post1→~0)。
-            % 稳态换挡(只触发一次):训练模式在训练结束(blockIndex>=ffeTrainingBlocks)时
-            % 切回决策导向并把 dlev/FFE 一次性降到稳态档小 mu;非训练模式在 FFE 放开后相位
-            % 重新锁定、且 FFE 已自适应满 ffeSettleDelay 块时,dlev 与 FFE 同时降档压抖动。
-            if abs(deltaCode) <= lockDeltaTol
-                lockCounter = lockCounter + 1;
-            else
-                lockCounter = 0;
-            end
+            % 稳态 mu 降档(只触发一次):三环并发启动,不分阶段冻结。训练结束后一旦 dlev 收敛
+            % (dlevSettled),把 dlev 与 FFE 从捕获档降到稳态档小 mu,之后以小步长继续跟踪 PVT。
             dlevSettled = blockIndex > dlevSettleWindow && ...
                 abs(dlevLoop.DLevOuter - ...
                 dlevOuterTrace(startIndex, blockIndex - dlevSettleWindow)) ...
                 <= dlevSettleTol;
-            if ~ffeReleased
-                % 阶段一→二:相位锁定且 dlev 收敛,放开 FFE 自适应并重置锁定计数,
-                % 记录释放块号以便阶段三判定 FFE 已运行足够久。
-                if lockCounter >= lockWindow && dlevSettled
-                    ffeReleased = true;
-                    ffeReleaseBlock = blockIndex;
-                    ffeReleasePhaseCode = codeWrapped;
-                    lockCounter = 0;
-                end
-            elseif ~settleDone
-                if trainingMode
-                    % 训练模式:训练结束(跑满 ffeTrainingBlocks 个块)即从数据辅助切回
-                    % 决策导向,并把 dlev/FFE 一次性降到稳态档小 mu,压稳态抖动。只降一次。
-                    if blockIndex >= ffeTrainingBlocks
-                        dlevLoop.setStepSize(dlevStepSizeSettle);
-                        ffeLoop.setStepSize(ffeStepSizeSettle);
-                        settleDone = true;
-                    end
-                else
-                    % 阶段二→三:FFE 放开后相位重新锁定,且 FFE 已自适应至少 ffeSettleDelay
-                    % 个块,dlev 与 FFE 同时降到稳态档,只降一次。
-                    ffeRunLongEnough = blockIndex - ffeReleaseBlock >= ffeSettleDelay;
-                    if lockCounter >= lockWindow && dlevSettled && ffeRunLongEnough
-                        dlevLoop.setStepSize(dlevStepSizeSettle);
-                        ffeLoop.setStepSize(ffeStepSizeSettle);
-                        settleDone = true;
-                    end
-                end
+            if ~settleDone && ~trainingActive && dlevSettled
+                dlevLoop.setStepSize(dlevStepSizeSettle);
+                ffeLoop.setStepSize(ffeStepSizeSettle);
+                settleDone = true;
             end
 
             % dlev 符号-符号 LMS 更新:只在满 64 个有效样本的块更新。
@@ -609,7 +547,7 @@ for startIndex = 1:numStartPhase
                 dlevLoop.dlevSsLms(dlevDecision, dlevSliceError);
             end
 
-            % CDR FFE 块速率 SS-LMS 更新:仅在 FFE 放开后且满 64 有效样本的块更新,
+            % CDR FFE 块速率 SS-LMS 更新:满 64 个有效样本的块执行更新,
             % blockRegressor 为 64x6、ffeOutput 与 ffeDecision 均为整块。
             % v3:Sign-Sign LMS(SS-LMS)。梯度 = sign(e) * sign(X) / N,丢弃误差与
             % regressor 的幅度信息,仅用符号方向驱动系数收敛。与标准 MMSE LMS 相比:
@@ -628,7 +566,7 @@ for startIndex = 1:numStartPhase
                 end
             end
 
-            if ffeReleased && numel(ffeOutput) == adcBlockUi
+            if numel(ffeOutput) == adcBlockUi
                 errorBlock = ffeDecision - ffeOutput;
                 rawDelta = ffeLoop.updateSsLms(blockRegressor, errorBlock);
                 rawDelta(cdrFfeMainTapIndex) = 0;
@@ -713,7 +651,6 @@ for startIndex = 1:numStartPhase
         piCenterDiagnostics{startIndex}] = detect_pi_center_touch_lock( ...
         unwrappedPhaseTrace(startIndex, :), piLockWindowBlocks, ...
         piLockMinEvents, piLockBandHalfWidth, samplePerSymbol);
-    ffeReleasePhaseCodeTrace(startIndex) = ffeReleasePhaseCode;
     dlevInnerSettleStd = std(dlevInnerTrace(startIndex, ...
         end - settleBlocks + 1:end));
     dlevOuterSettleStd = std(dlevOuterTrace(startIndex, ...
@@ -922,7 +859,7 @@ if saveOutputs
         xlabel('CDR Block Index (64 UI per block)');
         ylabel('PI Sampling Phase Code (wrapped, sample index)');
     end
-    exportgraphics(fig, convergenceFigurePath, 'Resolution', 150);
+    saveFigureResilient(fig, convergenceFigurePath);
     close(fig);
 
     % 每块定时误差瞬态图已按需求取消绘制;timingErrorTrace 仍保留在 result 中备查。
@@ -948,7 +885,7 @@ if saveOutputs
     title(sprintf(['Modal PI Code vs Start Phase (%d/%d locked, ' ...
         'all-phase lock = %d, spread = %g code)'], sum(lockedFlag), ...
         numStartPhase, allPhaseLock, phaseSpread));
-    exportgraphics(fig, lockSummaryFigurePath, 'Resolution', 150);
+    saveFigureResilient(fig, lockSummaryFigurePath);
     close(fig);
 
     fig = figure('Visible', 'off', 'Color', 'w', ...
@@ -992,7 +929,7 @@ if saveOutputs
             'HorizontalAlignment', 'center', 'FontWeight', 'bold');
         title('dLev Trace: no eligible PI capture');
     end
-    exportgraphics(fig, dlevConvergenceFigurePath, 'Resolution', 150);
+    saveFigureResilient(fig, dlevConvergenceFigurePath);
     close(fig);
 
     % FFE coefficient traces: one subplot per free tap and only the start
@@ -1051,7 +988,7 @@ if saveOutputs
             'HorizontalAlignment', 'center', 'FontWeight', 'bold');
         title('CDR FFE Trace: no eligible PI capture');
     end
-    exportgraphics(fig, ffeConvergenceFigurePath, 'Resolution', 150);
+    saveFigureResilient(fig, ffeConvergenceFigurePath);
     close(fig);
 
     % CDR FFE 输出 code 直方图:第一排为训练期刚结束后的首个 ~2048 UI,第二排为
@@ -1111,7 +1048,7 @@ if saveOutputs
         startPhaseList(histogramPhaseIndex), ...
         lockedPhaseCode(histogramPhaseIndex), numel(histogramSamples), ...
         numBlocks - round(numel(histogramSamples) / adcBlockUi) + 1, numBlocks));
-    exportgraphics(fig, ffeHistogramFigurePath, 'Resolution', 150);
+    saveFigureResilient(fig, ffeHistogramFigurePath);
     close(fig);
 
     % channel->CTLE->ADC->CDR FFE 总通路单位 UI 响应:显示窗口 -3:8,共 3 个 pre、
@@ -1142,7 +1079,7 @@ if saveOutputs
     ylabel('Normalized Total-Path Response (main = 1)');
     title(sprintf(['Total-Path Unit-UI Response (channel->CTLE->ADC->CDR FFE): ' ...
         '3 pre + 1 main + 8 post, %s | evaluated @ lock phase %d (S-curve ref %d)'], ffeInitMode, evalPhase, referencePhase));
-    exportgraphics(fig, totalPathResponseFigurePath, 'Resolution', 150);
+    saveFigureResilient(fig, totalPathResponseFigurePath);
     close(fig);
 end
 
@@ -1189,8 +1126,6 @@ result.LoopFrequencyLimit = loopFrequencyLimit;
 result.PdPolarity = pdPolarity;
 result.DlevStepSize = dlevStepSize;
 result.DlevStepSizeSettle = dlevStepSizeSettle;
-result.LockWindow = lockWindow;
-result.LockDeltaTol = lockDeltaTol;
 result.DlevSettleWindow = dlevSettleWindow;
 result.DlevSettleTol = dlevSettleTol;
 result.DlevPolarity = dlevPolarity;
@@ -1255,7 +1190,6 @@ result.DlevSettleStdTolerance = dlevSettleStdTolerance;
 result.FfeSettleStdTolerance = ffeSettleStdTolerance;
 result.LockedPhaseCode = lockedPhaseCode;
 result.LockedFlag = lockedFlag;
-result.FfeReleasePhaseCode = ffeReleasePhaseCodeTrace;
 result.CommonLockPhase = commonLockPhase;
 result.PhaseSpread = phaseSpread;
 result.AllPhaseLock = allPhaseLock;
@@ -1443,6 +1377,26 @@ xline(ax, dlevInnerFinalValue, 'r--', 'LineWidth', 1.0);
 xline(ax, dlevOuterFinalValue, 'r--', 'LineWidth', 1.0);
 end
 
+function saveFigureResilient(figureHandle, filePath)
+%SAVEFIGURERESILIENT 导出 PNG:对瞬时文件占用(图片查看器/杀软/云同步)自动重试,
+%   多次失败后降级为告警而非中断,避免长仿真在最后写图阶段整体失败。
+maxAttempts = 5;
+for attempt = 1:maxAttempts
+    try
+        exportgraphics(figureHandle, filePath, 'Resolution', 150);
+        return;
+    catch saveError
+        if attempt == maxAttempts
+            warning('cdr_dlev_cdrffe_sslms_v3:FigureSaveFailed', ...
+                ['无法写入图片 "%s"(重试 %d 次后仍失败:%s)。' ...
+                '已跳过该图,其余输出不受影响。'], filePath, maxAttempts, saveError.message);
+            return;
+        end
+        pause(0.5);
+    end
+end
+end
+
 function options = parseLoopOptions(varargin)
 %PARSELOOPOPTIONS 解析 CDR/dlev/FFE 三环增益与运行开关,给出可调默认值。
 %   Kp/Ki 直接作用于 SS-MMPD 归一化输出(无 gainScale 折算)
@@ -1457,14 +1411,12 @@ defaults.MaxDeltaCode = 12;
 defaults.Polarity = 1;
 defaults.StepSize = 0.3;
 defaults.StepSizeSettle = 0.1;
-defaults.LockWindow = 8;
-defaults.LockDeltaTol = 1;
 defaults.DlevSettleWindow = 16;
 defaults.DlevSettleTol = 0.5;
 defaults.DlevPolarity = 1;
 defaults.DlevOuterInit = 48;
 defaults.DlevInnerInit = 16;
-defaults.FfeTrainingReferenceMode = 'live-dlev';
+defaults.FfeTrainingReferenceMode = 'fixed';
 defaults.FfeTrainingOuterRef = 36;
 defaults.FfeTrainingInnerRef = 12;
 % CDR FFE 环路默认参数(v3: Sign-Sign LMS)。SS-LMS 梯度 = sign(e)*sign(X)/N,幅度
@@ -1475,19 +1427,17 @@ defaults.FfeTrainingInnerRef = 12;
 % 符号驱动三环。当前调优采用捕获档 mu=0.0018、稳态档 mu=0.0002、训练 T=1000。
 % 旧基线 mu=0.02/0.001、T=500 曾实现全相位锁定,
 % 稳态系数扩展 <0.01。
-defaults.FfeStepSize = 0.0018;
+defaults.FfeStepSize = 0.002;
 defaults.FfeStepSizeSettle = 0.0002;
 defaults.FfeAdaptEnableMask = logical([1 1 0 1 1 1]);
 defaults.FfeInitMode = 'planB';
 defaults.FfeBiasScale = 0;
 defaults.FfeTargetCursor = 0.05;
 defaults.FfeTargetSkew = 0;
-defaults.FfeSettleDelay = 250;
-defaults.FfeReleaseMode = 'staged';
 % 训练模式块数 N:当前默认 512 块数据辅助冷启动(需配 FfeInitMode='planB')。
 % 默认 PRBS22/8000 块中余下 7000 块做判决导向更新与冻结监测。设为 0 可关闭训练、
 % 退回纯决策导向(此时应同时把 FfeInitMode 改回 'planA')。
-defaults.FfeTrainingBlocks = 0;
+defaults.FfeTrainingBlocks = 300;
 defaults.FfeFreezeEnable = true;
 defaults.FfeFreezeMinModeOccurrences = 500;
 defaults.FfeFreezeMinEvents = 100;

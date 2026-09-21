@@ -79,7 +79,6 @@ assert(any(coeffDifference(:) ~= 0), ...
 baseDD = opts;
 baseDD.FfeTrainingBlocks = 0;
 baseDD.FfeInitMode = 'planA';
-baseDD.FfeReleaseMode = 'concurrent';
 refsA = baseDD;
 refsA.FfeTrainingOuterRef = 36;
 refsA.FfeTrainingInnerRef = 12;
