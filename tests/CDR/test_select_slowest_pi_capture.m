@@ -2,7 +2,9 @@ function test_select_slowest_pi_capture
 %TEST_SELECT_SLOWEST_PI_CAPTURE Regression checks for first-capture selection.
 thisFile = mfilename('fullpath');
 repoRoot = fileparts(fileparts(fileparts(thisFile)));
-addpath(fullfile(repoRoot, 'validation', 'CDR', 'test_cdr_dlev_cdrffe'));
+suiteRoot = fullfile(repoRoot, 'validation', 'CDR', 'test_cdr_dlev_cdrffe');
+addpath(suiteRoot);
+setup_cdr_dlev_cdrffe_paths();
 checkEventRules(); checkResetBeforeCapture(); checkFirstCaptureIsSticky();
 checkFinalLockEligibility(); checkTie(); checkNoEligible(); checkFullHistory();
 checkShiftAndFlagShapes(); checkInvalidInputs();

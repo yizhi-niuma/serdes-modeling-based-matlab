@@ -1,0 +1,4 @@
+422:            trainingActive = trainingMode && blockIndex <= ffeTrainingBlocks;
+423:            if trainingActive
+438:            if trainingActive
+523:            if trainingActive

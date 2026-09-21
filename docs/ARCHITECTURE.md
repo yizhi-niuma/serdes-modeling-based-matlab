@@ -137,8 +137,9 @@ Digital bang-bang phase detector with:
 - Configurable output polarity, zero output for invalid transitions, compact input/result debug snapshots, and array-input support.
 - A shared vectorized `bbpdFast` decision kernel using numeric mode selection and `int8` phase decisions; validated `bbpd` delegates to it and adds only input checks plus debug-state capture.
 - Block-boundary overlap is owned by the future CDR top-level; `cdr_pd` remains stateless apart from its optional debug snapshot.
-- An experimental PAM4 `mmpd` path using every non-static transition without RTL odd/even filtering; symmetric `0<->3` and `1<->2` transitions have weight 2 and all asymmetric transitions have weight 1.
-- Validated `mmpd` and stateless `mmpdFast` paths with `int8` `-1/0/+1` decisions.
+- The experimental PAM4 `mmpd`/`mmpdFast` paths take an optional trailing `transitionFilter` argument (default `false`): OFF accepts every non-static transition, while ON retains only symmetric `0<->3` and `1<->2` transitions. All accepted transitions have uniform decision magnitude.
+- Validated `mmpd` and stateless `mmpdFast` paths with uniform-magnitude `int8` `-1/0/+1` decisions; the `2x` symmetric-transition weighting present at HEAD is intentionally removed here (per user request) so all accepted transitions contribute uniformly, and the weighted-transition path is retired.
+- SS-MMPD is not a separate `cdr_pd` method: callers feed sign-derived PAM4 symbols (`0-3`) and error bits (`0/1`) to `mmpd`/`mmpdFast` with `transitionFilter=false`. That uniform-weight path is the SS-MMPD kernel; separate `ssmmpd` methods were redundant and removed.
 - CTLE-waveform MMPD validation explicitly composes the PD, voter, loop filter, and PI while carrying symbol/error overlap because the current `cdr_top` public input remains BBPD-specific.
 
 Slicing and equalization are intentionally outside `cdr_pd`; the caller must provide hard digital symbol/edge decisions.
@@ -193,6 +194,29 @@ Block-rate digital integration model with:
 The current top-level input is already-sliced digital data-symbol and edge-bit
 blocks. It does not yet own waveform sampling, the dedicated CDR FFE, slicers,
 or the TI ADC connection.
+
+## CDR/dlev/FFE validation runner layout
+
+The validation suite under `validation/CDR/test_cdr_dlev_cdrffe` is organized around
+`setup_cdr_dlev_cdrffe_paths.m`. The setup function derives the suite, CDR-validation,
+and repository roots from its own `mfilename('fullpath')`, then adds only explicit,
+session-local runtime paths: the suite root, `helpers`, the current runner directory,
+`src/CDR`, and `src/ADC/TI_ADC`.
+
+- The current entry point is
+  `src/cdr_dlev_cdrffe_sslms_v3/cdr_dlev_cdrffe_sslms_v3.m`.
+- The six runtime helpers are `detect_pi_center_touch_lock`,
+  `select_slowest_pi_capture`, `ffe_freeze_monitor`, `build_cdr_ffe_eye`,
+  `build_cdr_ffe_eye_pair`, and `plot_cdr_ffe_eyes`.
+- `debug` and `legacy` are opt-in path scopes; `archive` contains inert historical
+  source-search excerpts and is not added to the runtime path.
+- The suite's original `result` tree and the cache under
+  `validation/CDR/test_cdr/result` remain in their existing locations.
+- Canonical tests live under `tests/CDR`; each uses the suite setup it needs rather
+  than relying on `genpath`, `savepath`, or changing directory with `cd`.
+
+This reorganization changes paths and file placement only, not model algorithms.
+The suite `README.md` is the current invocation and optional-scope guide.
 
 ## Missing top-level CDR blocks
 

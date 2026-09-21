@@ -44,12 +44,15 @@ end
 % Resolve paths from this file rather than from the MATLAB working folder.
 % TI_ADC is prepended deliberately because other repository folders contain
 % classes with the same sar_adc_core name.
-helperDir = fileparts(mfilename('fullpath'));
-repoRoot = fileparts(fileparts(fileparts(helperDir)));
-tiAdcSourceDir = fullfile(repoRoot, 'src', 'ADC', 'TI_ADC');
-cdrSourceDir = fullfile(repoRoot, 'src', 'CDR');
 originalPath = path;
 pathCleanup = onCleanup(@() path(originalPath));
+helperDir = fileparts(mfilename('fullpath'));
+suiteRoot = fileparts(helperDir);
+addpath(suiteRoot);
+p = setup_cdr_dlev_cdrffe_paths();
+repoRoot = p.RepoRoot;
+tiAdcSourceDir = fullfile(repoRoot, 'src', 'ADC', 'TI_ADC');
+cdrSourceDir = fullfile(repoRoot, 'src', 'CDR');
 addpath(tiAdcSourceDir, '-begin');
 addpath(cdrSourceDir, '-begin');
 expectedSarCore = fullfile(tiAdcSourceDir, 'sar_adc_core.m');

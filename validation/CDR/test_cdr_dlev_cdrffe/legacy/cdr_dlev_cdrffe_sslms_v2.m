@@ -41,10 +41,12 @@
 %   输出图在蓝本 4 图之外新增 FFE 系数收敛图与收敛后 FFE 输出 code 直方图(约 2048 样本)。
 
 thisFile = mfilename('fullpath');
-testDir = fileparts(thisFile);
-cdrValidationDir = fileparts(testDir);
+testDir = fileparts(fileparts(thisFile));
+addpath(testDir);
+p = setup_cdr_dlev_cdrffe_paths('legacy');
+cdrValidationDir = p.CdrValidationDir;
 validationDir = fileparts(cdrValidationDir);
-repoRoot = fileparts(validationDir);
+repoRoot = p.RepoRoot;
 addpath(fullfile(repoRoot, 'src', 'ADC', 'TI_ADC'));
 addpath(fullfile(repoRoot, 'src', 'CDR'));
 

@@ -10,10 +10,12 @@ function debug_eye_vs_phase()
 %   true min eye opening = min adjacent (mean_hi - std_hi) - (mean_lo + std_lo).
 
 thisFile = mfilename('fullpath');
-testDir = fileparts(thisFile);
-cdrValidationDir = fileparts(testDir);
+testDir = fileparts(fileparts(thisFile));
+addpath(testDir);
+p = setup_cdr_dlev_cdrffe_paths('debug');
+cdrValidationDir = p.CdrValidationDir;
 validationDir = fileparts(cdrValidationDir);
-repoRoot = fileparts(validationDir);
+repoRoot = p.RepoRoot;
 addpath(fullfile(repoRoot, 'src', 'ADC', 'TI_ADC'));
 
 cachePath = fullfile(cdrValidationDir, 'test_cdr', 'result', ...

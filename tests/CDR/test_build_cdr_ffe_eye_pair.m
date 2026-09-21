@@ -3,7 +3,9 @@ function test_build_cdr_ffe_eye_pair
 
 thisFile = mfilename('fullpath');
 repoRoot = fileparts(fileparts(fileparts(thisFile)));
-addpath(fullfile(repoRoot, 'validation', 'CDR', 'test_cdr_dlev_cdrffe'), '-begin');
+suiteRoot = fullfile(repoRoot, 'validation', 'CDR', 'test_cdr_dlev_cdrffe');
+addpath(suiteRoot, '-begin');
+setup_cdr_dlev_cdrffe_paths();
 
 checkExactFreezeAndFinalWindows();
 checkLateFreezeTruncation();

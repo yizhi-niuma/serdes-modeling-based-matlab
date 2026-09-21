@@ -2,7 +2,9 @@ function test_detect_pi_center_touch_lock
 %TEST_DETECT_PI_CENTER_TOUCH_LOCK Regression checks for modal-center locking.
 thisFile = mfilename('fullpath');
 repoRoot = fileparts(fileparts(fileparts(thisFile)));
-addpath(fullfile(repoRoot, 'validation', 'CDR', 'test_cdr_dlev_cdrffe'));
+suiteRoot = fullfile(repoRoot, 'validation', 'CDR', 'test_cdr_dlev_cdrffe');
+addpath(suiteRoot);
+setup_cdr_dlev_cdrffe_paths();
 checkEventKinds(); checkThreshold(); checkBandReset(); checkWindowIsolation();
 checkInsufficientWindow(); checkModeTie(); checkWrapAndShift(); checkInvalid();
 checkRandomOracle();

@@ -8,7 +8,9 @@ oldPath = path;
 oldRng = rng;
 outputDir = [tempname '_cdr_ffe_freeze'];
 cleanup = onCleanup(@() restoreEnvironment(oldPath, oldRng, outputDir)); %#ok<NASGU>
-addpath(fullfile(repoRoot, 'validation', 'CDR', 'test_cdr_dlev_cdrffe'));
+suiteRoot = fullfile(repoRoot, 'validation', 'CDR', 'test_cdr_dlev_cdrffe');
+addpath(suiteRoot);
+setup_cdr_dlev_cdrffe_paths();
 
 opts = struct();
 % Pin behavioral write-freeze regression independently of tuned defaults.
@@ -19,6 +21,9 @@ opts.DlevOuterInit = 36;
 opts.DlevInnerInit = 12;
 opts.FfeTrainingOuterRef = 36;
 opts.FfeTrainingInnerRef = 12;
+% Pin the supervised-reference mode with the rest of this behavioral fixture so
+% the freeze regression stays independent of the option default (now 'live-dlev').
+opts.FfeTrainingReferenceMode = 'fixed';
 opts.FfeFreezeEnable = true;
 opts.FfeFreezeMinModeOccurrences = 100;
 opts.FfeFreezeMinEvents = 50;

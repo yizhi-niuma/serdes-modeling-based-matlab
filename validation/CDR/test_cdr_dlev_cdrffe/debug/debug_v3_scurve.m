@@ -7,10 +7,12 @@ function debug_v3_scurve(resultMatOverride, phaseIdxList, blockList)
 %   once the FFE is quasi-static.
 
 thisFile = mfilename('fullpath');
-testDir = fileparts(thisFile);
-cdrValidationDir = fileparts(testDir);
+testDir = fileparts(fileparts(thisFile));
+addpath(testDir);
+p = setup_cdr_dlev_cdrffe_paths('debug');
+cdrValidationDir = p.CdrValidationDir;
 validationDir = fileparts(cdrValidationDir);
-repoRoot = fileparts(validationDir);
+repoRoot = p.RepoRoot;
 addpath(fullfile(repoRoot, 'src', 'ADC', 'TI_ADC'));
 addpath(fullfile(repoRoot, 'src', 'CDR'));
 

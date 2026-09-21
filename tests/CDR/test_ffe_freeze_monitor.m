@@ -4,8 +4,9 @@ function test_ffe_freeze_monitor
 thisFile = mfilename('fullpath');
 testDir = fileparts(thisFile);
 repoRoot = fileparts(fileparts(testDir));
-addpath(fullfile(repoRoot, 'validation', 'CDR', ...
-    'test_cdr_dlev_cdrffe'));
+suiteRoot = fullfile(repoRoot, 'validation', 'CDR', 'test_cdr_dlev_cdrffe');
+addpath(suiteRoot);
+setup_cdr_dlev_cdrffe_paths();
 
 testStartAndQualificationBoundaries();
 testExactProductionThresholds();

@@ -1,5 +1,8 @@
-﻿function result = cdr_dlev_cdrffe_sslms(varargin)
-%CDR_DLEV_CDRFFE_SSLMS 在 dlev 双环基础上再叠加 CDR FFE 系数自适应的三环闭环验证。
+﻿function result = cdr_dlev_cdrffe_sslms_v1(varargin)
+%CDR_DLEV_CDRFFE_SSLMS_V1 在 dlev 双环基础上再叠加 CDR FFE 系数自适应的三环闭环验证(v1)。
+%   v1 与基线版本的唯一差异:CDR FFE 环路改回标准判决导向最小均方误差(MMSE),
+%   即以判决 d(等效目标脉冲 [0 1 0])为 LMS 期望信号,不再用“判决流 ⊛ 目标脉冲
+%   [c 1 c]”的对称游标参考。用于对比 MMSE 与目标脉冲 LMS 对 FFE/MMPD 协同的影响。
 %   本脚本以 cdr_dlev_sslms 为蓝本(MMPD 相位环 + dlev 符号-符号 LMS 电平环),
 %   增量插入第三条环路:CDR FFE 的块速率 LMS 系数自适应。三条环路从第 0 块起
 %   并发运行,共用同一份单判决器结果,验证目标是三环同时收敛且全相位锁定。
@@ -14,21 +17,18 @@
 %      增益锚点(防止系数塌缩到全零平凡解)。BlockSize 固定 64,只有 64 个样本全有效
 %      的块才更新,保证梯度分母口径正确。
 %
-%   3) 目标脉冲 LMS(替代“最小化 ISI”,消解 FFE 与 MMPD 抢游标的矛盾):若让 FFE
-%      无约束最小化 |x-d|^2,LMS 最优解会把 pre1/post1 一起拉到 0,而这恰是 MMPD 的
-%      零增益死点(S 曲线斜率 ∝ 残余 pre1/post1),两环互相摧毁。这里不再以“判决 d”
-%      为 LMS 的期望信号,而是以“判决流 ⊛ 目标脉冲 g_target”得到的参考流 r 为期望:
-%        r_n = d_n + c*(d_{n-1} + d_{n+1})
-%      即目标输出脉冲主光标=1、首前/首后光标=c≠0、其余为 0。LMS 最优点随之被搬到
-%      这个带非零对称游标的脉冲上,MMPD 的鉴相增益被“保活”,且脉冲对称(h1=h-1=c)
-%      使 MMPD 的 h1=h-1 锁定点落在 FFE 可行域内。误差 errorBlock = r - x,对
-%      |x-r|^2 做最速下降,与引擎“梯度乘正步长”的方向约定配套。无需任何冻结/投影/
-%      硬约束,可从冷启动 [0 0 1 0 0 0] 自然长出对称游标。约束/目标逻辑只存在于脚本
-%      层,cdr_ffe / cdr_ffe_loop 类文件保持不变。
+%   3) 标准判决导向 MMSE(v1):FFE 直接最小化输出与判决的均方误差 |x-d|^2,即以
+%      判决 d 本身为 LMS 的期望信号(等效目标输出脉冲 [0 1 0]:主光标=1、其余=0)。
+%      误差 errorBlock = d - x,对 |x-d|^2 做最速下降,与引擎“梯度乘正步长”的方向
+%      约定配套。不做目标脉冲卷积、不保活对称游标。
+%      注意:MMSE 最优解会把 pre1/post1 一起压到 ~0,而这恰是 MMPD 的零增益死点
+%      (S 曲线斜率 ∝ 残余 pre1/post1)。故 v1 主要用于观察 MMSE 下 FFE 把 ISI 全
+%      归零后,MMPD 相位环是否因鉴相增益消失而失锁——这是与目标脉冲 LMS 对比的
+%      核心现象。约束/目标逻辑只存在于脚本层,cdr_ffe / cdr_ffe_loop 类文件保持不变。
 %
 %   4) FFE 初值两方案:
-%      方案 B(默认,FfeInitMode='planB'):冷启动 [0 0 1 0 0 0](仅主抽头=1),让目标
-%      脉冲 LMS 自然把首前/首后光标长到 c,是最贴近真实上电的启动方式。
+%      方案 B(默认,FfeInitMode='planB'):冷启动 [0 0 1 0 0 0](仅主抽头=1),让 MMSE
+%      自然把 ISI 收敛到最优(首前/首后光标趋于 ~0),是最贴近真实上电的启动方式。
 %      方案 A(FfeInitMode='planA'):以离线最优解 cdrFfeCoefficients 为基准,在自由
 %      抽头上人为叠加偏差 FfeBiasScale 作为收敛压力测试。两方案均不再做任何投影。
 %
@@ -37,14 +37,16 @@
 %      把电平/系数冻结在错值上。
 %
 %   验证判据在蓝本“全相位锁定 + dlev 一致收敛”之外,新增 FFE 判据:各起始相位收敛
-%   到一致的系数、稳态窗口内自由抽头 std 低于阈值、pre1/post1 收敛到目标游标 c;
+%   到一致的系数、稳态窗口内自由抽头 std 低于阈值、pre1/post1 收敛到 ~0(MMSE ISI 归零);
 %   输出图在蓝本 4 图之外新增 FFE 系数收敛图与收敛后 FFE 输出 code 直方图(约 2048 样本)。
 
 thisFile = mfilename('fullpath');
-testDir = fileparts(thisFile);
-cdrValidationDir = fileparts(testDir);
+testDir = fileparts(fileparts(thisFile));
+addpath(testDir);
+p = setup_cdr_dlev_cdrffe_paths('legacy');
+cdrValidationDir = p.CdrValidationDir;
 validationDir = fileparts(cdrValidationDir);
-repoRoot = fileparts(validationDir);
+repoRoot = p.RepoRoot;
 addpath(fullfile(repoRoot, 'src', 'ADC', 'TI_ADC'));
 addpath(fullfile(repoRoot, 'src', 'CDR'));
 
@@ -171,13 +173,12 @@ for displayRow = 1:numel(displayEvalOffset)
 end
 displayMainRow = find(displayEvalOffset == 0, 1);
 
-% --- CDR FFE 目标脉冲(替代约束流形)---------------------------------
-% 目标脉冲 LMS 的期望输出脉冲:主光标=1、首前/首后光标=targetCursor(≠0)、其余=0。
-% LMS 以“判决流 ⊛ g_target”为期望信号,把最优点搬到这个带非零对称游标的脉冲上,
-% 既给 MMPD 保活鉴相增益(斜率 ∝ 残余 pre1/post1),又让 h1=h-1=targetCursor 的
-% 锁定点落在 FFE 可行域内。仍保留 regressor 行索引,供收敛后核算归一化光标使用。
-% 注:ffeRegressorMatrix 在环路跑完后按实际锁定相位重建(见 commonLockPhase 之后),
-% 此处不再用 referencePhase 版本预置(该赋值已成死赋值)。
+% --- CDR FFE regressor 行索引(用于收敛后核算归一化光标)---------------
+% v1:MMSE 直接以判决 d 为期望信号(等效目标脉冲 [0 1 0]),不再构造带对称游标的目标
+% 脉冲。MMSE 最优解会把 pre1/post1 压到 ~0(信道拖尾能力范围内),这恰是 MMPD 的零增益
+% 死点,故这里仅保留 regressor 行索引,供收敛后核算 pre1/post1 归一化光标之用。
+% 核算用的 ffeRegressorMatrix 不在此处固定为 referencePhase 版,而是等环路跑完后在真实
+% 锁定相位 evalPhase 上用 buildPathRegressor 重建(见"事后核算/绘图的采样相位对齐")。
 ffePre1Row = find(cdrFfeEvalOffset == -1, 1);
 ffeMainRow = find(cdrFfeEvalOffset == 0, 1);
 ffePost1Row = find(cdrFfeEvalOffset == 1, 1);
@@ -235,12 +236,10 @@ ffeSettleDelay = options.FfeSettleDelay;
 ffeReleaseMode = options.FfeReleaseMode;
 % 目标脉冲首前/首后光标幅度 c:LMS 收敛后 pre1/post1 应逼近该值,也是 MMPD 的保活
 % 游标。取值需在“保住 MMPD 增益”与“不过度引入 ISI”之间折中,默认 0.05。
-ffeTargetCursor = options.FfeTargetCursor;
 % 目标脉冲首前/首后光标的非对称偏置 skew:对称脉冲 [c 1 c] 会让 h1=h-1 在近峰相位与
 % 整 UI 之外的混叠相位同时成立(MMPD 存在多个零点),导致各起始相位锁到不同别名(实测
 % 慢 mu 下 20 个相位一致收敛却锁在 code 111 而非 22)。取 pre1=c-skew、post1=c+skew
 % 使 h1-h-1=2*skew 唯一确定单一锁定相位,打破别名简并。
-ffeTargetSkew = options.FfeTargetSkew;
 % 训练模式块数 N:前 N 个处理块用发送端 golden 符号做数据辅助自适应(MMPD 与 FFE
 % 参考流均以 TX 真值符号代替判决),让相位/FFE 在闭眼期也拿到正确梯度,从冷启动
 % [0 0 1 0 0 0] 撑开眼图;第 N 块后一次性切回决策导向并降档 mu。N=0 关闭训练模式,
@@ -251,16 +250,11 @@ ffeTrainingBlocks = options.FfeTrainingBlocks;
 trainingMode = ffeTrainingBlocks > 0;
 assert(~trainingMode || strcmpi(ffeInitMode, 'planb'), ...
     'Training mode (FfeTrainingBlocks>0) requires FfeInitMode=''planB''.');
-% 目标脉冲(长度 = 2*PreTap+1,居中主抽头),用于与判决流卷积构造参考流 r。
-ffeTargetPulse = zeros(1, 2 * cdrFfePreTapCount + 1);
-ffeTargetPulseMain = cdrFfePreTapCount + 1;
-ffeTargetPulse(ffeTargetPulseMain) = 1;
-ffeTargetPulse(ffeTargetPulseMain - 1) = ffeTargetCursor - ffeTargetSkew;
-ffeTargetPulse(ffeTargetPulseMain + 1) = ffeTargetCursor + ffeTargetSkew;
+% v1:MMSE 直接以判决为期望信号(等效目标脉冲 [0 1 0]),无需构造目标脉冲卷积核。
 
 % --- FFE 初值构造 -----------------------------------------------------
 % 方案 A:离线最优 + 自由抽头人为偏差(收敛压力测试);方案 B:冷启动 [0 0 1 0 0 0]。
-% 目标脉冲 LMS 无需投影,系数直接从启动点出发,由 LMS 自然长出对称游标。
+% MMSE 无需投影,系数直接从启动点出发,由 LMS 自然收敛到 ISI 最优解。
 switch lower(ffeInitMode)
     case 'plana'
         ffeBiasVector = zeros(1, cdrFfeTapCount);
@@ -272,7 +266,7 @@ switch lower(ffeInitMode)
         ffeInitCoefficients = zeros(1, cdrFfeTapCount);
         ffeInitCoefficients(cdrFfeMainTapIndex) = 1;
     otherwise
-        error('cdr_dlev_cdrffe_sslms:InvalidFfeInitMode', ...
+        error('cdr_dlev_cdrffe_sslms_v1:InvalidFfeInitMode', ...
             'FfeInitMode must be ''planA'' or ''planB''.');
 end
 
@@ -360,12 +354,6 @@ for startIndex = 1:numStartPhase
     % 训练模式:待处理块对应的 golden 发送符号(整块 64 个),与 pendingCentered 同步
     % 传递,保证与该块 ffeOutput 严格 1:1 对齐。
     pendingGolden = zeros(1, adcBlockUi);
-    % 跨块判决历史:上一处理块末尾 PreTap 个判决,供目标脉冲参考流在块首补历史,
-    % 冷启动首块无历史时以 0 补齐。
-    prevDecisionTail = zeros(1, cdrFfePreTapCount);
-    % FFE 目标脉冲参考专用的跨块判决历史,与 prevDecisionTail 分开维护:训练期
-    % ffeDecision 用固定锚缩放,块边界补历史也需同口径,避免混入 live dlev 缩放的判决。
-    prevFfeDecisionTail = zeros(1, cdrFfePreTapCount);
 
     for sampleBlockIndex = 1:numBlocks + 1
         if sampleBlockIndex <= numBlocks
@@ -474,9 +462,9 @@ for startIndex = 1:numStartPhase
             % 分阶段释放 + 三档 mu 换挡。阶段一:FFE 冻结在 [0 0 1 0 0 0],让相位环
             % (借信道自身残余 pre/post 光标提供 MMPD 鉴相增益)与 dlev 先行捕获——此时
             % 眼图尚未张开、判决不可靠,若让 FFE 自适应会拿错误判决喂 LMS 导致系数发散。
-            % 阶段二:待相位锁定且 dlev 收敛(眼图张开、判决可靠)才放开 FFE 目标脉冲
-            % LMS,缓慢把脉冲重塑到 h1=h-1=targetCursor 的对称形。阶段三:FFE 也稳定后,
-            % dlev 与 FFE 一起降到稳态档小 mu 压抖动。各里程碑只触发一次。
+            % 阶段二:待相位锁定且 dlev 收敛(眼图张开、判决可靠)才放开 FFE 的判决
+            % 导向 MMSE 自适应,缓慢把 ISI 收敛到最优(pre1/post1→~0)。阶段三:FFE 也
+            % 稳定后,dlev 与 FFE 一起降到稳态档小 mu 压抖动。各里程碑只触发一次。
             if abs(deltaCode) <= lockDeltaTol
                 lockCounter = lockCounter + 1;
             else
@@ -534,17 +522,15 @@ for startIndex = 1:numStartPhase
                 dlevLoop.dlevSsLms(dlevDecision, dlevSliceError);
             end
 
-            % CDR FFE 块速率 目标脉冲 LMS 更新:仅在 FFE 放开后且满 64 有效样本的块更新,
-            % blockRegressor 为 64x6、ffeOutput 与 decision 均为整块。误差取
-            % errorBlock = r - x,其中参考流 r = 判决流 ⊛ g_target(主光标=1、首前/首后
-            % 光标=targetCursor),对 |x-r|^2 做最速下降,与引擎“梯度乘正步长”的方向约定
-            % 配套。块首用上一块末尾判决补历史、块尾用 0 补未来,把 LMS 最优点搬到带非零
-            % 对称游标的目标脉冲上,既保活 MMPD 增益又让其锁定点落在可行域内。主抽头由
+            % CDR FFE 块速率 MMSE 更新:仅在 FFE 放开后且满 64 有效样本的块更新,
+            % blockRegressor 为 64x6、ffeOutput 与 ffeDecision 均为整块。
+            % v1:标准判决导向 MMSE。期望信号直接取判决 ffeDecision(等效目标脉冲
+            % [0 1 0]),误差 errorBlock = d - x,对 |x-d|^2 做最速下降,与引擎“梯度乘
+            % 正步长”的方向约定配套。不做目标脉冲卷积、不补跨块历史。训练期 ffeDecision
+            % 仍用固定锚缩放,避免与 dlev 构成“一起缩到 0”的平凡解。主抽头由
             % AdaptEnableMask 固定为增益锚点,增量里主抽头分量末了强制归零。
             if ffeReleased && numel(ffeOutput) == adcBlockUi
-                referenceBlock = buildTargetReference(ffeDecision, ...
-                    prevFfeDecisionTail, ffeTargetPulse, ffeTargetPulseMain);
-                errorBlock = referenceBlock - ffeOutput;
+                errorBlock = ffeDecision - ffeOutput;
                 rawDelta = ffeLoop.update(blockRegressor, errorBlock);
                 rawDelta(cdrFfeMainTapIndex) = 0;
                 ffeModel.applyCoefficientDelta(rawDelta);
@@ -560,15 +546,6 @@ for startIndex = 1:numStartPhase
                             [postTrainOutputHistory, ffeOutput]; %#ok<AGROW>
                     end
                 end
-            end
-
-            % 维护跨块判决历史:记录本块末尾 PreTap 个判决,供下一块参考流补历史。
-            if numel(decision) >= cdrFfePreTapCount
-                prevDecisionTail = decision(end - cdrFfePreTapCount + 1:end);
-            end
-            % FFE 参考专用尾:训练期取固定锚缩放的 ffeDecision,训练后等同 decision。
-            if numel(ffeDecision) >= cdrFfePreTapCount
-                prevFfeDecisionTail = ffeDecision(end - cdrFfePreTapCount + 1:end);
             end
 
             phaseCodeTrace(startIndex, blockIndex) = codeWrapped;
@@ -634,22 +611,6 @@ phaseSpread = max(lockedPhaseCode(lockedFlag)) - ...
 allPhaseLock = all(lockedFlag) && ...
     all(abs(lockedPhaseCode - commonLockPhase) <= 2);
 
-% 收敛后总通路响应/游标核算改用实际锁定相位(全相位锁定用 commonLockPhase,否则回退
-% referencePhase),在实际采样点上重建 ffeRegressorMatrix 与 displayRegressor。
-if allPhaseLock
-    evalPhase = commonLockPhase;
-else
-    evalPhase = referencePhase;
-end
-pathAdcParams = struct('LaneCount', adcLaneCount, 'SarPerTah', adcSarPerTah, ...
-    'ResolutionBits', adcResolutionBits, 'FullRange', adcFullRange);
-ffeRegressorMatrix = buildPathRegressor(channelCtleSymbolPulse, samplePerSymbol, ...
-    evalPhase, cdrFfeEvalOffset, cdrFfeTapOffset, pathAdcParams, ...
-    laneToTimeOrder, nominalBlockLength, adcZeroCode);
-displayRegressor = buildPathRegressor(channelCtleSymbolPulse, samplePerSymbol, ...
-    evalPhase, displayEvalOffset, cdrFfeTapOffset, pathAdcParams, ...
-    laneToTimeOrder, nominalBlockLength, adcZeroCode);
-
 % dlev 一致性。
 dlevInnerFinal = dlevInnerTrace(:, end).';
 dlevOuterFinal = dlevOuterTrace(:, end).';
@@ -669,14 +630,34 @@ ffeCoeffSpread = max(ffeFinalCoefficients, [], 1) - ...
     min(ffeFinalCoefficients, [], 1);
 ffeCoeffMean = mean(ffeFinalCoefficients, 1);
 ffeConsistent = max(ffeCoeffSpread) <= 2 * ffeSettleStdTolerance;
-% pre1/post1 目标游标核验:用平均终值系数在离线 regressor 上重算归一化光标,应逼近
-% 目标脉冲设定的 targetCursor(容差放宽到 0.02,兼顾块尾补零近似与信道拖尾残差)。
+
+% --- 事后核算/绘图的采样相位对齐(v1 关键修正)-------------------------
+% referencePhase 只是 S 曲线与离线 KKT 设计的锚点,MMPD 实际锁定相位由环路自己决定,
+% 二者并不相等。FFE 系数是在锁定相位上用 live 判决做 MMSE 收敛的,若仍拿
+% referencePhase 的 regressor 去乘这套系数,等于把脉冲投影到错误相位,会人为放大
+% pre1/post1 残余。故此处在环路真实锁定相位上重新采样并量化,重建"核算用"与"绘图用"
+% 两个 regressor。在线自适应逻辑完全不受影响(它本来就在锁定相位上跑)。
+if any(lockedFlag)
+    evalPhase = commonLockPhase;
+else
+    evalPhase = referencePhase;   % 未锁定时回退到设计参考相位
+end
+ffeRegressorMatrix = buildPathRegressor(channelCtleSymbolPulse, ...
+    samplePerSymbol, evalPhase, cdrFfeEvalOffset, cdrFfeTapOffset, ...
+    adcLaneCount, adcSarPerTah, adcResolutionBits, adcFullRange, ...
+    laneToTimeOrder, nominalBlockLength, adcZeroCode);
+displayRegressor = buildPathRegressor(channelCtleSymbolPulse, ...
+    samplePerSymbol, evalPhase, displayEvalOffset, cdrFfeTapOffset, ...
+    adcLaneCount, adcSarPerTah, adcResolutionBits, adcFullRange, ...
+    laneToTimeOrder, nominalBlockLength, adcZeroCode);
+
+% v1:MMSE ISI 归零核验。用平均终值系数在"锁定相位"regressor 上重算归一化光标,MMSE
+% 最优解应把 pre1/post1 压到 ~0(容差 0.02,兼顾块尾补零近似与信道拖尾残差)。
 ffeMeanOutputCursor = reshape(ffeRegressorMatrix * ffeCoeffMean(:), 1, []);
 ffeMeanNormalizedCursor = ffeMeanOutputCursor / ffeMeanOutputCursor(ffeMainRow);
 ffePre1Final = ffeMeanNormalizedCursor(ffePre1Row);
 ffePost1Final = ffeMeanNormalizedCursor(ffePost1Row);
-ffeConstraintHeld = abs(ffePre1Final - (ffeTargetCursor - ffeTargetSkew)) <= 0.02 && ...
-    abs(ffePost1Final - (ffeTargetCursor + ffeTargetSkew)) <= 0.02;
+ffeConstraintHeld = abs(ffePre1Final) <= 0.02 && abs(ffePost1Final) <= 0.02;
 
 % --- 总通路单位 UI 响应(显示窗口 -3:8)-------------------------------
 % 用平均终值系数在更宽的 displayRegressor 上重算总通路单位 UI 响应,并对 main
@@ -699,7 +680,7 @@ else
     postTrainSamples = postTrainOutputHistory;
 end
 
-resultDir = fullfile(testDir, 'result', 'cdr_dlev_cdrffe_sslms');
+resultDir = fullfile(testDir, 'result', 'cdr_dlev_cdrffe_sslms_v1');
 if saveOutputs && ~exist(resultDir, 'dir')
     mkdir(resultDir);
 end
@@ -714,7 +695,7 @@ ffeConvergenceFigurePath = fullfile(resultDir, 'cdr_ffe_convergence.png');
 ffeHistogramFigurePath = fullfile(resultDir, 'cdr_ffe_output_histogram.png');
 totalPathResponseFigurePath = fullfile(resultDir, ...
     'cdr_total_path_ui_response.png');
-resultMatPath = fullfile(resultDir, 'cdr_dlev_cdrffe_sslms_result.mat');
+resultMatPath = fullfile(resultDir, 'cdr_dlev_cdrffe_sslms_v1_result.mat');
 
 if saveOutputs
     fig = figure('Visible', 'off', 'Color', 'w', ...
@@ -902,8 +883,7 @@ if saveOutputs
     hold on;
     stem(0, displayNormalizedCursor(displayMainRow), 'filled', ...
         'LineWidth', 1.6, 'Color', [0.85 0.2 0.2], 'MarkerSize', 8);
-    yline(ffeTargetCursor, 'k--', sprintf('pre1/post1 target %.3f', ...
-        ffeTargetCursor), 'LineWidth', 1.0);
+    yline(0, 'k--', 'pre1/post1 target 0 (MMSE ISI-null)', 'LineWidth', 1.0);
     yline(0, 'k:');
     for cursorIdx = 1:numel(displayEvalOffset)
         text(displayEvalOffset(cursorIdx), ...
@@ -919,8 +899,7 @@ if saveOutputs
     xlabel('Cursor Offset (UI, 0 = main)');
     ylabel('Normalized Total-Path Response (main = 1)');
     title(sprintf(['Total-Path Unit-UI Response (channel->CTLE->ADC->CDR FFE): ' ...
-        '3 pre + 1 main + 8 post, %s, evaluated @ phase %d (S-curve ref %d)'], ...
-        ffeInitMode, evalPhase, referencePhase));
+        '3 pre + 1 main + 8 post, %s | evaluated @ lock phase %d (S-curve ref %d)'], ffeInitMode, evalPhase, referencePhase));
     exportgraphics(fig, totalPathResponseFigurePath, 'Resolution', 150);
     close(fig);
 end
@@ -931,14 +910,16 @@ result.AnalysisStartUi = analysisStartUi;
 result.AnalysisNumUi = analysisNumUi;
 result.SamplePerSymbol = samplePerSymbol;
 result.ReferencePhase = referencePhase;
+% v1:事后 pre1/post1 核算与总通路响应绘图实际使用的采样相位(= 环路锁定相位,
+% 未锁定时回退为 referencePhase)。绘图标题同步显示该值,避免硬编码相位造成误读。
+result.EvalPhase = evalPhase;
 result.AdcResolutionBits = adcResolutionBits;
 result.AdcFullRange = [-adcFullRange adcFullRange];
 result.CdrFfeCoefficients = cdrFfeCoefficients;
 result.CdrFfeDesign = cdrFfeDesign;
 result.CdrFfeTapOffset = cdrFfeTapOffset;
 result.CdrFfeMainTapIndex = cdrFfeMainTapIndex;
-result.FfeTargetCursor = ffeTargetCursor;
-result.FfeTargetPulse = ffeTargetPulse;
+result.FfeCostMode = 'mmse';  % v1:标准判决导向 MMSE(等效目标脉冲 [0 1 0])
 result.FfeInitMode = ffeInitMode;
 result.FfeBiasScale = ffeBiasScale;
 result.FfeInitCoefficients = ffeInitCoefficients;
@@ -986,7 +967,6 @@ result.LockedPhaseCode = lockedPhaseCode;
 result.LockedFlag = lockedFlag;
 result.FfeReleasePhaseCode = ffeReleasePhaseCodeTrace;
 result.CommonLockPhase = commonLockPhase;
-result.EvalPhase = evalPhase;
 result.PhaseSpread = phaseSpread;
 result.AllPhaseLock = allPhaseLock;
 result.DlevInnerFinal = dlevInnerFinal;
@@ -1040,24 +1020,24 @@ else
         'outer spread %.3g code. Retune mu/polarity.\n'], ...
         dlevInnerSpread, dlevOuterSpread);
 end
+fprintf('pre1/post1 cursors evaluated @ lock phase %d (S-curve ref phase %d).\n', ...
+    evalPhase, referencePhase);
 if ffeConsistent
-    fprintf(['CDR FFE converged consistently: max coeff spread %.4g, ' ...
-        'pre1=%.4f, post1=%.4f (target %.3f).\n'], max(ffeCoeffSpread), ...
-        ffePre1Final, ffePost1Final, ffeTargetCursor);
+    fprintf(['CDR FFE (MMSE) converged consistently: max coeff spread %.4g, ' ...
+        'pre1=%.4f, post1=%.4f (target 0, ISI-null).\n'], max(ffeCoeffSpread), ...
+        ffePre1Final, ffePost1Final);
 else
     fprintf(['CDR FFE did NOT converge consistently: max coeff spread ' ...
         '%.4g. Retune ffe mu.\n'], max(ffeCoeffSpread));
 end
 if ffeConstraintHeld
-    fprintf(['pre1/post1 converged to target pulse cursor %.3f under ' ...
-        'target-pulse LMS.\n'], ffeTargetCursor);
+    fprintf(['pre1/post1 nulled to ~0 under decision-directed MMSE ' ...
+        '(pre1=%.4f, post1=%.4f).\n'], ffePre1Final, ffePost1Final);
 else
-    fprintf(['pre1/post1 did NOT reach target cursor %.3f: pre1=%.4f, ' ...
-        'post1=%.4f. Retune FfeTargetCursor/ffe mu.\n'], ...
-        ffeTargetCursor, ffePre1Final, ffePost1Final);
+    fprintf(['pre1/post1 did NOT reach ~0: pre1=%.4f, post1=%.4f. ' ...
+        'Under MMSE 残余游标偏大,检查 ffe mu / 收敛窗口。\n'], ...
+        ffePre1Final, ffePost1Final);
 end
-fprintf('pre1/post1 cursors evaluated @ lock phase %d (S-curve ref %d).\n', ...
-    evalPhase, referencePhase);
 fprintf(['dLev vs offline truth: inner ref=%.2f (err %+.2f), ' ...
     'outer ref=%.2f (err %+.2f) code.\n'], dlevInnerReference, ...
     dlevInnerTruthError, dlevOuterReference, dlevOuterTruthError);
@@ -1093,8 +1073,9 @@ defaults.DlevInnerInit = 16;
 % 压抖动。AdaptEnableMask 固定主抽头(索引 3)为 1 作增益锚点。FfeInitMode 选择
 % 方案 A(离线最优起步,默认)或方案 B(冷启动),FfeBiasScale 为方案 A 的自由抽头
 % 偏差幅度(默认 0,即从离线最优系数直接起步)。方案 A 起步时眼图已张开,相位/电平
-% 环可在开眼条件下捕获,再由目标脉冲 LMS 以极小 mu 精修 FFE,从而保持全相位锁定。
-% FfeTargetCursor 为目标脉冲首前/首后光标 c,LMS 收敛后 pre1/post1 逼近该值。
+% 环可在开眼条件下捕获,再由 MMSE LMS 以极小 mu 精修 FFE,从而保持全相位锁定。
+% v1:FfeTargetCursor/FfeTargetSkew 仅为向后兼容保留,MMSE 下不再参与 FFE 代价与判据
+% (期望信号即判决 d,等效目标脉冲 [0 1 0])。
 % 默认改为 planB 冷启动训练模式:planB 从 [0 0 1 0 0 0] 冷启动,配训练序列由 golden
 % 符号驱动三环,故 mu 需比 planA 精修档大得多(1e-6 太小、冷启动几乎不动)。实测
 % FfeStepSize=1e-4 + FfeTrainingBlocks=400 可 32/32 全相位锁定。
@@ -1145,33 +1126,6 @@ if ismember('isCompletePrbsPeriod', names)
     flag = cacheFile.isCompletePrbsPeriod;
 else
     flag = cacheFile.isCompletePrbs20Period;
-end
-end
-
-function reference = buildTargetReference(decisionBlock, pastTail, ...
-    targetPulse, mainIndex)
-%BUILDTARGETREFERENCE 由判决流与目标脉冲卷积构造目标脉冲 LMS 的参考流 r。
-%   r_n = sum_j g(j) * d_{n-(j-mainIndex)},其中 g 为居中目标脉冲(主光标=1、首前/
-%   首后光标=c),mainIndex 为主光标在 g 中的位置。块首缺的过去判决用上一处理块末尾的
-%   pastTail 补齐(冷启动首块为 0);块尾缺的未来判决用 0 补齐(1~2 个样本的边界近似,
-%   块速率 LMS 平均后可忽略)。返回与 decisionBlock 等长的参考流。
-decisionBlock = reshape(double(decisionBlock), 1, []);
-pastTail = reshape(double(pastTail), 1, []);
-targetPulse = reshape(double(targetPulse), 1, []);
-blockLength = numel(decisionBlock);
-preCount = mainIndex - 1;
-postCount = numel(targetPulse) - mainIndex;
-paddedDecision = [pastTail, decisionBlock, zeros(1, postCount)];
-reference = zeros(1, blockLength);
-for outputIndex = 1:blockLength
-    accum = 0;
-    for tapIndex = 1:numel(targetPulse)
-        % r_n = sum_k g(k)*d_{n-k},k = tapIndex-mainIndex;paddedDecision 前置
-        % preCount 个过去判决,故 d_{n-k} 落在 paddedDecision 的下述位置。
-        paddedIndex = outputIndex + preCount + mainIndex - tapIndex;
-        accum = accum + targetPulse(tapIndex) * paddedDecision(paddedIndex);
-    end
-    reference(outputIndex) = accum;
 end
 end
 
@@ -1251,25 +1205,28 @@ sample = reshape(pulse(sampleIndex), 1, []);
 end
 
 function regressor = buildPathRegressor(symbolPulse, samplePerSymbol, ...
-    phase, evalOffset, tapOffset, adc, laneToTimeOrder, ...
-    nominalBlockLength, adcZeroCode)
-%BUILDPATHREGRESSOR 在任意采样相位重建 channel->CTLE->ADC 通路的 code 域 regressor。
-%   在相位 phase 采样信道符号脉冲、经 TI ADC 量化后,按 evalOffset(评估光标)与
-%   tapOffset(FFE 抽头)组装 [numel(evalOffset) x numel(tapOffset)] regressor,口径与
-%   顶部设计/显示窗口完全一致。收敛后用它在实际锁定相位上核算总通路单位 UI 响应。
+    phase, evalOffset, tapOffset, adcLaneCount, adcSarPerTah, ...
+    adcResolutionBits, adcFullRange, laneToTimeOrder, nominalBlockLength, ...
+    adcZeroCode)
+%BUILDPATHREGRESSOR 在指定采样相位 phase 上重建总通路 regressor(供事后核算/绘图)。
+%   在相位 phase 采样 channel+CTLE 符号脉冲、经同口径 TI ADC 量化去零码后,按
+%   (evalOffset(row) - tapOffset(col)) 组装 numel(evalOffset) x numel(tapOffset) 的
+%   regressor。与设计期 optimizeCdrFfe / 显示窗口的构造完全同口径,唯一区别是采样相位
+%   可任意指定,从而在 MMPD 真实锁定相位上评估 FFE 输出的归一化光标。
 channelOffset = (evalOffset(1) - tapOffset(end)):(evalOffset(end) - tapOffset(1));
 analog = samplePulseAtPhase(symbolPulse, samplePerSymbol, phase, channelOffset);
-code = quantizeSamplesWithTiAdc(analog, adc.LaneCount, adc.SarPerTah, ...
-    adc.ResolutionBits, adc.FullRange, samplePerSymbol, laneToTimeOrder, ...
+codeQuantized = quantizeSamplesWithTiAdc(analog, adcLaneCount, adcSarPerTah, ...
+    adcResolutionBits, adcFullRange, samplePerSymbol, laneToTimeOrder, ...
     nominalBlockLength);
-centered = code - adcZeroCode;
+codeCentered = codeQuantized - adcZeroCode;
 regressor = zeros(numel(evalOffset), numel(tapOffset));
 for row = 1:numel(evalOffset)
     for col = 1:numel(tapOffset)
-        idx = find(channelOffset == evalOffset(row) - tapOffset(col), 1);
-        assert(~isempty(idx), ...
-            'buildPathRegressor: required channel cursor is unavailable.');
-        regressor(row, col) = centered(idx);
+        requiredOffset = evalOffset(row) - tapOffset(col);
+        channelIndex = find(channelOffset == requiredOffset, 1);
+        assert(~isempty(channelIndex), ...
+            'buildPathRegressor: required channel cursor unavailable.');
+        regressor(row, col) = codeCentered(channelIndex);
     end
 end
 end

@@ -4,13 +4,13 @@ function test_build_cdr_ffe_eye
 thisFile = mfilename('fullpath');
 testDir = fileparts(thisFile);
 repoRoot = fileparts(fileparts(testDir));
-helperDir = fullfile(repoRoot, 'validation', 'CDR', 'test_cdr_dlev_cdrffe');
-tiAdcDir = fullfile(repoRoot, 'src', 'ADC', 'TI_ADC');
-cdrDir = fullfile(repoRoot, 'src', 'CDR');
-addpath(tiAdcDir, '-begin');
-addpath(cdrDir, '-begin');
-addpath(helperDir, '-begin');
+suiteRoot = fullfile(repoRoot, 'validation', 'CDR', 'test_cdr_dlev_cdrffe');
+addpath(suiteRoot, '-begin');
+paths = setup_cdr_dlev_cdrffe_paths();
+helperDir = paths.HelpersDir;
+tiAdcDir = paths.AdcSourceDir;
 
+assertSamePath(which('build_cdr_ffe_eye'), fullfile(helperDir, 'build_cdr_ffe_eye.m'));
 assertSamePath(which('sar_adc_core'), fullfile(tiAdcDir, 'sar_adc_core.m'));
 rng(8675309, 'twister');
 

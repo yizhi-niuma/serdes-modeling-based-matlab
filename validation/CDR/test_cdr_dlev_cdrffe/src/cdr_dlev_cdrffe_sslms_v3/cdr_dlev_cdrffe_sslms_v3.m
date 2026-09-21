@@ -17,7 +17,9 @@
 %       result: 结构体，包含所有相位的收敛状态、环路参数、误码率等信息。
 %
 %   配置选项可通过 options 结构体传入，默认参数见 parseLoopOptions 函数。
-%   FfeTrainingOuterRef/FfeTrainingInnerRef 独立设置监督式 FFE 训练参考电平。
+%   FfeTrainingReferenceMode 选择固定参考电平或训练块处理时的实时 dlev 电平；
+%   FfeTrainingOuterRef/FfeTrainingInnerRef 仅在 fixed 模式下作为监督式 FFE 训练参考;
+%   live-dlev 模式忽略这两个常量,改用本块更新前的实时 dlev 电平。
 %
 %   See also: CDR_DLEV_CDRFFE_SSLMS_V2, cdr_pd, loop_filter, phase_interpolator
 %
@@ -42,12 +44,12 @@
 %   输出图在蓝本 4 图之外新增 FFE 系数收敛图与收敛后 FFE 输出 code 直方图(约 2048 样本)。
 
 thisFile = mfilename('fullpath');
-testDir = fileparts(thisFile);
-cdrValidationDir = fileparts(testDir);
+testDir = fileparts(fileparts(fileparts(thisFile)));
+addpath(testDir);
+paths = setup_cdr_dlev_cdrffe_paths();
+cdrValidationDir = paths.CdrValidationDir;
 validationDir = fileparts(cdrValidationDir);
-repoRoot = fileparts(validationDir);
-addpath(fullfile(repoRoot, 'src', 'ADC', 'TI_ADC'));
-addpath(fullfile(repoRoot, 'src', 'CDR'));
+repoRoot = paths.RepoRoot;
 
 options = parseLoopOptions(varargin{:});
 validateFreezeEyeOptions(options);
@@ -200,15 +202,23 @@ piCodeCount = 2^piNumBit;
 assert(piCodeCount == samplePerSymbol, ...
     'The PI code count must equal the samples per UI.');
 
-options = parseLoopOptions(varargin{:});
-validateFreezeEyeOptions(options);
-
 % dlev 初值仅设置 dlev 跟踪器的启动状态,不作为监督式 FFE 训练参考。
 dlevOuterNominal = options.DlevOuterInit;
 dlevInnerInit = options.DlevInnerInit;
 dlevOuterInit = dlevOuterNominal;
 ffeTrainingOuterRef = double(options.FfeTrainingOuterRef);
 ffeTrainingInnerRef = double(options.FfeTrainingInnerRef);
+ffeTrainingReferenceMode = lower(char(options.FfeTrainingReferenceMode));
+options.FfeTrainingReferenceMode = ffeTrainingReferenceMode;
+% live-dlev 为实验模式:训练期让 FFE 参考跟随自估 dlev,会重新引入 dlev<->FFE 退化缩零
+% 耦合(历史实测曾致 AllPhaseLock 1->0),仅供受控实验;默认 fixed 提供相位无关的稳定标尺。
+if strcmp(ffeTrainingReferenceMode, 'live-dlev')
+    warning('cdr_dlev_cdrffe_sslms_v3:LiveDlevReferenceExperimental', ...
+        ['FfeTrainingReferenceMode=''live-dlev'' is experimental: the FFE training ', ...
+        'reference follows the live dlev estimate and can revive the degenerate ', ...
+        'dlev<->FFE scale coupling (historically drove AllPhaseLock 1->0). ', ...
+        'The default ''fixed'' mode is recommended.']);
+end
 
 loopKp = options.Kp;
 loopKi = options.Ki;
@@ -216,6 +226,9 @@ loopMaxDeltaCode = options.MaxDeltaCode;
 loopFrequencyLimit = 4;
 pdPolarity = options.Polarity;
 pdOffset = options.PdOffset;
+
+% 统一权重 MMPD 相位检测器(transitionFilter=false),输入为符号派生的数据/误差量。
+phaseDetector = cdr_pd('pam4', pdPolarity);
 dlevStepSize = options.StepSize;
 dlevStepSizeSettle = options.StepSizeSettle;
 lockWindow = options.LockWindow;
@@ -237,12 +250,6 @@ ffeSettleDelay = options.FfeSettleDelay;
 % 眼图已张开,配 planA 使用)。'concurrent':三环从第 1 块起并发自适应,FFE 目标脉冲
 % LMS 在捕获期就把眼图撑开,支持 planB 冷启动 [0 0 1 0 0 0] 的真正三环并发收敛。
 ffeReleaseMode = options.FfeReleaseMode;
-% 目标脉冲首前/首后光标幅度 c:LMS 收敛后 pre1/post1 应逼近该值,也是 MMPD 的保活
-% 游标。取值需在“保住 MMPD 增益”与“不过度引入 ISI”之间折中,默认 0.05。
-% 目标脉冲首前/首后光标的非对称偏置 skew:对称脉冲 [c 1 c] 会让 h1=h-1 在近峰相位与
-% 整 UI 之外的混叠相位同时成立(MMPD 存在多个零点),导致各起始相位锁到不同别名(实测
-% 慢 mu 下 20 个相位一致收敛却锁在 code 111 而非 22)。取 pre1=c-skew、post1=c+skew
-% 使 h1-h-1=2*skew 唯一确定单一锁定相位,打破别名简并。
 % 训练模式块数 N:前 N 个处理块用发送端 golden 符号做数据辅助自适应(MMPD 与 FFE
 % 参考流均以 TX 真值符号代替判决),让相位/FFE 在闭眼期也拿到正确梯度,从冷启动
 % [0 0 1 0 0 0] 撑开眼图;第 N 块后一次性切回决策导向并降档 mu。N=0 关闭训练模式,
@@ -290,7 +297,7 @@ numBlocks = floor((maxFirstUi - baseUi) / adcBlockUi);
 assert(numBlocks > 60, 'The analysis segment is too short for the loop run.');
 
 if isempty(options.StartPhaseList)
-    startPhaseList = 0:4:samplePerSymbol - 1;
+    startPhaseList = 0:16:samplePerSymbol - 1;
 else
     startPhaseList = options.StartPhaseList;
     assert(isnumeric(startPhaseList) && isreal(startPhaseList) && ...
@@ -311,6 +318,9 @@ edgeCountTrace = zeros(numStartPhase, numBlocks);
 dlevInnerTrace = zeros(numStartPhase, numBlocks);
 dlevOuterTrace = zeros(numStartPhase, numBlocks);
 dlevThresholdTrace = zeros(numStartPhase, numBlocks);
+ffeTrainingInnerRefTrace = nan(numStartPhase, numBlocks);
+ffeTrainingOuterRefTrace = nan(numStartPhase, numBlocks);
+ffeTrainingActiveTrace = false(numStartPhase, numBlocks);
 ffeCoeffTrace = zeros(numStartPhase, numBlocks, cdrFfeTapCount);
 ffeRawDeltaTrace = nan(numStartPhase, numBlocks, cdrFfeTapCount);
 ffeProposedCoefficientTrace = nan(numStartPhase, numBlocks, cdrFfeTapCount);
@@ -397,6 +407,11 @@ for startIndex = 1:numStartPhase
     % 训练模式:待处理块对应的 golden 发送符号(整块 64 个),与 pendingCentered 同步
     % 传递,保证与该块 ffeOutput 严格 1:1 对齐。
     pendingGolden = zeros(1, adcBlockUi);
+    % 跨块暂存上一处理块的末符号/误差位:每块首符号与上一块末符号构成边界跳变,
+    % 否则每块丢失该跳变、只有块内“中间”跳变有效。首块无历史,以本块首符号
+    % 自身初始化,自跳变不产生投票。
+    prevSymbolCarry = [];
+    prevErrorCarry = [];
 
     for sampleBlockIndex = 1:numBlocks + 1
         if sampleBlockIndex <= numBlocks
@@ -456,7 +471,7 @@ for startIndex = 1:numStartPhase
             blockIndex = pendingBlockIndex;
 
             % 单判决器:用 dlev 当前门限/电平在 code 域判决,产出共享的 (d, e)。
-            [decision, sliceError] = sliceCodePam4(ffeOutput, ...
+            [decision, sliceError, ssDataSymbol, ssErrorBit] = sliceCodePam4(ffeOutput, ...
                 dlevLoop.DLevInner, dlevLoop.DLevOuter, dlevLoop.Threshold);
 
             % 训练模式数据辅助:前 ffeTrainingBlocks 个处理块,用 golden 发送符号替代
@@ -472,17 +487,24 @@ for startIndex = 1:numStartPhase
                     (dlevLoop.DLevOuter - dlevLoop.DLevInner) .* goldenIsOuter;
                 decision = sign(goldenValid) .* goldenMagnitude;
                 sliceError = ffeOutput - decision;
+                [ssDataSymbol, ssErrorBit] = pam4SymbolBit(decision, sliceError, dlevLoop.Threshold);
             end
 
-            % Data-aided FFE uses independent programmed training levels, not dlev initial state.
-            % Phase/dlev use live levels; after training FFE returns to the shared DD decision.
-            % dlev estimates retain their amplitude sign-vote equilibrium.
-
-
-            % Training references are programmed constants; DD levels remain live estimates.
+            % FFE 训练参考:fixed 模式用编程常量(默认、兼容基线);live-dlev 模式复用本块
+            % dlev 更新前的 goldenMagnitude。相位/dlev 路径不受此开关影响,训练后 FFE 回到
+            % 共享判决,dlev 保持其幅度符号投票平衡。
             if trainingActive
                 ffeMagnitude = ffeTrainingInnerRef + ...
                     (ffeTrainingOuterRef - ffeTrainingInnerRef) .* goldenIsOuter;
+                if strcmp(ffeTrainingReferenceMode, 'live-dlev')
+                    ffeMagnitude = goldenMagnitude;
+                    ffeTrainingInnerRefTrace(startIndex, blockIndex) = dlevLoop.DLevInner;
+                    ffeTrainingOuterRefTrace(startIndex, blockIndex) = dlevLoop.DLevOuter;
+                else
+                    ffeTrainingInnerRefTrace(startIndex, blockIndex) = ffeTrainingInnerRef;
+                    ffeTrainingOuterRefTrace(startIndex, blockIndex) = ffeTrainingOuterRef;
+                end
+                ffeTrainingActiveTrace(startIndex, blockIndex) = true;
                 ffeDecision = sign(goldenValid) .* ffeMagnitude;
             else
                 ffeDecision = decision;
@@ -490,36 +512,46 @@ for startIndex = 1:numStartPhase
 
             % --- SS-MMPD 相位检测(纯 code 域,复用共享判决)-------------------
             % ADC 之后即进入 DSP,处理的全是 code,无需回到幅度域。SS-MMPD 只需两个量:
-            % 数据符号(0-3)与误差符号位(0/1),二者都能直接从共享 (decision, sliceError)
-            % 派生。sliceError 的符号在 code 域与幅度域一致(仅线性缩放),故 errorBit 不变;
-            % code 域判决 {-DLevOuter,-DLevInner,+DLevInner,+DLevOuter} 直接映射到 {0,1,2,3}。
-            % 训练期 decision/sliceError 已被 golden 覆盖,故此处无需再对训练分支单独处理。
-            ssIsPositive = decision >= 0;
-            ssIsOuter = abs(decision) >= dlevLoop.Threshold;
-            ssDataSymbol = double(ssIsPositive) * 2 + double(ssIsPositive == ssIsOuter);
-            ssErrorBit = double(sliceError >= 0);
+            % 数据符号(0-3)与误差符号位(0/1):非训练期来自 sliceCodePam4;训练期
+            % decision/sliceError 被 golden 覆盖后,由 pam4SymbolBit 重新编码。sliceError 的符号
+            % 在 code 域与幅度域一致(仅线性缩放),故 errorBit 不变;code 域判决
+            % {-DLevOuter,-DLevInner,+DLevInner,+DLevOuter} 直接映射到 {0,1,2,3}。
 
-            dataPrev = ssDataSymbol(1:end - 1);
-            dataCurr = ssDataSymbol(2:end);
-            errorPrev = ssErrorBit(1:end - 1);
-            errorCurr = ssErrorBit(2:end);
+            if isempty(prevSymbolCarry)
+                prevSymbolCarry = ssDataSymbol(1);
+                prevErrorCarry = ssErrorBit(1);
+            end
+            dataPrev = [prevSymbolCarry, ssDataSymbol(1:end - 1)];
+            dataCurr = ssDataSymbol;
+            errorPrev = [prevErrorCarry, ssErrorBit(1:end - 1)];
+            errorCurr = ssErrorBit;
+            prevSymbolCarry = ssDataSymbol(end);
+            prevErrorCarry = ssErrorBit(end);
 
-            ssDecision = ssMmpdUniform(pdPolarity, ...
-                dataPrev, errorPrev, dataCurr, errorCurr);
-            validTransition = ssMmpdValid(dataPrev, errorPrev, ...
-                dataCurr, errorCurr);
+            [ssDecision, validTransition] = phaseDetector.mmpdFast( ...
+                dataPrev, errorPrev, dataCurr, errorCurr, false);
             biasActive = (codeWrapped >= 45) && (codeWrapped <= 116);
             meanPhaseError = mean(double(ssDecision)) + pdOffset * biasActive;
 
             deltaCode = loopFilter.update(meanPhaseError);
             phaseInterpolator.update(deltaCode);
 
-            % 分阶段释放 + 三档 mu 换挡。阶段一:FFE 冻结在 [0 0 1 0 0 0],让相位环
-            % (借信道自身残余 pre/post 光标提供 SS-MMPD 鉴相增益)与 dlev 先行捕获——此时
-            % 眼图尚未张开、判决不可靠,若让 FFE 自适应会拿错误判决喂 LMS 导致系数发散。
-            % 阶段二:待相位锁定且 dlev 收敛(眼图张开、判决可靠)才放开 FFE 的判决
-            % 导向 MMSE 自适应,缓慢把 ISI 收敛到最优(pre1/post1→~0)。阶段三:FFE 也
-            % 稳定后,dlev 与 FFE 一起降到稳态档小 mu 压抖动。各里程碑只触发一次。
+            % FFE 释放策略 + 稳态 mu 换挡。ffeReleased = concurrentRelease||trainingMode
+            % (见上文初始化),决定 FFE 何时开始 SS-LMS 自适应:
+            %   · 默认=训练模式(FfeTrainingBlocks>0):ffeReleased 自第 1 块即为 true,
+            %     相位/dlev/FFE 三环并发自适应。FFE 从冷启动 [0 0 1 0 0 0] 起就更新,由
+            %     golden 符号驱动(闭眼期真判决不可靠,改用 TX 真值给三环正确梯度),
+            %     不冻结,不走下面 ~ffeReleased 的锁定释放分支。
+            %   · concurrent 模式(FfeReleaseMode='concurrent',非训练):同样第 1 块即放开
+            %     三环并发,靠目标脉冲 LMS 在捕获期把眼图撑开。
+            %   · staged 模式(FfeReleaseMode='staged' 且 FfeTrainingBlocks=0,配 planA):
+            %     阶段一先冻结 FFE 在 [0 0 1 0 0 0],让相位环(借信道残余 pre/post 光标提供
+            %     SS-MMPD 鉴相增益)与 dlev 先行捕获——此时眼图未张开、判决不可靠,让 FFE
+            %     自适应会拿错误判决喂 LMS 致发散;阶段二待相位锁定且 dlev 收敛后,才在下面
+            %     ~ffeReleased 分支放开 FFE,缓慢把 ISI 收敛到最优(pre1/post1→~0)。
+            % 稳态换挡(只触发一次):训练模式在训练结束(blockIndex>=ffeTrainingBlocks)时
+            % 切回决策导向并把 dlev/FFE 一次性降到稳态档小 mu;非训练模式在 FFE 放开后相位
+            % 重新锁定、且 FFE 已自适应满 ffeSettleDelay 块时,dlev 与 FFE 同时降档压抖动。
             if abs(deltaCode) <= lockDeltaTol
                 lockCounter = lockCounter + 1;
             else
@@ -1034,15 +1066,10 @@ if saveOutputs
         histogram(ax1, postTrainSamples, 'BinMethod', 'integers', ...
             'FaceColor', [0.85 0.45 0.1], 'EdgeColor', 'none');
         hold(ax1, 'on');
-        hRefLine1 = xline(ax1, levelCenter(1), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
-        xline(ax1, levelCenter(2), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
-        xline(ax1, levelCenter(3), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
-        xline(ax1, levelCenter(4), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
-        % 收敛后真实 dlev(观测相位)电平中心,红虚线:
-        hConvLine1 = xline(ax1, -dlevOuterFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
-        xline(ax1, -dlevInnerFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
-        xline(ax1, dlevInnerFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
-        xline(ax1, dlevOuterFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
+        % 灰虚线为离线参考电平,红虚线为收敛后真实 dlev(观测相位)电平中心。
+        [hRefLine1, hConvLine1] = addDlevHistogramReferenceLines(ax1, ...
+            levelCenter, dlevInnerFinal(histogramPhaseIndex), ...
+            dlevOuterFinal(histogramPhaseIndex));
         legend(ax1, [hRefLine1 hConvLine1], ...
             {'offline-optimal reference level', 'online-converged dlev level'}, ...
             'Location', 'best', 'AutoUpdate', 'off', 'FontSize', 8);
@@ -1068,15 +1095,10 @@ if saveOutputs
     histogram(ax2, histogramSamples, 'BinMethod', 'integers', ...
         'FaceColor', [0.2 0.4 0.8], 'EdgeColor', 'none');
     hold(ax2, 'on');
-    hRefLine2 = xline(ax2, levelCenter(1), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
-    xline(ax2, levelCenter(2), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
-    xline(ax2, levelCenter(3), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
-    xline(ax2, levelCenter(4), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
-    % 收敛后真实 dlev(观测相位)电平中心,红虚线:
-    hConvLine2 = xline(ax2, -dlevOuterFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
-    xline(ax2, -dlevInnerFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
-    xline(ax2, dlevInnerFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
-    xline(ax2, dlevOuterFinal(histogramPhaseIndex), 'r--', 'LineWidth', 1.0);
+    % 灰虚线为离线参考电平,红虚线为收敛后真实 dlev(观测相位)电平中心。
+    [hRefLine2, hConvLine2] = addDlevHistogramReferenceLines(ax2, ...
+        levelCenter, dlevInnerFinal(histogramPhaseIndex), ...
+        dlevOuterFinal(histogramPhaseIndex));
     legend(ax2, [hRefLine2 hConvLine2], ...
         {'offline-optimal reference level', 'online-converged dlev level'}, ...
         'Location', 'best', 'AutoUpdate', 'off', 'FontSize', 8);
@@ -1152,6 +1174,10 @@ result.DlevOuterReference = dlevOuterReference;
 result.DlevInnerInit = dlevInnerInit;
 result.DlevOuterInit = dlevOuterInit;
 result.FfeTrainingOuterRef = ffeTrainingOuterRef;
+result.FfeTrainingReferenceMode = ffeTrainingReferenceMode;
+result.FfeTrainingInnerRefTrace = ffeTrainingInnerRefTrace;
+result.FfeTrainingOuterRefTrace = ffeTrainingOuterRefTrace;
+result.FfeTrainingActiveTrace = ffeTrainingActiveTrace;
 result.FfeTrainingInnerRef = ffeTrainingInnerRef;
 result.DlevOuterNominal = dlevOuterNominal;
 result.PdType = 'ss-mmpd';
@@ -1402,6 +1428,21 @@ else
 end
 end
 
+function [refHandle, convHandle] = addDlevHistogramReferenceLines(ax, ...
+    levelCenter, dlevInnerFinalValue, dlevOuterFinalValue)
+%ADDDLEVHISTOGRAMREFERENCELINES 在直方图坐标轴上画离线参考电平与收敛 dlev 电平。
+%   灰虚线为四个离线参考电平中心 levelCenter(1:4);红虚线为收敛后真实 dlev
+%   (观测相位)的内外正负电平中心。返回首条灰线与首条红线的句柄供图例使用。
+refHandle = xline(ax, levelCenter(1), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
+xline(ax, levelCenter(2), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
+xline(ax, levelCenter(3), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
+xline(ax, levelCenter(4), '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.0);
+convHandle = xline(ax, -dlevOuterFinalValue, 'r--', 'LineWidth', 1.0);
+xline(ax, -dlevInnerFinalValue, 'r--', 'LineWidth', 1.0);
+xline(ax, dlevInnerFinalValue, 'r--', 'LineWidth', 1.0);
+xline(ax, dlevOuterFinalValue, 'r--', 'LineWidth', 1.0);
+end
+
 function options = parseLoopOptions(varargin)
 %PARSELOOPOPTIONS 解析 CDR/dlev/FFE 三环增益与运行开关,给出可调默认值。
 %   Kp/Ki 直接作用于 SS-MMPD 归一化输出(无 gainScale 折算)
@@ -1423,6 +1464,7 @@ defaults.DlevSettleTol = 0.5;
 defaults.DlevPolarity = 1;
 defaults.DlevOuterInit = 48;
 defaults.DlevInnerInit = 16;
+defaults.FfeTrainingReferenceMode = 'live-dlev';
 defaults.FfeTrainingOuterRef = 36;
 defaults.FfeTrainingInnerRef = 12;
 % CDR FFE 环路默认参数(v3: Sign-Sign LMS)。SS-LMS 梯度 = sign(e)*sign(X)/N,幅度
@@ -1442,10 +1484,10 @@ defaults.FfeTargetCursor = 0.05;
 defaults.FfeTargetSkew = 0;
 defaults.FfeSettleDelay = 250;
 defaults.FfeReleaseMode = 'staged';
-% 训练模式块数 N:当前默认 1000 块数据辅助冷启动(需配 FfeInitMode='planB')。
+% 训练模式块数 N:当前默认 512 块数据辅助冷启动(需配 FfeInitMode='planB')。
 % 默认 PRBS22/8000 块中余下 7000 块做判决导向更新与冻结监测。设为 0 可关闭训练、
 % 退回纯决策导向(此时应同时把 FfeInitMode 改回 'planA')。
-defaults.FfeTrainingBlocks = 1000;
+defaults.FfeTrainingBlocks = 0;
 defaults.FfeFreezeEnable = true;
 defaults.FfeFreezeMinModeOccurrences = 500;
 defaults.FfeFreezeMinEvents = 100;
@@ -1463,21 +1505,36 @@ defaults.NumBlock = 8000;
 defaults.AnalysisNumUi = defaults.NumBlock * 64 + 512;
 
 options = defaults;
-if isempty(varargin)
-    return;
-end
+providedNames = {};
 if numel(varargin) == 1 && isstruct(varargin{1})
     provided = varargin{1};
-    fieldList = fieldnames(provided);
-    for index = 1:numel(fieldList)
-        options.(fieldList{index}) = provided.(fieldList{index});
+    providedNames = fieldnames(provided);
+    for index = 1:numel(providedNames)
+        options.(providedNames{index}) = provided.(providedNames{index});
     end
-    return;
+elseif ~isempty(varargin)
+    assert(mod(numel(varargin), 2) == 0, ...
+        'Loop options must be name/value pairs.');
+    providedNames = varargin(1:2:end);
+    for index = 1:2:numel(varargin)
+        options.(varargin{index}) = varargin{index + 1};
+    end
 end
-assert(mod(numel(varargin), 2) == 0, ...
-    'Loop options must be name/value pairs.');
-for index = 1:2:numel(varargin)
-    options.(varargin{index}) = varargin{index + 1};
+
+% NumBlock/AnalysisNumUi 联动:真正决定处理块数的是 AnalysisNumUi(见主函数 numBlocks
+% 推导)。默认值构造时用 NumBlock 派生 AnalysisNumUi,但该派生只发生一次;若调用方仅
+% 覆盖 NumBlock 而不同步给 AnalysisNumUi,此处按同一口径重算,使 NumBlock 成为生效的
+% 块数旋钮。两者都显式给出时要求彼此一致,避免歧义。
+gaveNumBlock = any(strcmp('NumBlock', providedNames));
+gaveAnalysisNumUi = any(strcmp('AnalysisNumUi', providedNames));
+if gaveNumBlock && ~gaveAnalysisNumUi
+    options.AnalysisNumUi = options.NumBlock * 64 + 512;
+elseif gaveNumBlock && gaveAnalysisNumUi
+    assert(options.AnalysisNumUi == options.NumBlock * 64 + 512, ...
+        ['NumBlock and AnalysisNumUi are inconsistent: expected ' ...
+        'AnalysisNumUi = NumBlock*64+512 = %d, got %d. Pass only one, ' ...
+        'or make them consistent.'], ...
+        options.NumBlock * 64 + 512, options.AnalysisNumUi);
 end
 end
 
@@ -1492,7 +1549,15 @@ else
 end
 end
 
-function [decision, sliceError] = sliceCodePam4(sample, ...
+function [dataSymbol, errorBit] = pam4SymbolBit(decision, sliceError, threshold)
+%PAM4SYMBOLBIT 由 code 域判决电平/残差派生 PAM4 符号(0-3)与误差符号位(0/1)。
+isPositive = decision >= 0;
+isOuter = abs(decision) >= threshold;
+dataSymbol = double(isPositive) * 2 + double(isPositive == isOuter);
+errorBit = double(sliceError >= 0);
+end
+
+function [decision, sliceError, dataSymbol, errorBit] = sliceCodePam4(sample, ...
     dLevInner, dLevOuter, threshold)
 %SLICECODEPAM4 用 dlev 维护的 code 域门限/电平做一次 PAM4 判决(单判决器)。
 %   电平为 {-dLevOuter, -dLevInner, +dLevInner, +dLevOuter},门限为
@@ -1505,6 +1570,7 @@ magnitude = dLevInner + (dLevOuter - dLevInner) .* isOuter;
 decision = magnitude;
 decision(isNegative) = -magnitude(isNegative);
 sliceError = sample - decision;
+[dataSymbol, errorBit] = pam4SymbolBit(decision, sliceError, threshold);
 end
 
 function outputValid = processOnePhase(segment, phase, samplePerSymbol, ...
@@ -1693,30 +1759,20 @@ end
 center = sort(center);
 end
 
-
-function decision = ssMmpdUniform(polarity, dataPrev, errorPrev, ...
-    dataCurr, errorCurr)
-%SSMMPDUNIFORM SS-MMPD decision with uniform weight 1 (cdr_pd MMPD kernel).
-%   Mirrors cdr_pd.mmpdFast exactly, except every valid transition carries
-%   uniform weight 1 (the four symmetric 0<->3 and 1<->2 transitions are no
-%   longer boosted to weight 2). This is the "weight = 1" SS-MMPD.
-
-sameError = errorPrev == errorCurr;
-errorHigh = errorPrev ~= 0;
-dataTransition = dataPrev ~= dataCurr;
-risingTransition = dataCurr > dataPrev;
-valid = sameError & dataTransition;
-early = valid & ((~risingTransition & errorHigh) | ...
-    (risingTransition & ~errorHigh));
-
-polarity = int8(polarity);
-decision = zeros(size(valid), 'int8');
-decision(valid) = -polarity;
-decision(early) = polarity;
-end
-
 function validateFreezeEyeOptions(options)
 %VALIDATEFREEZEEYEOPTIONS Validate freeze diagnostics and eye controls.
+
+if ~isfield(options, 'FfeTrainingReferenceMode')
+    error('cdr_dlev_cdrffe_sslms_v3:InvalidFfeTrainingReferenceMode', ...
+        'FfeTrainingReferenceMode is required.');
+end
+mode = options.FfeTrainingReferenceMode;
+isText = (ischar(mode) && isrow(mode) && ~isempty(mode)) || ...
+    (isstring(mode) && isscalar(mode) && ~ismissing(mode) && strlength(mode) > 0);
+if ~isText || ~any(strcmpi(char(mode), {'fixed', 'live-dlev'}))
+    error('cdr_dlev_cdrffe_sslms_v3:InvalidFfeTrainingReferenceMode', ...
+        'Mode must be fixed or live-dlev.');
+end
 for refName = {'FfeTrainingOuterRef', 'FfeTrainingInnerRef'}
     value = options.(refName{1});
     if ~(isnumeric(value) && isreal(value) && isscalar(value) && isfinite(value) && value > 0)
@@ -1748,12 +1804,4 @@ assert(ismember(double(options.EyeDiagramEnable), [0 1]), ...
 validateattributes(options.EyeDiagramUiCount, {'numeric'}, ...
     {'scalar', 'finite', 'real', 'integer', '>=', 2}, mfilename, ...
     'EyeDiagramUiCount');
-end
-
-function valid = ssMmpdValid(dataPrev, errorPrev, dataCurr, errorCurr)
-%SSMMPDVALID Valid-transition mask used by the uniform SS-MMPD kernel.
-
-sameError = errorPrev == errorCurr;
-dataTransition = dataPrev ~= dataCurr;
-valid = sameError & dataTransition;
 end

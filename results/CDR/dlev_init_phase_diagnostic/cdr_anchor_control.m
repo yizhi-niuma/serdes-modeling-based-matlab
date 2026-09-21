@@ -43,11 +43,12 @@
 
 thisFile = mfilename('fullpath');
 testDir = fileparts(thisFile);
-cdrValidationDir = fileparts(testDir);
-validationDir = fileparts(cdrValidationDir);
-repoRoot = 'C:\Work\MatLab_Lib';
-cdrValidationDir = fullfile(repoRoot,'validation','CDR');
-addpath(fullfile(cdrValidationDir,'test_cdr_dlev_cdrffe'));
+repoRoot = fileparts(fileparts(fileparts(fileparts(thisFile))));
+cdrValidationDir = fullfile(repoRoot, 'validation', 'CDR');
+suiteRoot = fullfile(cdrValidationDir, 'test_cdr_dlev_cdrffe');
+addpath(suiteRoot);
+setup_cdr_dlev_cdrffe_paths('runtime');
+
 addpath(fullfile(repoRoot, 'src', 'ADC', 'TI_ADC'));
 addpath(fullfile(repoRoot, 'src', 'CDR'));
 

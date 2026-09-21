@@ -1,0 +1,60 @@
+215:dlevStepSizeSettle = options.StepSizeSettle;
+225:ffeStepSizeSettle = options.FfeStepSizeSettle;
+278:startPhaseList = 0:4:samplePerSymbol - 1;
+279:numStartPhase = numel(startPhaseList);
+281:phaseCodeTrace = zeros(numStartPhase, numBlocks);
+282:uiSlipTrace = zeros(numStartPhase, numBlocks);
+283:timingErrorTrace = zeros(numStartPhase, numBlocks);
+284:deltaCodeTrace = zeros(numStartPhase, numBlocks);
+285:unwrappedPhaseTrace = zeros(numStartPhase, numBlocks);
+286:edgeCountTrace = zeros(numStartPhase, numBlocks);
+287:dlevInnerTrace = zeros(numStartPhase, numBlocks);
+288:dlevOuterTrace = zeros(numStartPhase, numBlocks);
+289:dlevThresholdTrace = zeros(numStartPhase, numBlocks);
+290:ffeCoeffTrace = zeros(numStartPhase, numBlocks, cdrFfeTapCount);
+291:lockedPhaseCode = zeros(1, numStartPhase);
+292:lockedFlag = false(1, numStartPhase);
+293:ffeReleasePhaseCodeTrace = -ones(1, numStartPhase);
+297:[~, histogramPhaseIndex] = min(abs(startPhaseList - referencePhase));
+304:settleBlocks = 30;
+310:for startIndex = 1:numStartPhase
+311:    startPhase = startPhaseList(startIndex);
+501:                        dlevLoop.setStepSize(dlevStepSizeSettle);
+502:                        ffeLoop.setStepSize(ffeStepSizeSettle);
+510:                        dlevLoop.setStepSize(dlevStepSizeSettle);
+511:                        ffeLoop.setStepSize(ffeStepSizeSettle);
+563:            phaseCodeTrace(startIndex, blockIndex) = codeWrapped;
+568:            unwrappedPhaseTrace(startIndex, blockIndex) = ...
+594:    settleWindow = phaseCodeTrace(startIndex, end - settleBlocks + 1:end);
+598:        end - settleBlocks + 1:end));
+600:        end - settleBlocks + 1:end));
+603:        end - settleBlocks + 1:end, :), 0, 2);
+606:    lockedFlag(startIndex) = std(settleWindow) <= lockStdTolerance && ...
+614:        startPhase, samplePerSymbol, lockedFlag(startIndex), ...
+620:commonLockPhase = round(median(lockedPhaseCode(lockedFlag)));
+621:phaseSpread = max(lockedPhaseCode(lockedFlag)) - ...
+622:    min(lockedPhaseCode(lockedFlag));
+623:allPhaseLock = all(lockedFlag) && ...
+638:% 各起始相位收敛到的系数应彼此接近;取终值系数矩阵(numStartPhase x tapCount)。
+640:    numStartPhase, cdrFfeTapCount);
+652:if any(lockedFlag)
+715:    plot(blockAxis, phaseCodeTrace.', 'LineWidth', 1.0);
+728:        'Kp=%.3g, Ki=%.3g'], numStartPhase, loopKp, loopKi));
+736:    plot(startPhaseList, lockedPhaseCode, 'bo-', 'LineWidth', 1.3, ...
+743:    xlim([startPhaseList(1) startPhaseList(end)]);
+770:        'outer spread=%.3g code'], dlevStepSize, dlevStepSizeSettle, ...
+787:            numStartPhase, numBlocks);
+808:                ffeStepSizeSettle));
+881:        startPhaseList(histogramPhaseIndex), ...
+939:result.FfeStepSizeSettle = ffeStepSizeSettle;
+955:result.DlevStepSizeSettle = dlevStepSizeSettle;
+964:result.StartPhaseList = startPhaseList;
+965:result.PhaseCodeTrace = phaseCodeTrace;
+967:result.UnwrappedPhaseTrace = unwrappedPhaseTrace;
+975:result.SettleBlocks = settleBlocks;
+980:result.LockedFlag = lockedFlag;
+1020:        'code %d (spread %d code, ref phase %d).\n'], numStartPhase, ...
+1025:        sum(lockedFlag), numStartPhase, phaseSpread);
+1077:defaults.StepSizeSettle = 0.1;
+1091:% FfeStepSize=0.02 + FfeTrainingBlocks=500 + FfeStepSizeSettle=0.001 可全相位锁定,
+1094:defaults.FfeStepSizeSettle = 1e-4;

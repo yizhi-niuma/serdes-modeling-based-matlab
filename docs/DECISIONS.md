@@ -1,5 +1,34 @@
 ﻿# Decisions
 
+## 2026-09-20: remove redundant separate SS-MMPD methods
+
+- Reverse the separate-method portion of the earlier decision below: SS-MMPD is the existing uniform-weight MMPD kernel when sign-derived PAM4 symbols (`0-3`) and error bits (`0/1`) are passed to `mmpd`/`mmpdFast` with `transitionFilter=false`; separate `ssmmpd` methods are redundant and removed.
+- Keep v3's sign-derived inputs and detector instance, but call `mmpdFast(..., false)`. Remove the three `test_cdr_pd` groups tied to the deleted API; the MMPD framework and transition-filter-OFF tests retain kernel coverage.
+
+## 2026-09-20: model SS-MMPD in `cdr_pd` and reuse it in v3
+
+- Model the uniform-weight Sign-Sign MMPD in `cdr_pd` as validated `ssmmpd` and stateless `ssmmpdFast`, following the existing MMPD-style API.
+- Make the v3 three-loop script construct one `cdr_pd` instance and call `ssmmpdFast` instead of its inline `ssMmpdUniform`/`ssMmpdValid` helpers. This refactor is numerically identical because both use the same uniform-weight kernel, and it removes duplicated PD logic from the validation script.
+
+## 2026-09-20: add optional MMPD symmetric-transition filter
+
+- Make `transitionFilter` a direct optional trailing argument to `mmpd`/`mmpdFast`, defaulting OFF rather than storing it as a `cdr_pd` class property. Existing 5-argument method callers are unchanged. The OFF branch keeps every non-static PAM4 transition accepted when adjacent error bits agree but, per user request, uses uniform decision magnitude — the `2x` symmetric weighting active at HEAD is removed.
+- When ON, retain only symmetric outer `0<->3` (`-3<->+3`) and inner `1<->2` (`-1<->+1`) transitions. The symmetric-transition weight of 2 that was active at HEAD is intentionally dropped so all accepted decisions use uniform magnitude; this supersedes the earlier weighted-transition MMPD decision recorded below. The weighted `mmpdFast` magnitude only affected the manually-run `test_cdr_top_ctle_waveform_mmpd.m` S-curve amplitude; the `_v1` experiment re-derives its own group weights from the decision sign and is unaffected in its closed-loop result.
+
+## 2026-09-20: organize validation entrypoints and centralize path initialization
+
+- Preserve the user-created v3 location under `validation/CDR/test_cdr_dlev_cdrffe/src/cdr_dlev_cdrffe_sslms_v3/`, move six live helpers to `helpers/`, standalone diagnostics to `debug/`, old runners/detector/probes to `legacy/`, and `_scan*.txt` to inert `archive/`. Retain all historical files rather than deleting possibly useful diagnostics. Existing `result/` artifacts remain in place; task-entry modifications and deletions are preserved rather than restored or regenerated.
+- Add a single explicit `setup_cdr_dlev_cdrffe_paths` rooted at the suite directory. Default runtime scope adds only current entry/helper and physical ADC/CDR source paths; debug/legacy require an explicit scope. Do not use recursive `genpath`, create duplicate same-name forwarding runners, call `savepath`, or make root resolution depend on `pwd`.
+- Repair relocated runner/debug bootstraps so cache paths still refer to `validation/CDR/test_cdr/result` and standard outputs remain under the original suite `result/`. Update canonical tests and the executable fixed-anchor diagnostic copy to use setup. Leave unrelated `newtests` scratch files unmodified and outside the official test path.
+- Keep all numerical algorithms, default options, training/decision references, thresholds and waveform scheduling unchanged. Probes that predate reference-parameter separation are labelled historical rather than silently changing their experiments. Historical document snippets remain records of the old layout; the suite README is the current invocation guide.
+
+## 2026-09-17: optional live-dlev FFE training experiment after fixed-reference commit
+
+- Commit `0576cff` checkpoints the independent fixed-reference baseline before this experiment. Keep `FfeTrainingReferenceMode='fixed'` as the default; add explicit `'live-dlev'` mode only for controlled experiments. Experimental changes/results are not automatically committed or made the default.
+- In live mode, supervised FFE uses the already computed current-block golden magnitude based on pre-update dlev state, with golden sign and inner/outer class unchanged. It does not use the receive sign or the dlev value after the block update. DD and phase/dlev paths are unchanged.
+- Record actual training reference trajectories, active mask and canonical mode. Validate mode before cache access. Test that fixed mode exactly reproduces the baseline, live mode ignores programmed fixed amplitudes, reference traces equal the pre-update dlev state, and mode is dynamically inert when training is disabled.
+- Evaluate original gains first with48/16 initial state, PRBS22/8000 blocks and unchanged final lock/freeze criteria. Only recorded modest loop-rate or training-schedule trials may be used if the first live run fails; neither loosening acceptance nor changing nominal initial levels is allowed. Save live experiment outputs separately from the fixed-reference v3 result directory.
+
 ## 2026-09-17: separate dlev initial state from supervised FFE reference
 
 - User approved independent parameters: `DlevOuterInit=48`, `DlevInnerInit=16` initialize only the dlev loop; `FfeTrainingOuterRef=36`, `FfeTrainingInnerRef=12` set the fixed golden-symbol amplitudes used only by FFE during training. Changing dlev initialization no longer implicitly changes the programmed FFE target. No automatic derivation or fallback from initial values is retained.

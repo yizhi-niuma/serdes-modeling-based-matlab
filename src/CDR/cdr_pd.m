@@ -92,12 +92,23 @@ classdef cdr_pd < handle
             phaseDecision(early) = polarity;
         end
 
-        function [phaseDecision, valid, output] = mmpd(obj, dataPrev, errorPrev, dataCurr, errorCurr)
+        function [phaseDecision, valid, output] = mmpd(obj, dataPrev, errorPrev, dataCurr, errorCurr, transitionFilter)
             % mmpd  PAM4 MMPD 核心二值判决。
             %
-            % 所有非静态 PAM4 跳变均参与判决。对称的 0<->3、1<->2
-            % 跳变权重为 2，其余非对称跳变权重为 1。下降跳变时 error=11
-            % 为 early、00 为 late；上升跳变时符号相反。
+            % 可选 transitionFilter 参数默认为 false，所有非静态 PAM4 跳变
+            % 均以统一幅度参与判决；true 仅保留 0<->3、1<->2 对称跳变。
+            % 下降跳变时 error=11 为 early、00 为 late；上升跳变时符号相反。
+            if nargin < 6
+                transitionFilter = false;
+            end
+            if ~(isscalar(transitionFilter) && (islogical(transitionFilter) || ...
+                    (isnumeric(transitionFilter) && isreal(transitionFilter) && ...
+                    isfinite(transitionFilter) && ...
+                    (transitionFilter == 0 || transitionFilter == 1))))
+                error('cdr_pd:InvalidTransitionFilter', ...
+                    'transitionFilter must be a scalar logical or numeric 0/1.');
+            end
+            transitionFilter = logical(transitionFilter);
             if obj.ModeId ~= 1
                 error('cdr_pd:MMPDUnsupportedMode', ...
                     'The reference MMPD behavior supports PAM4 mode only.');
@@ -109,12 +120,13 @@ classdef cdr_pd < handle
             obj.validateDigitalArray(errorCurr, 0, 1, 'errorCurr');
 
             [phaseDecision, valid] = obj.mmpdFast( ...
-                dataPrev, errorPrev, dataCurr, errorCurr);
+                dataPrev, errorPrev, dataCurr, errorCurr, transitionFilter);
 
             output = struct();
             output.PdType = 'mmpd';
             output.Mode = obj.Mode;
             output.Polarity = obj.Polarity;
+            output.TransitionFilter = transitionFilter;
             output.DataSymbolPrev = dataPrev;
             output.ErrorBitPrev = errorPrev;
             output.DataSymbolCurr = dataCurr;
@@ -124,28 +136,35 @@ classdef cdr_pd < handle
             obj.LastOutput = output;
         end
 
-        function [phaseDecision, valid] = mmpdFast(obj, dataPrev, errorPrev, dataCurr, errorCurr)
+        function [phaseDecision, valid] = mmpdFast(obj, dataPrev, errorPrev, dataCurr, errorCurr, transitionFilter)
             % mmpdFast  无检查、无状态更新的 PAM4 MMPD block 热路径。
             %
-            % 调用方必须保证 PAM4/误差码合法且四路输入尺寸一致。
+            % 调用方必须保证 PAM4/误差码合法、四路输入尺寸一致，且可选的
+            % transitionFilter 参数为 false/true；省略时默认为 false。
+            if nargin < 6
+                transitionFilter = false;
+            end
             sameError = errorPrev == errorCurr;
             errorHigh = errorPrev ~= 0;
 
             outerTransition = (dataPrev == 0 & dataCurr == 3) | (dataPrev == 3 & dataCurr == 0);
             innerTransition = (dataPrev == 1 & dataCurr == 2) | (dataPrev == 2 & dataCurr == 1);
             symmetricTransition = outerTransition | innerTransition;
-            dataTransition = dataPrev ~= dataCurr;
+            if transitionFilter
+                dataTransition = symmetricTransition;
+            else
+                dataTransition = dataPrev ~= dataCurr;
+            end
             risingTransition = dataCurr > dataPrev;
             valid = sameError & dataTransition;
             early = valid & ((~risingTransition & errorHigh) | (risingTransition & ~errorHigh));
 
             polarity = int8(obj.Polarity);
-            weight = ones(size(valid), 'int8');
-            weight(symmetricTransition) = int8(2);
             phaseDecision = zeros(size(valid), 'int8');
-            phaseDecision(valid) = -polarity .* weight(valid);
-            phaseDecision(early) = polarity .* weight(early);
+            phaseDecision(valid) = -polarity;
+            phaseDecision(early) = polarity;
         end
+
 
         function setMode(obj, mode)
             % setMode  设置调制模式：nrz 或 pam4。

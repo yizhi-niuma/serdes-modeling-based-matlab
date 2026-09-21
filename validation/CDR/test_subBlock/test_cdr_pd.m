@@ -3,7 +3,7 @@ clc;
 
 thisFile = mfilename('fullpath');
 validationDir = fileparts(thisFile);
-repoRoot = fileparts(fileparts(validationDir));
+repoRoot = fileparts(fileparts(fileparts(validationDir)));
 sourceDir = fullfile(repoRoot, 'src', 'CDR');
 addpath(sourceDir);
 
@@ -41,6 +41,9 @@ fprintf('Result folder: %s\n\n', resultDir);
 [testNames, testStatus, testMessage] = runOneTest(testNames, testStatus, testMessage, 'explicit block overlap', @testExplicitBlockOverlap);
 [testNames, testStatus, testMessage] = runOneTest(testNames, testStatus, testMessage, 'invalid input', @testInvalidInput);
 [testNames, testStatus, testMessage] = runOneTest(testNames, testStatus, testMessage, 'MMPD framework', @testMmpdFramework);
+[testNames, testStatus, testMessage] = runOneTest(testNames, testStatus, testMessage, 'MMPD transition filter', @testMmpdTransitionFilter);
+[testNames, testStatus, testMessage] = runOneTest(testNames, testStatus, testMessage, 'MMPD transition-filter validation', @testMmpdTransitionFilterValidation);
+[testNames, testStatus, testMessage] = runOneTest(testNames, testStatus, testMessage, 'MMPD filtered polarity', @testMmpdFilteredPolarity);
 [testNames, testStatus, testMessage, waveformResult] = runWaveformTest(testNames, testStatus, testMessage, wavePng);
 
 fprintf('\nSummary:\n');
@@ -291,8 +294,8 @@ function testMmpdFramework()
     [decision, valid, output] = pd.mmpd( ...
         dataPrev, errorPrev, dataCurr, errorCurr);
 
-    assertEqual(decision, int8([2 2 -2 -2 2 2 -2 -2 1 1 1 2 -1 0]), ...
-        'MMPD weighted-transition truth table mismatch');
+    assertEqual(decision, int8([1 1 -1 -1 1 1 -1 -1 1 1 1 1 -1 0]), ...
+        'MMPD uniform-transition truth table mismatch');
     assertEqual(valid, logical([1 1 1 1 1 1 1 1 1 1 1 1 1 0]), ...
         'MMPD validity mismatch');
     assertEqual(output.PdType, 'mmpd', 'MMPD output type mismatch');
@@ -319,6 +322,118 @@ function testMmpdFramework()
         'cdr_pd:SizeMismatch', 'MMPD size mismatch should throw');
     assertThrowsId(@() pd.mmpd([3 0], [1 2], [0 3], [1 0]), ...
         'cdr_pd:InvalidDigitalInput', 'invalid MMPD error bit should throw');
+end
+
+function testMmpdTransitionFilter()
+    pd = cdr_pd('pam4', 1);
+    dataPrev = [0 3 1 2 0 1 0 2 1 3 2 3 2 0];
+    dataCurr = [3 0 2 1 1 0 2 0 3 1 3 2 2 3];
+    errorPrev = [0 1 0 1 0 1 1 0 0 1 1 0 0 0];
+    errorCurr = [0 1 0 1 0 1 1 0 0 1 1 0 0 1];
+    sameError = errorPrev == errorCurr;
+    transition = dataPrev ~= dataCurr;
+    symmetric = ((dataPrev == 0 & dataCurr == 3) | ...
+        (dataPrev == 3 & dataCurr == 0) | ...
+        (dataPrev == 1 & dataCurr == 2) | ...
+        (dataPrev == 2 & dataCurr == 1));
+    asymmetric = transition & ~symmetric;
+    rising = dataCurr > dataPrev;
+
+    expectedOffValid = sameError & transition;
+    expectedOffEarly = expectedOffValid & ...
+        ((~rising & (errorPrev ~= 0)) | (rising & (errorPrev == 0)));
+    expectedOffDecision = zeros(size(expectedOffValid), 'int8');
+    expectedOffDecision(expectedOffValid) = -1;
+    expectedOffDecision(expectedOffEarly) = 1;
+
+    [offDecision, offValid, offOutput] = pd.mmpd( ...
+        dataPrev, errorPrev, dataCurr, errorCurr);
+    [offFastDecision, offFastValid] = pd.mmpdFast( ...
+        dataPrev, errorPrev, dataCurr, errorCurr);
+    [explicitOffDecision, explicitOffValid, explicitOffOutput] = pd.mmpd( ...
+        dataPrev, errorPrev, dataCurr, errorCurr, false);
+    assertEqual(offValid, expectedOffValid, ...
+        'default OFF valid mask should preserve all non-static transitions');
+    assert(all(offValid(asymmetric)), ...
+        'default OFF setting should accept every asymmetric transition');
+    assert(all(ismember(abs(double(offDecision)), [0 1])), ...
+        'default OFF decisions should have uniform zero-or-one magnitude');
+    assertEqual(offDecision, expectedOffDecision, ...
+        'default OFF decisions should match the recomputed OFF vector');
+    assertEqual(offFastDecision, offDecision, ...
+        'default validated and fast MMPD decisions should agree');
+    assertEqual(offFastValid, offValid, ...
+        'default validated and fast MMPD validity should agree');
+    assertEqual(explicitOffDecision, offDecision, ...
+        'explicit false decisions should match the omitted argument');
+    assertEqual(explicitOffValid, offValid, ...
+        'explicit false validity should match the omitted argument');
+    assertEqual(offOutput.TransitionFilter, false, ...
+        'default MMPD output should report filter OFF');
+    assertEqual(explicitOffOutput.TransitionFilter, false, ...
+        'explicit false MMPD output should report filter OFF');
+
+    expectedOnValid = sameError & symmetric;
+    expectedOnEarly = expectedOnValid & ...
+        ((~rising & (errorPrev ~= 0)) | (rising & (errorPrev == 0)));
+    expectedOnDecision = zeros(size(expectedOnValid), 'int8');
+    expectedOnDecision(expectedOnValid) = -1;
+    expectedOnDecision(expectedOnEarly) = 1;
+
+    [onDecision, onValid, onOutput] = pd.mmpd( ...
+        dataPrev, errorPrev, dataCurr, errorCurr, true);
+    [onFastDecision, onFastValid] = pd.mmpdFast( ...
+        dataPrev, errorPrev, dataCurr, errorCurr, true);
+    assertEqual(onValid, expectedOnValid, ...
+        'filter ON should select symmetric transitions only');
+    assertEqual(onDecision, expectedOnDecision, ...
+        'filter ON decision mismatch');
+    assert(all(~onValid(asymmetric)), ...
+        'filter ON should invalidate every asymmetric transition');
+    assert(all(onDecision(asymmetric) == 0), ...
+        'filter ON should zero every asymmetric transition decision');
+    assertEqual(onFastDecision, onDecision, ...
+        'validated and fast MMPD decisions should agree with filter ON');
+    assertEqual(onFastValid, onValid, ...
+        'validated and fast MMPD validity should agree with filter ON');
+    assertEqual(onOutput.TransitionFilter, true, ...
+        'MMPD output should report filter ON');
+end
+
+function testMmpdTransitionFilterValidation()
+    pd = cdr_pd('pam4', 1);
+    dataPrev = 0;
+    errorPrev = 0;
+    dataCurr = 3;
+    errorCurr = 0;
+    invalidValues = {2, -1, 'x', [1 0], []};
+    for idx = 1:numel(invalidValues)
+        value = invalidValues{idx};
+        assertThrowsId(@() pd.mmpd( ...
+            dataPrev, errorPrev, dataCurr, errorCurr, value), ...
+            'cdr_pd:InvalidTransitionFilter', ...
+            sprintf('invalid transition filter case %d should throw', idx));
+    end
+end
+
+function testMmpdFilteredPolarity()
+    dataPrev = [0 3 1 2 0 1 0 2 1 3 2 3];
+    dataCurr = [3 0 2 1 1 0 2 0 3 1 3 2];
+    errorPrev = [0 1 0 1 0 1 1 0 0 1 1 0];
+    errorCurr = errorPrev;
+    pdPositive = cdr_pd('pam4', 1);
+    pdNegative = cdr_pd('pam4', -1);
+
+    for transitionFilter = [false true]
+        [positiveDecision, positiveValid] = pdPositive.mmpdFast( ...
+            dataPrev, errorPrev, dataCurr, errorCurr, transitionFilter);
+        [negativeDecision, negativeValid] = pdNegative.mmpdFast( ...
+            dataPrev, errorPrev, dataCurr, errorCurr, transitionFilter);
+        assertEqual(negativeValid, positiveValid, ...
+            'polarity should not change MMPD validity');
+        assertEqual(negativeDecision, -positiveDecision, ...
+            'negative polarity should flip all MMPD decision signs');
+    end
 end
 
 function waveformResult = testWaveformFunction(wavePng)
