@@ -289,7 +289,12 @@ numBlocks = floor((maxFirstUi - baseUi) / adcBlockUi);
 assert(numBlocks > 60, 'The analysis segment is too short for the loop run.');
 
 if isempty(options.StartPhaseList)
-    startPhaseList = 0:16:samplePerSymbol - 1;
+    startPhaseStep = options.StartPhaseStep;
+    assert(isnumeric(startPhaseStep) && isscalar(startPhaseStep) && isreal(startPhaseStep) && ...
+        isfinite(startPhaseStep) && startPhaseStep == fix(startPhaseStep) && ...
+        startPhaseStep >= 1 && startPhaseStep <= samplePerSymbol, ...
+        'StartPhaseStep must be a finite integer scalar in [1, samplePerSymbol].');
+    startPhaseList = 0:startPhaseStep:samplePerSymbol - 1;
 else
     startPhaseList = options.StartPhaseList;
     assert(isnumeric(startPhaseList) && isreal(startPhaseList) && ...
@@ -510,9 +515,8 @@ for startIndex = 1:numStartPhase
             prevErrorCarry = ssErrorBit(end);
 
             [ssDecision, validTransition] = phaseDetector.mmpdFast( ...
-                dataPrev, errorPrev, dataCurr, errorCurr, false);
-            biasActive = (codeWrapped >= 45) && (codeWrapped <= 116);
-            meanPhaseError = mean(double(ssDecision)) + pdOffset * biasActive;
+                dataPrev, errorPrev, dataCurr, errorCurr, true);
+            meanPhaseError = mean(double(ssDecision));
 
             deltaCode = loopFilter.update(meanPhaseError);
             phaseInterpolator.update(deltaCode);
@@ -1414,9 +1418,9 @@ defaults.StepSizeSettle = 0.1;
 defaults.DlevSettleWindow = 16;
 defaults.DlevSettleTol = 0.5;
 defaults.DlevPolarity = 1;
-defaults.DlevOuterInit = 48;
-defaults.DlevInnerInit = 16;
-defaults.FfeTrainingReferenceMode = 'fixed';
+defaults.DlevOuterInit = 20;
+defaults.DlevInnerInit = 7;
+defaults.FfeTrainingReferenceMode = 'live-dlev';  % 'fixed' 'live-dlev'
 defaults.FfeTrainingOuterRef = 36;
 defaults.FfeTrainingInnerRef = 12;
 % CDR FFE 环路默认参数(v3: Sign-Sign LMS)。SS-LMS 梯度 = sign(e)*sign(X)/N,幅度
@@ -1437,7 +1441,7 @@ defaults.FfeTargetSkew = 0;
 % 训练模式块数 N:当前默认 512 块数据辅助冷启动(需配 FfeInitMode='planB')。
 % 默认 PRBS22/8000 块中余下 7000 块做判决导向更新与冻结监测。设为 0 可关闭训练、
 % 退回纯决策导向(此时应同时把 FfeInitMode 改回 'planA')。
-defaults.FfeTrainingBlocks = 300;
+defaults.FfeTrainingBlocks = 0;
 defaults.FfeFreezeEnable = true;
 defaults.FfeFreezeMinModeOccurrences = 500;
 defaults.FfeFreezeMinEvents = 100;
@@ -1447,11 +1451,14 @@ defaults.EyeDiagramUiCount = 2048;
 defaults.SaveOutputs = true;
 defaults.ResultDir = '';
 defaults.StartPhaseList = [];
+% 扫描初始相位的步长:StartPhaseList 为空时用 0:StartPhaseStep:samplePerSymbol-1
+% 生成扫描列表(默认步长 16 => 8 个相位;设 4 => 32 个相位)。显式给 StartPhaseList 则覆盖本步长。
+defaults.StartPhaseStep = 16;
 % CTLE 缓存选择:默认 PRBS22 长周期、NumBlock=8000。切换缓存时传
 % 'CosimDir','channel_ctle_cosim_prbs22','TxFile','tx_prbs22.mat' 并加大 'AnalysisNumUi'。
 defaults.CosimDir = 'channel_ctle_cosim_prbs22';
 defaults.TxFile = 'tx_prbs22.mat';
-defaults.NumBlock = 8000;
+defaults.NumBlock = 10000;
 defaults.AnalysisNumUi = defaults.NumBlock * 64 + 512;
 
 options = defaults;
