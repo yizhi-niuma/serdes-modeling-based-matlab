@@ -812,15 +812,15 @@ if saveOutputs && ~exist(resultDir, 'dir')
 end
 
 blockAxis = 1:numBlocks;
-convergenceFigurePath = fullfile(resultDir, 'cdr_phase_convergence.png');
-timingErrorFigurePath = fullfile(resultDir, 'cdr_block_timing_error.png');
+convergenceFigurePath = fullfile(resultDir, 'cdr_phase_convergence.fig');
+timingErrorFigurePath = fullfile(resultDir, 'cdr_block_timing_error.fig');
 lockSummaryFigurePath = fullfile(resultDir, ...
-    'cdr_locked_phase_vs_start_phase.png');
-dlevConvergenceFigurePath = fullfile(resultDir, 'dlev_convergence.png');
-ffeConvergenceFigurePath = fullfile(resultDir, 'cdr_ffe_convergence.png');
-ffeHistogramFigurePath = fullfile(resultDir, 'cdr_ffe_output_histogram.png');
+    'cdr_locked_phase_vs_start_phase.fig');
+dlevConvergenceFigurePath = fullfile(resultDir, 'dlev_convergence.fig');
+ffeConvergenceFigurePath = fullfile(resultDir, 'cdr_ffe_convergence.fig');
+ffeHistogramFigurePath = fullfile(resultDir, 'cdr_ffe_output_histogram.fig');
 totalPathResponseFigurePath = fullfile(resultDir, ...
-    'cdr_total_path_ui_response.png');
+    'cdr_total_path_ui_response.fig');
 resultMatPath = fullfile(resultDir, 'cdr_dlev_cdrffe_sslms_v3_result.mat');
 
 if saveOutputs
@@ -1382,12 +1382,13 @@ xline(ax, dlevOuterFinalValue, 'r--', 'LineWidth', 1.0);
 end
 
 function saveFigureResilient(figureHandle, filePath)
-%SAVEFIGURERESILIENT 导出 PNG:对瞬时文件占用(图片查看器/杀软/云同步)自动重试,
+%SAVEFIGURERESILIENT 保存 .fig:对瞬时文件占用(图片查看器/杀软/云同步)自动重试,
 %   多次失败后降级为告警而非中断,避免长仿真在最后写图阶段整体失败。
+set(figureHandle, 'Visible', 'on');
 maxAttempts = 5;
 for attempt = 1:maxAttempts
     try
-        exportgraphics(figureHandle, filePath, 'Resolution', 150);
+        savefig(figureHandle, filePath);
         return;
     catch saveError
         if attempt == maxAttempts
@@ -1413,13 +1414,13 @@ defaults.Ki = 0.03;
 defaults.PdOffset = -0.05;
 defaults.MaxDeltaCode = 12;
 defaults.Polarity = 1;
-defaults.StepSize = 0.3;
+defaults.StepSize = 0.5;
 defaults.StepSizeSettle = 0.1;
 defaults.DlevSettleWindow = 16;
 defaults.DlevSettleTol = 0.5;
 defaults.DlevPolarity = 1;
-defaults.DlevOuterInit = 20;
-defaults.DlevInnerInit = 7;
+defaults.DlevOuterInit = 48;
+defaults.DlevInnerInit = 16;
 defaults.FfeTrainingReferenceMode = 'live-dlev';  % 'fixed' 'live-dlev'
 defaults.FfeTrainingOuterRef = 36;
 defaults.FfeTrainingInnerRef = 12;
@@ -1431,7 +1432,7 @@ defaults.FfeTrainingInnerRef = 12;
 % 符号驱动三环。当前调优采用捕获档 mu=0.0018、稳态档 mu=0.0002、训练 T=1000。
 % 旧基线 mu=0.02/0.001、T=500 曾实现全相位锁定,
 % 稳态系数扩展 <0.01。
-defaults.FfeStepSize = 0.002;
+defaults.FfeStepSize = 0.004;
 defaults.FfeStepSizeSettle = 0.0002;
 defaults.FfeAdaptEnableMask = logical([1 1 0 1 1 1]);
 defaults.FfeInitMode = 'planB';
@@ -1458,7 +1459,7 @@ defaults.StartPhaseStep = 16;
 % 'CosimDir','channel_ctle_cosim_prbs22','TxFile','tx_prbs22.mat' 并加大 'AnalysisNumUi'。
 defaults.CosimDir = 'channel_ctle_cosim_prbs22';
 defaults.TxFile = 'tx_prbs22.mat';
-defaults.NumBlock = 10000;
+defaults.NumBlock = 20000;
 defaults.AnalysisNumUi = defaults.NumBlock * 64 + 512;
 
 options = defaults;
