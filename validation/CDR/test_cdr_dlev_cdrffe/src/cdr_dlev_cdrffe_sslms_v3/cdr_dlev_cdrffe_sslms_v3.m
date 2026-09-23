@@ -248,12 +248,25 @@ ffeBiasScale = options.FfeBiasScale;
 % 退化为纯决策导向(原行为)。训练模式需配 planB 冷启动使用。
 ffeTrainingBlocks = options.FfeTrainingBlocks;
 % 在线 FFE 写冻结:训练结束后的第一个块起,用进入当前处理块的未展开 PI code 做因果
-% 模态/中心事件检测。一旦触发便永久禁止系数写入,但 SS-LMS 原始增量仍照常计算并记录。
+% 模态/中心事件检测。触发动作由 FfeFreezeMode 决定:freeze 永久禁止系数写入
+% (SS-LMS 原始增量仍照常计算并记录);pvt-track 不停写,改把 FFE mu 急剧降到
+% FfeStepSizePvtTrack,用极窄带宽只跟踪 PVT 慢漂移。
 ffeFreezeEnable = logical(options.FfeFreezeEnable);
 ffeFreezeMinModeOccurrences = options.FfeFreezeMinModeOccurrences;
 ffeFreezeMinEvents = options.FfeFreezeMinEvents;
 ffeFreezeBandHalfWidth = options.FfeFreezeBandHalfWidth;
 ffeFreezeStartBlock = max(ffeTrainingBlocks + 1, 1);
+ffeFreezeMode = lower(char(options.FfeFreezeMode));
+ffeFreezeInhibitsWrite = strcmp(ffeFreezeMode, 'freeze');
+ffeStepSizePvtTrack = options.FfeStepSizePvtTrack;
+% 用户可见文案随模式切换:pvt-track 时不再显示 "freeze/frozen",消除歧义。
+if ffeFreezeInhibitsWrite
+    ffeGateLabel = 'freeze'; ffeGateFlagName = 'frozen';
+    ffeGateBlockWord = 'frozen'; ffeGateTapLabel = 'Frozen taps';
+else
+    ffeGateLabel = 'PVT-track'; ffeGateFlagName = 'engaged';
+    ffeGateBlockWord = 'PVT-track'; ffeGateTapLabel = 'PVT-track taps';
+end
 eyeDiagramEnable = logical(options.EyeDiagramEnable);
 eyeDiagramUiCount = options.EyeDiagramUiCount;
 % 训练模式总开关:N>0 时启用数据辅助冷启动。FFE 始终从第 1 块起与相位/dlev
@@ -567,6 +580,11 @@ for startIndex = 1:numStartPhase
                 freezeTriggered = freezeMonitor.update(unwrappedCode, blockIndex);
                 if freezeTriggered
                     ffeFrozenCoefficients(startIndex, :) = ffeModel.Coefficients;
+                    if ~ffeFreezeInhibitsWrite
+                        % pvt-track:满足冻结条件后不停写,把 FFE 带宽急剧收窄——
+                        % 一次性降 mu 到 FfeStepSizePvtTrack,之后 SS-LMS 只跟 PVT 慢漂。
+                        ffeLoop.setStepSize(ffeStepSizePvtTrack);
+                    end
                 end
             end
 
@@ -580,7 +598,7 @@ for startIndex = 1:numStartPhase
                     reshape(rawDelta, 1, 1, cdrFfeTapCount);
                 ffeProposedCoefficientTrace(startIndex, blockIndex, :) = ...
                     reshape(proposedCoefficients, 1, 1, cdrFfeTapCount);
-                if ~freezeMonitor.Frozen
+                if ~freezeMonitor.Frozen || ~ffeFreezeInhibitsWrite
                     ffeModel.applyCoefficientDelta(rawDelta);
                     ffeAppliedDeltaTrace(startIndex, blockIndex, :) = ...
                         reshape(rawDelta, 1, 1, cdrFfeTapCount);
@@ -666,9 +684,9 @@ for startIndex = 1:numStartPhase
     ffeSettleStdMax = max(ffeSettleStdPerTap);
 
     centerDiag = piCenterDiagnostics{startIndex};
-    fprintf(['  FFE freeze: enabled=%d, frozen=%d, block=%g, center=%g/%g, ' ...
+    fprintf(['  FFE %s: enabled=%d, %s=%d, block=%g, center=%g/%g, ' ...
         'mode occurrences=%d, events=%d, resets=%d.\n'], ...
-        ffeFreezeEnable, freezeState.Frozen, ffeFreezeBlock(startIndex), ...
+        ffeGateLabel, ffeFreezeEnable, ffeGateFlagName, freezeState.Frozen, ffeFreezeBlock(startIndex), ...
         ffeFreezeCenterUnwrapped(startIndex), ffeFreezeCenterWrapped(startIndex), ...
         ffeFreezeModeOccurrences(startIndex), ffeFreezeEventCount(startIndex), ...
         ffeFreezeResetCount(startIndex));
@@ -842,7 +860,7 @@ if saveOutputs
         hold off;
         if ffeFrozenTrace(slowestIndex, end)
             xline(ffeFreezeBlock(slowestIndex), '--', ...
-                sprintf('FFE frozen block %d', ffeFreezeBlock(slowestIndex)), ...
+                sprintf('FFE %s block %d', ffeGateBlockWord, ffeFreezeBlock(slowestIndex)), ...
                 'Color', [0.1 0.6 0.2], 'LineWidth', 1.1, ...
                 'LabelVerticalAlignment', 'bottom');
         end
@@ -918,7 +936,7 @@ if saveOutputs
         ylabel('Adapted dLev (code domain)');
         if ffeFrozenTrace(slowestIndex, end)
             xline(ffeFreezeBlock(slowestIndex), '--', ...
-                sprintf('FFE frozen block %d', ffeFreezeBlock(slowestIndex)), ...
+                sprintf('FFE %s block %d', ffeGateBlockWord, ffeFreezeBlock(slowestIndex)), ...
                 'Color', [0.1 0.6 0.2], 'LineWidth', 1.1, ...
                 'LabelVerticalAlignment', 'bottom');
         end
@@ -1151,6 +1169,8 @@ result.FfeFreezeEnable = ffeFreezeEnable;
 result.FfeFreezeMinModeOccurrences = ffeFreezeMinModeOccurrences;
 result.FfeFreezeMinEvents = ffeFreezeMinEvents;
 result.FfeFreezeBandHalfWidth = ffeFreezeBandHalfWidth;
+result.FfeFreezeMode = ffeFreezeMode;
+result.FfeStepSizePvtTrack = ffeStepSizePvtTrack;
 result.FfeFreezeStartBlock = ffeFreezeStartBlock;
 result.FfeFrozenFlag = ffeFrozenTrace(:, end).';
 result.FfeFreezeBlock = ffeFreezeBlock;
@@ -1272,7 +1292,7 @@ if eyeDiagramEnable
         eyePlotConfig.FreezeCenterCode = ffeFreezeCenterWrapped(slowestIndex);
         eyePlotConfig.FinalLockCode = lockedPhaseCode(slowestIndex);
         if ffeFrozenTrace(slowestIndex, end)
-            eyePlotConfig.FixedFfeLabel = 'Frozen taps';
+            eyePlotConfig.FixedFfeLabel = ffeGateTapLabel;
         else
             eyePlotConfig.FixedFfeLabel = 'Final live taps snapshot';
         end
@@ -1447,6 +1467,11 @@ defaults.FfeFreezeEnable = true;
 defaults.FfeFreezeMinModeOccurrences = 500;
 defaults.FfeFreezeMinEvents = 100;
 defaults.FfeFreezeBandHalfWidth = 3;
+% 冻结触发后的动作:'freeze' 经典永久停写;'pvt-track' 新增实验——不冻结,改把 FFE
+% mu 急剧降到 FfeStepSizePvtTrack,只保留极窄带宽跟踪 PVT。检测判据与 freeze 一致。
+defaults.FfeFreezeMode = 'pvt-track';
+% pvt-track 触发后使用的 FFE 步长(急剧收窄带宽,默认 2e-5),仅该模式生效。
+defaults.FfeStepSizePvtTrack = 0.0002;
 defaults.EyeDiagramEnable = true;
 defaults.EyeDiagramUiCount = 2048;
 defaults.SaveOutputs = true;
@@ -1459,7 +1484,7 @@ defaults.StartPhaseStep = 16;
 % 'CosimDir','channel_ctle_cosim_prbs22','TxFile','tx_prbs22.mat' 并加大 'AnalysisNumUi'。
 defaults.CosimDir = 'channel_ctle_cosim_prbs22';
 defaults.TxFile = 'tx_prbs22.mat';
-defaults.NumBlock = 20000;
+defaults.NumBlock = 30000;
 defaults.AnalysisNumUi = defaults.NumBlock * 64 + 512;
 
 options = defaults;
@@ -1755,6 +1780,16 @@ validateattributes(options.FfeFreezeMinEvents, {'numeric'}, ...
 validateattributes(options.FfeFreezeBandHalfWidth, {'numeric'}, ...
     {'scalar', 'finite', 'real', 'integer', '>=', 0}, mfilename, ...
     'FfeFreezeBandHalfWidth');
+freezeMode = options.FfeFreezeMode;
+isFreezeModeText = (ischar(freezeMode) && isrow(freezeMode) && ~isempty(freezeMode)) || ...
+    (isstring(freezeMode) && isscalar(freezeMode) && ~ismissing(freezeMode) && strlength(freezeMode) > 0);
+if ~isFreezeModeText || ~any(strcmpi(char(freezeMode), {'freeze', 'pvt-track'}))
+    error('cdr_dlev_cdrffe_sslms_v3:InvalidFfeFreezeMode', ...
+        'FfeFreezeMode must be ''freeze'' or ''pvt-track''.');
+end
+validateattributes(options.FfeStepSizePvtTrack, {'numeric'}, ...
+    {'scalar', 'finite', 'real', 'positive'}, mfilename, ...
+    'FfeStepSizePvtTrack');
 validateattributes(options.EyeDiagramEnable, {'numeric', 'logical'}, ...
     {'scalar', 'finite', 'real'}, mfilename, 'EyeDiagramEnable');
 assert(ismember(double(options.EyeDiagramEnable), [0 1]), ...
