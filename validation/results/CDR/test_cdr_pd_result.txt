@@ -1,0 +1,39 @@
+test_cdr_pd started: 2026-09-20 18:07:16
+Test script: C:\Work\MatLab_Lib\validation\CDR\test_subBlock\test_cdr_pd
+Result folder: C:\Work\MatLab_Lib\validation\results\CDR
+
+[FAIL] NRZ truth table: 未定义与 'char' 类型的输入参数相对应的函数 'cdr_pd'。
+[FAIL] PAM4 symmetric edges: 未定义与 'char' 类型的输入参数相对应的函数 'cdr_pd'。
+[FAIL] polarity: 未定义与 'char' 类型的输入参数相对应的函数 'cdr_pd'。
+[FAIL] mode and state: 函数或变量 'cdr_pd' 无法识别。
+[FAIL] matrix input: 未定义与 'char' 类型的输入参数相对应的函数 'cdr_pd'。
+[FAIL] fast path equivalence: 未定义与 'char' 类型的输入参数相对应的函数 'cdr_pd'。
+[FAIL] explicit block overlap: 未定义与 'char' 类型的输入参数相对应的函数 'cdr_pd'。
+[FAIL] invalid input: 未定义与 'char' 类型的输入参数相对应的函数 'cdr_pd'。
+[FAIL] MMPD framework: 未定义与 'char' 类型的输入参数相对应的函数 'cdr_pd'。
+[FAIL] MMPD transition filter: 函数或变量 'cdr_pd' 无法识别。
+[FAIL] MMPD transition-filter validation: 未定义与 'char' 类型的输入参数相对应的函数 'cdr_pd'。
+[FAIL] MMPD filtered polarity: 未定义与 'char' 类型的输入参数相对应的函数 'cdr_pd'。
+[FAIL] external slicer waveform: 未定义与 'char' 类型的输入参数相对应的函数 'cdr_pd'。
+
+Summary:
+  NRZ truth table          : FAIL
+  PAM4 symmetric edges     : FAIL
+  polarity                 : FAIL
+  mode and state           : FAIL
+  matrix input             : FAIL
+  fast path equivalence    : FAIL
+  explicit block overlap   : FAIL
+  invalid input            : FAIL
+  MMPD framework           : FAIL
+  MMPD transition filter   : FAIL
+  MMPD transition-filter validation : FAIL
+  MMPD filtered polarity   : FAIL
+  external slicer waveform : FAIL
+
+Passed 0 / 13 tests.
+Text result : C:\Work\MatLab_Lib\validation\results\CDR\test_cdr_pd_result.txt
+Waveform PNG: C:\Work\MatLab_Lib\validation\results\CDR\test_cdr_pd_waveform.png
+{错误使用 test_cdr_pd (第 61 行)
+test_cdr_pd failed: 0 / 13 tests passed.
+} 

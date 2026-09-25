@@ -1,83 +1,81 @@
 classdef cdr_top < handle
-    % cdr_top  以并行 block 为更新单位的数字 CDR 顶层行为模型。
+    % cdr_top  数字 CDR 顶层行为模型。
     %
-    % 本类负责把已经完成建模的 CDR 子模块串接为一条闭环数字控制链：
-    %
-    %   data/edge 数字判决
-    %       -> cdr_pd（逐 UI 产生 early/late 判决）
-    %       -> cdr_voter（一个 block 聚合为一次相位误差）
-    %       -> cdr_loop（生成整数 PI code 增量）
-    %       -> cdr_pi（更新下一 block 使用的采样相位）
-    %
-    % 顶层的主要职责不是重复各子模块内部算法，而是统一管理：
-    %   1. block 之间的 previous-symbol 重叠状态；
-    %   2. PD、voter、loop filter 和 PI 的调用顺序；
-    %   3. “当前 block 使用旧相位、更新后相位供下一 block 使用”的时序；
-    %   4. 调试路径和 BER/长序列 fast 路径的一致状态推进；
-    %   5. 所有动态子模块的同步复位。
-    %
-    % 建模边界：
-    %   - dataCurrBlock 和 edgeBitBlock 必须是上游 slicer 输出的数字码；
-    %   - 均衡、独立 CDR FFE、模拟波形采样、ADC 量化和 slicer 不属于本类；
-    %   - 默认一个顶层调用对应一个 voter block，block 长度由 Voter.BlockSize
-    %     决定，当前工程常用配置为 64 UI/block；
-    %   - PI 输出为浮点 waveform sample index 偏移；具体采用 round、floor
-    %     或插值由下游 sampler 决定。
+    % 本类保留原有五参数构造路径，同时提供单 config 结构体构造路径。旧路径只
+    % 串接 PD、voter、loop filter 与 PI；config 路径在 code 域内进一步拥有并
+    % 调度 CDR FFE、统一 PAM4 slicer、dlev 与 FFE SS-LMS 及 FFE gate monitor。
 
     properties (SetAccess = private)
-        % Pd  数字相位检测器对象，类型必须为 cdr_pd。
-        % 输入 D[n-1]、E[n]、D[n]，逐 UI 输出 {-1,0,+1} 相位判决。
+        % 原有四级 CDR 控制链（两种模式共用）。
         Pd
-
-        % Voter  block voter 对象，类型必须为 cdr_voter。
-        % 将一个 block 内的逐 UI 相位判决聚合为一个 phaseError。
         Voter
-
-        % LoopFilter  比例-积分环路滤波器对象，类型必须为 cdr_loop。
-        % 每个 block 更新一次，输出整数 PI code 增量 deltaCode。
         LoopFilter
-
-        % PhaseInterpolator  相位插值器对象，类型必须为 cdr_pi。
-        % 负责 PI code 累加、code wrap、UI slip 和 sample index LUT 映射。
         PhaseInterpolator
 
-        % PreviousSymbol  上一个 block 最后一个 data symbol 的数字码。
-        % 下一 block 构造 D[n-1] 时，将该值放在 dataPrevBlock 首元素。
-        % NRZ 合法范围为 0~1，PAM4 合法范围为 0~3。
+        % 原有顶层状态；旧构造路径的语义保持不变。
         PreviousSymbol
-
-        % BlockIndex  已完成处理的 block 数量，从 0 开始累计。
-        % processBlock/processBlockFast 成功完成一次后递增 1。
         BlockIndex = 0
-
-        % CurrentLocalIndexFloat  下一个待处理 block 应使用的本地 PI 相位。
-        % 单位为 waveform sample index，可为小数，只表示当前 UI 内的 wrapped
-        % 相位；跨 UI 的累计滑移量由 PhaseInterpolator.UiSlip 单独保存。
         CurrentLocalIndexFloat = 0
-
-        % LastOutput  最近一次 processBlock 调试路径的完整输出快照。
-        % processBlockFast 为减少热路径开销，刻意不更新该结构体。
         LastOutput
+
+        % config 路径拥有的 DSP 子模块与配置。
+        Ffe
+        Dlev
+        FfeLoop
+        Monitor
+        Config
+        Detector = ''
+        TransitionFilter = true
+
+        % config 路径的流式 pending 与跨块 carry。
+        PreviousDataSymbol = []
+        PreviousErrorBit = []
+        SampleBlockCount = 0
+        PendingCentered
+        PendingPast
+        PendingHasPast = false
+        HavePending = false
+        PendingCodeWrapped = 0
+        PendingUiSlip = 0
+        PendingBlockIndex = 0
+
+        % gate 触发瞬间的系数快照。换挡/门控的判决状态归 loop_monitor 所有。
+        GatedCoefficients
+    end
+
+    properties (Dependent, SetAccess = private)
+        % 只读代理：一次性换挡状态由 loop_monitor 持有，本类不再复制一份。
+        SettleDone
+    end
+
+    properties (Access = private)
+        ConfigMode = false
     end
 
     methods
-        function obj = cdr_top(pd, voter, loopFilter, phaseInterpolator, initialSymbol)
-            % cdr_top  使用已经配置好的四个子模块构造 CDR 顶层。
-            %
-            % 输入：
-            %   pd                - cdr_pd 对象，决定 NRZ/PAM4 模式和极性；
-            %   voter             - cdr_voter 对象，决定 block 长度和投票模式；
-            %   loopFilter        - cdr_loop 对象，包含 Kp/Ki 和积分限幅；
-            %   phaseInterpolator - cdr_pi 对象，包含 PI 位宽、LUT 和非理想配置；
-            %   initialSymbol     - 第一个 block 之前的真实历史 symbol。
-            %
-            % 顶层直接持有调用方传入的 handle 对象，不复制配置。构造末尾调用
-            % resetState，使 PD/loop/PI 动态状态和顶层 previous-symbol 状态从
-            % 同一个明确的初始条件开始。
-            if nargin < 5
-                error('cdr_top:MissingInput', 'pd, voter, loopFilter, phaseInterpolator, and initialSymbol must be provided.');
+        function obj = cdr_top(varargin)
+            % cdr_top  构造旧式数字控制链或完整 code 域 DSP 核。
+            if nargin == 1 && isstruct(varargin{1})
+                obj.ConfigMode = true;
+                obj.constructConfigured(varargin{1});
+                return;
             end
 
+            if nargin < 5
+                error('cdr_top:MissingInput', ...
+                    ['pd, voter, loopFilter, phaseInterpolator, and ' ...
+                    'initialSymbol must be provided.']);
+            end
+            if nargin > 5
+                error('cdr_top:TooManyInputs', ...
+                    'The legacy constructor accepts exactly five inputs.');
+            end
+
+            pd = varargin{1};
+            voter = varargin{2};
+            loopFilter = varargin{3};
+            phaseInterpolator = varargin{4};
+            initialSymbol = varargin{5};
             obj.validateComponents(pd, voter, loopFilter, phaseInterpolator);
             obj.Pd = pd;
             obj.Voter = voter;
@@ -86,111 +84,140 @@ classdef cdr_top < handle
             obj.resetState(initialSymbol);
         end
 
-        function output = processBlock(obj, dataCurrBlock, edgeBitBlock)
-            % processBlock  检查输入并执行一次 block-rate CDR 更新。
+        function output = processBlock(obj, varargin)
+            % processBlock  处理一个旧式数字判决块或一个时序 ADC code 块。
+            if obj.ConfigMode
+                if numel(varargin) ~= 1
+                    error('cdr_top:InvalidCenteredCode', ...
+                        'Configured mode expects one centeredCode input.');
+                end
+                output = obj.processConfiguredBlock(varargin{1});
+                obj.LastOutput = output;
+                return;
+            end
+
+            dataCurrBlock = varargin{1};
+            edgeBitBlock = varargin{2};
             obj.validateBlockShape(dataCurrBlock, edgeBitBlock);
-
-            % cdr_pd 本身不保存跨 block 的 D[n-1]。这里将顶层保存的上一 symbol
-            % 与当前 block 内部移位后的 data symbol 组合成完整 dataPrevBlock。
             dataPrevBlock = obj.buildPreviousBlock(dataCurrBlock);
-
-            % 保存进入 block 时的相位和历史 symbol，防止后续状态更新覆盖调试信息。
             sampleIndexForBlock = obj.CurrentLocalIndexFloat;
             previousSymbolIn = obj.PreviousSymbol;
 
-            % 逐级执行数字 CDR 控制链。phaseDecision/valid 与 data block 等长；
-            % phaseError 和 deltaCode 每个 block 只产生一个标量。
-            [phaseDecision, valid, pdOutput] = obj.Pd.bbpd(dataPrevBlock, edgeBitBlock, dataCurrBlock);
+            [phaseDecision, valid, pdOutput] = obj.Pd.bbpd( ...
+                dataPrevBlock, edgeBitBlock, dataCurrBlock);
             phaseError = obj.Voter.vote(phaseDecision);
             deltaCode = obj.LoopFilter.update(phaseError);
             obj.PhaseInterpolator.update(deltaCode);
 
-            % PI 更新后的本地 index 作为下一 block 的采样相位。与此同时保存当前
-            % block 最后一个 symbol，供下一次调用构造跨 block 的首个 D[n-1]。
             obj.CurrentLocalIndexFloat = obj.PhaseInterpolator.getLocalIndex();
             obj.PreviousSymbol = dataCurrBlock(end);
             obj.BlockIndex = obj.BlockIndex + 1;
 
-            % 输出同时包含当前 block 的输入/判决、控制量以及 PI 更新后状态，便于
-            % 验证调用时序。SampleIndexForBlock 与 NextLocalIndexFloat 分别对应
-            % 更新前和更新后相位，二者不能混用。
             output = struct();
             output.BlockIndex = obj.BlockIndex;
-            % 本 block 已经使用的 wrapped 浮点采样 index。
             output.SampleIndexForBlock = sampleIndexForBlock;
-            % 构造本 block D[n-1] 时使用的跨 block 历史 symbol。
             output.PreviousSymbolIn = previousSymbolIn;
-            % 实际送入 PD 的 D[n-1]、D[n] 和 E[n] 数字向量。
             output.DataPrevBlock = dataPrevBlock;
             output.DataCurrBlock = dataCurrBlock;
             output.EdgeBitBlock = edgeBitBlock;
-            % 逐 UI BBPD 判决及其有效标志；无效/未选 transition 的判决为 0。
             output.PhaseDecision = phaseDecision;
             output.Valid = valid;
-            % voter 聚合结果和 loop filter 产生的整数 PI code 增量。
             output.PhaseError = phaseError;
             output.DeltaCode = deltaCode;
-            % 更新后、供下一 block 使用的 wrapped 浮点采样 index。
             output.NextLocalIndexFloat = obj.CurrentLocalIndexFloat;
-            % 更新后的 PI wrapped code 和累计整 UI slip，便于观察跨 UI 行为。
             output.PiCodeWrapped = obj.PhaseInterpolator.CodeWrapped;
             output.PiUiSlip = obj.PhaseInterpolator.UiSlip;
-            % cdr_pd 调试路径返回的完整内部判决快照。
             output.PdOutput = pdOutput;
-
-            % 仅调试路径保留完整输出，避免 fast 路径每 block 分配大型结构体。
             obj.LastOutput = output;
         end
 
-        function [sampleIndexForBlock, nextLocalIndexFloat, phaseError, deltaCode] = processBlockFast(obj, dataCurrBlock, edgeBitBlock)
-            % processBlockFast  处理一个由调用方保证合法的数字判决 block。
-            %
-            % 调用前提：
-            %   - dataCurrBlock/edgeBitBlock 均为合法数字向量；
-            %   - 两者尺寸和方向一致，元素数等于 Voter.BlockSize；
-            %   - symbol/edge 码值满足当前 PD 模式，不包含 NaN/Inf。
-            %
-            % 为降低长 BER 仿真的每 block 开销，本路径不调用 validateBlockShape，
-            % 且分别调用各子模块的 Fast 接口。它只返回 sampler/控制循环所需的
-            % 四个标量，不构造 PdOutput，也不更新顶层 LastOutput。
-            %
-            % 返回值：
-            %   sampleIndexForBlock - 当前 block 使用的更新前本地采样 index；
-            %   nextLocalIndexFloat - PI 更新后供下一 block 使用的本地采样 index；
-            %   phaseError          - voter 的 block 聚合结果；
-            %   deltaCode           - loop filter 输出的整数 PI code 增量。
+        function [sampleIndexForBlock, nextLocalIndexFloat, phaseError, deltaCode] = ...
+                processBlockFast(obj, dataCurrBlock, edgeBitBlock)
+            % processBlockFast  保留旧构造路径的无检查快速接口。
+            if obj.ConfigMode
+                error('cdr_top:UnsupportedFastPath', ...
+                    'Configured mode uses processBlock(centeredCode).');
+            end
             dataPrevBlock = obj.buildPreviousBlock(dataCurrBlock);
             sampleIndexForBlock = obj.CurrentLocalIndexFloat;
-
-            % Fast 路径与 processBlock 保持完全相同的模块顺序和 block 时序。
-            [phaseDecision, ~] = obj.Pd.bbpdFast(dataPrevBlock, edgeBitBlock, dataCurrBlock);
+            [phaseDecision, ~] = obj.Pd.bbpdFast( ...
+                dataPrevBlock, edgeBitBlock, dataCurrBlock);
             phaseError = obj.Voter.voteFast(phaseDecision);
             deltaCode = obj.LoopFilter.updateFast(phaseError);
             nextLocalIndexFloat = obj.PhaseInterpolator.updateFast(deltaCode);
 
-            % 虽然省略调试结构，影响闭环后续行为的动态状态仍必须完整推进。
             obj.CurrentLocalIndexFloat = nextLocalIndexFloat;
             obj.PreviousSymbol = dataCurrBlock(end);
             obj.BlockIndex = obj.BlockIndex + 1;
         end
 
-        function resetState(obj, initialSymbol)
-            % resetState  同步复位所有 CDR 动态状态并设置首 block 历史码元。
-            %
-            % initialSymbol 不是任意占位值，而是第一个待处理 block 之前的真实
-            % data symbol 判决。显式传入它可以保证第一个 UI 的 transition 不会因
-            % 缺少 D[n-1] 而丢失或产生伪判决。
-            %
-            % 复位只清除动态状态，不改变各子模块配置：PD 模式/极性、voter 模式、
-            % Kp/Ki、积分限幅、PI 位宽和相位非理想 LUT 均保持不变。
-            obj.validateInitialSymbol(initialSymbol);
+        function output = flush(obj)
+            % flush  用零 future 处理 config 路径最后一个 pending 块。
+            if ~obj.ConfigMode
+                error('cdr_top:UnsupportedFlush', ...
+                    'flush is available only in configured mode.');
+            end
+            if ~obj.HavePending
+                output = obj.emptyConfiguredOutput();
+                obj.LastOutput = output;
+                return;
+            end
 
-            % voter 是无状态 block 聚合器，因此无需单独 reset。
+            futureSamples = zeros(1, obj.Ffe.PreTapCount);
+            output = obj.processPending(false, futureSamples);
+            obj.HavePending = false;
+            obj.LastOutput = output;
+        end
+
+        function [codeWrapped, uiSlip] = getSamplingPhase(obj)
+            % getSamplingPhase  返回下一次外部采样应使用的 PI wrapped/slip 状态。
+            codeWrapped = obj.PhaseInterpolator.CodeWrapped;
+            uiSlip = obj.PhaseInterpolator.UiSlip;
+        end
+
+        function resetState(obj, varargin)
+            % resetState  协同复位动态状态，不改变任何配置项。
+            if obj.ConfigMode
+                if ~isempty(varargin)
+                    error('cdr_top:InvalidResetInput', ...
+                        'Configured mode resetState accepts no input.');
+                end
+                obj.Pd.resetState();
+                obj.LoopFilter.resetState();
+                obj.PhaseInterpolator.resetState();
+                obj.configurePiNonideal();
+                obj.PhaseInterpolator.setCode(obj.Config.PiInitialCode);
+                obj.Dlev.resetState();
+                obj.Dlev.setStepSize(obj.Config.DlevStepSize);
+                obj.Ffe.resetState();
+                obj.FfeLoop.resetState();
+                obj.FfeLoop.setStepSize(obj.Config.FfeStepSize);
+                obj.Monitor.resetState();
+
+                obj.PreviousSymbol = [];
+                obj.PreviousDataSymbol = [];
+                obj.PreviousErrorBit = [];
+                obj.BlockIndex = 0;
+                obj.SampleBlockCount = 0;
+                obj.CurrentLocalIndexFloat = ...
+                    obj.PhaseInterpolator.getLocalIndex();
+                obj.PendingCentered = zeros(1, obj.Config.BlockSize);
+                obj.PendingPast = zeros(1, obj.Ffe.PostTapCount);
+                obj.PendingHasPast = false;
+                obj.HavePending = false;
+                obj.PendingCodeWrapped = 0;
+                obj.PendingUiSlip = 0;
+                obj.PendingBlockIndex = 0;
+                obj.GatedCoefficients = nan(1, obj.Ffe.TapCount);
+                obj.LastOutput = struct();
+                return;
+            end
+
+            initialSymbol = varargin{1};
+            obj.validateInitialSymbol(initialSymbol);
             obj.Pd.resetState();
             obj.LoopFilter.resetState();
             obj.PhaseInterpolator.resetState();
-
-            % 顶层调度状态与 PI 复位后的本地 index 同步回到初始状态。
             obj.PreviousSymbol = initialSymbol;
             obj.BlockIndex = 0;
             obj.CurrentLocalIndexFloat = obj.PhaseInterpolator.getLocalIndex();
@@ -198,32 +225,642 @@ classdef cdr_top < handle
         end
 
         function state = getState(obj)
-            % getState  返回顶层调度状态和有状态子模块的完整调试快照。
-            %
-            % 该接口用于回归、调试和 trace，不建议在长 BER 主循环中每个 block
-            % 调用，因为 cdr_pi.getState 会包含相位表等较大的派生数据。
-            % Voter 本身无跨 block 动态状态，因此这里不重复生成 voter state。
+            % getState  返回当前模式的完整调试状态。
+            if ~obj.ConfigMode
+                state = struct();
+                state.BlockIndex = obj.BlockIndex;
+                state.PreviousSymbol = obj.PreviousSymbol;
+                state.CurrentLocalIndexFloat = obj.CurrentLocalIndexFloat;
+                state.LastOutput = obj.LastOutput;
+                state.Pd = obj.Pd.getState();
+                state.LoopFilter = obj.LoopFilter.getState();
+                state.PhaseInterpolator = obj.PhaseInterpolator.getState();
+                return;
+            end
+
             state = struct();
+            state.Config = obj.Config;
+            state.Detector = obj.Detector;
+            state.TransitionFilter = obj.TransitionFilter;
             state.BlockIndex = obj.BlockIndex;
-            state.PreviousSymbol = obj.PreviousSymbol;
-            state.CurrentLocalIndexFloat = obj.CurrentLocalIndexFloat;
+            state.SampleBlockCount = obj.SampleBlockCount;
+            state.PreviousDataSymbol = obj.PreviousDataSymbol;
+            state.PreviousErrorBit = obj.PreviousErrorBit;
+            state.HavePending = obj.HavePending;
+            state.PendingHasPast = obj.PendingHasPast;
+            state.PendingCentered = obj.PendingCentered;
+            state.PendingPast = obj.PendingPast;
+            state.PendingCodeWrapped = obj.PendingCodeWrapped;
+            state.PendingUiSlip = obj.PendingUiSlip;
+            state.PendingBlockIndex = obj.PendingBlockIndex;
+            state.SettleDone = obj.SettleDone;
+            state.GatedCoefficients = obj.GatedCoefficients;
             state.LastOutput = obj.LastOutput;
             state.Pd = obj.Pd.getState();
             state.LoopFilter = obj.LoopFilter.getState();
             state.PhaseInterpolator = obj.PhaseInterpolator.getState();
+            state.Dlev = obj.Dlev.getState();
+            state.Ffe = obj.Ffe.getState();
+            state.FfeLoop = obj.FfeLoop.getState();
+            state.Monitor = obj.Monitor.getState();
+        end
+
+        function value = get.SettleDone(obj)
+            % get.SettleDone  一次性换挡状态的只读代理，真值在 loop_monitor。
+            if isempty(obj.Monitor)
+                value = false;
+                return;
+            end
+            value = obj.Monitor.SettleDone;
+        end
+    end
+
+    methods (Static)
+        function cfg = defaultConfig()
+            % defaultConfig  返回完整且可直接构造的 v3 对齐默认配置。
+            cfg = struct();
+            cfg.BlockSize = 64;
+            cfg.SamplesPerSymbol = 128;
+            cfg.Detector = 'mmpd';
+            cfg.TransitionFilter = true;
+            cfg.PdPolarity = 1;
+            cfg.VoterMode = 'mean';
+            cfg.VoterDenominator = 'auto';
+            cfg.Kp = 8;
+            cfg.Ki = 0.03;
+            cfg.FrequencyLimit = 4;
+            cfg.MaxDeltaCode = 1;
+            cfg.PiNumBit = 7;
+            cfg.PiNonideal = 'ab_constant';
+            cfg.PiInitialCode = 0;
+            cfg.DlevInnerInit = 16;
+            cfg.DlevOuterInit = 48;
+            cfg.DlevPolarity = 1;
+            cfg.DlevStepSize = 0.5;
+            cfg.DlevStepSizeSettle = 0.1;
+            cfg.DlevStepSizePvtTrack = 0.02;
+            cfg.DlevSettleWindow = 16;
+            cfg.DlevSettleTol = 0.5;
+            % Stage-2 (capture -> settle) mu-downshift gate.
+            %   'snr'  : averaged decision-directed eye SNR crosses
+            %            SnrSettleThresholdDb. Default, because the eye being
+            %            open is the actual precondition for slowing the FFE.
+            %   'dlev' : legacy outer-dLev displacement test. Kept selectable
+            %            for the loop_monitor/cdr_top unit contracts, but it is
+            %            an implicit drift-rate threshold of
+            %            DlevSettleTol/DlevSettleWindow and a slowly ramping
+            %            dLev satisfies it while the eye is still closed.
+            cfg.SettleGate = 'snr';
+            cfg.SnrSettleThresholdDb = 15;
+            cfg.SnrSettleAlpha = 1 / 128;
+            cfg.SnrSettleMinBlock = 200;
+            cfg.FfeInitCoefficients = [0 0 1 0 0 0];
+            cfg.FfePreTapCount = 2;
+            cfg.FfeStepSize = 0.004;
+            cfg.FfeStepSizeSettle = 2e-4;
+            cfg.FfeAdaptEnableMask = logical([1 1 0 1 1 1]);
+            cfg.FfeGateEnable = true;
+            cfg.FfeGateMode = 'pvt-track';
+            cfg.FfeStepSizePvtTrack = 2e-4;
+            cfg.FfeGateMinModeOccurrences = 500;
+            cfg.FfeGateMinEvents = 100;
+            cfg.FfeGateBandHalfWidth = 3;
+            cfg.FfeGateStartBlock = 1;
+        end
+
+        function [decision, sliceError, dataSymbol, errorBit] = ...
+                slicePam4(sample, dLevInner, dLevOuter, threshold)
+            % slicePam4  用当前 dlev 电平和门限完成统一 PAM4 code 域判决。
+            sample = reshape(sample, 1, []);
+            isNegative = sample < 0;
+            isOuter = abs(sample) >= threshold;
+            magnitude = dLevInner + (dLevOuter - dLevInner) .* isOuter;
+            decision = magnitude;
+            decision(isNegative) = -magnitude(isNegative);
+            sliceError = sample - decision;
+
+            isPositive = decision >= 0;
+            isOuter = abs(decision) >= threshold;
+            dataSymbol = double(isPositive) * 2 + ...
+                double(isPositive == isOuter);
+            errorBit = double(sliceError >= 0);
+        end
+        function snrDb = blockSnrDb(decision, sliceError)
+            % blockSnrDb  判决导向眼质量 FOM：判决电平功率/切片误差功率 (dB)。
+            %
+            % decision 与 sliceError 已是有效样本(ffeOutput 先按 blockValid 掩码
+            % 再切片)，无需再过滤。该指标是判决导向而非真值参考：闭眼判错时误差
+            % 相对"错误的"电平计算，单块读数可能偏乐观——实测中一个未锁定、相位
+            % 持续旋转的环路会周期性扫过眼心并给出高读数。因此它只能配合
+            % loop_monitor 的 EWMA 使用，不可逐块直接判阈。
+            if isempty(decision) || isempty(sliceError)
+                snrDb = NaN;
+                return;
+            end
+            errorPower = mean(double(sliceError) .^ 2);
+            if ~(errorPower > 0)
+                snrDb = Inf;
+                return;
+            end
+            snrDb = 10 * log10(mean(double(decision) .^ 2) / errorPower);
         end
     end
 
     methods (Access = private)
+        function constructConfigured(obj, config)
+            cfg = obj.validateConfig(config);
+            obj.Config = cfg;
+            obj.Detector = cfg.Detector;
+            obj.TransitionFilter = cfg.TransitionFilter;
+
+            obj.Pd = cdr_pd('pam4', cfg.PdPolarity);
+            obj.Voter = cdr_voter(cfg.VoterMode, cfg.BlockSize, 8, ...
+                cfg.VoterDenominator);
+            obj.LoopFilter = cdr_loop(cfg.Kp, cfg.Ki, ...
+                -cfg.FrequencyLimit, cfg.FrequencyLimit, cfg.MaxDeltaCode);
+            obj.PhaseInterpolator = cdr_pi(cfg.PiNumBit, ...
+                cfg.SamplesPerSymbol);
+            obj.Ffe = cdr_ffe(cfg.FfeInitCoefficients, cfg.FfePreTapCount);
+            obj.Dlev = dlev_loop(cfg.DlevStepSize, cfg.BlockSize, ...
+                cfg.DlevInnerInit, cfg.DlevOuterInit, cfg.DlevPolarity);
+            obj.FfeLoop = cdr_ffe_loop(cfg.FfeStepSize, obj.Ffe.TapCount, ...
+                obj.Ffe.MainTapIndex, cfg.BlockSize, cfg.FfeAdaptEnableMask);
+            obj.Monitor = loop_monitor( ...
+                cfg.FfeGateMinModeOccurrences, cfg.FfeGateMinEvents, ...
+                cfg.FfeGateBandHalfWidth, cfg.FfeGateStartBlock, ...
+                cfg.DlevSettleWindow, cfg.DlevSettleTol);
+            if strcmp(cfg.SettleGate, 'snr')
+                obj.Monitor.enableSnrSettle(cfg.SnrSettleThresholdDb, ...
+                    cfg.SnrSettleAlpha, cfg.SnrSettleMinBlock);
+            end
+            obj.resetState();
+        end
+
+        function output = processConfiguredBlock(obj, centeredCode)
+            cfg = obj.Config;
+            isValid = isnumeric(centeredCode) && isreal(centeredCode) && ...
+                isrow(centeredCode) && numel(centeredCode) == cfg.BlockSize && ...
+                all(isfinite(centeredCode));
+            if ~isValid
+                error('cdr_top:InvalidCenteredCode', ...
+                    'centeredCode must be a finite real 1-by-BlockSize numeric vector.');
+            end
+            centeredCode = double(centeredCode);
+
+            % 必须先快照本次输入块实际采用的 PI 状态，再处理 pending 并更新 PI。
+            newCode = obj.PhaseInterpolator.CodeWrapped;
+            newSlip = obj.PhaseInterpolator.UiSlip;
+            futureSamples = centeredCode(1:obj.Ffe.PreTapCount);
+
+            if obj.HavePending
+                output = obj.processPending(true, futureSamples);
+            else
+                output = obj.emptyConfiguredOutput();
+            end
+
+            if obj.HavePending
+                if obj.Ffe.PostTapCount == 0
+                    obj.PendingPast = zeros(1, 0);
+                else
+                    obj.PendingPast = obj.PendingCentered( ...
+                        end - obj.Ffe.PostTapCount + 1:end);
+                end
+                obj.PendingHasPast = true;
+            else
+                obj.PendingPast = zeros(1, obj.Ffe.PostTapCount);
+                obj.PendingHasPast = false;
+            end
+            obj.PendingCentered = centeredCode;
+            obj.PendingCodeWrapped = newCode;
+            obj.PendingUiSlip = newSlip;
+            obj.SampleBlockCount = obj.SampleBlockCount + 1;
+            obj.PendingBlockIndex = obj.SampleBlockCount;
+            obj.HavePending = true;
+        end
+
+        function output = processPending(obj, haveFuture, futureSamples)
+            cfg = obj.Config;
+            inputWindow = [obj.PendingPast, obj.PendingCentered, futureSamples];
+            [blockOutput, blockRegressor] = obj.Ffe.processBlock(inputWindow);
+
+            blockValid = true(1, cfg.BlockSize);
+            if ~obj.PendingHasPast && obj.Ffe.PostTapCount > 0
+                blockValid(1:obj.Ffe.PostTapCount) = false;
+            end
+            if ~haveFuture && obj.Ffe.PreTapCount > 0
+                blockValid(end - obj.Ffe.PreTapCount + 1:end) = false;
+            end
+            ffeOutput = blockOutput(blockValid);
+
+            codeWrapped = obj.PendingCodeWrapped;
+            uiSlip = obj.PendingUiSlip;
+            blockIndex = obj.PendingBlockIndex;
+            [decision, sliceError, dataSymbol, errorBit] = ...
+                cdr_top.slicePam4(ffeOutput, obj.Dlev.DLevInner, ...
+                obj.Dlev.DLevOuter, obj.Dlev.Threshold);
+
+            if strcmp(obj.Detector, 'mmpd')
+                % SS-MMPD 只是把符号化输入送入同一条 mmpd 数值路径。
+                if isempty(obj.PreviousDataSymbol)
+                    obj.PreviousDataSymbol = dataSymbol(1);
+                    obj.PreviousErrorBit = errorBit(1);
+                end
+                dataPrev = [obj.PreviousDataSymbol, dataSymbol(1:end - 1)];
+                errorPrev = [obj.PreviousErrorBit, errorBit(1:end - 1)];
+                [phaseDecision, validTransition] = obj.Pd.mmpdFast( ...
+                    dataPrev, errorPrev, dataSymbol, errorBit, ...
+                    obj.TransitionFilter);
+                obj.PreviousDataSymbol = dataSymbol(end);
+                obj.PreviousErrorBit = errorBit(end);
+            else
+                if isempty(obj.PreviousDataSymbol)
+                    obj.PreviousDataSymbol = dataSymbol(1);
+                end
+                dataPrev = [obj.PreviousDataSymbol, dataSymbol(1:end - 1)];
+                [phaseDecision, validTransition] = obj.Pd.bbpdFast( ...
+                    dataPrev, errorBit, dataSymbol);
+                obj.PreviousDataSymbol = dataSymbol(end);
+            end
+
+            phaseError = obj.Voter.vote(phaseDecision);
+            deltaCode = obj.LoopFilter.update(phaseError);
+            obj.PhaseInterpolator.update(deltaCode);
+
+            % 策略判决全部委托给 loop_monitor：它只判决，由本类施加动作。
+            % 第一级降档(capture -> settle)：两个环路同时降，门控见 SettleGate。
+            snrDb = cdr_top.blockSnrDb(decision, sliceError);
+            if strcmp(cfg.SettleGate, 'snr')
+                settleTriggered = obj.Monitor.updateSnrSettle(blockIndex, snrDb);
+            else
+                settleTriggered = obj.Monitor.updateDlevSettle(blockIndex, ...
+                    obj.Dlev.DLevOuter);
+            end
+            if settleTriggered
+                obj.Dlev.setStepSize(cfg.DlevStepSizeSettle);
+                obj.FfeLoop.setStepSize(cfg.FfeStepSizeSettle);
+            end
+
+            if numel(ffeOutput) == cfg.BlockSize
+                obj.Dlev.dlevSsLms(decision, sliceError);
+            end
+
+            gateTriggered = false;
+            if cfg.FfeGateEnable
+                unwrapped = uiSlip * cfg.SamplesPerSymbol + codeWrapped;
+                gateTriggered = obj.Monitor.updateFfeGate(unwrapped, blockIndex);
+                if gateTriggered
+                    obj.GatedCoefficients = obj.Ffe.Coefficients;
+                    if strcmp(cfg.FfeGateMode, 'pvt-track')
+                        % 第二级降档(settle -> PVT tracking)：锁定确认后两个
+                        % 环路再各降一档，只保留跟踪 PVT 漂移的能力。
+                        obj.FfeLoop.setStepSize(cfg.FfeStepSizePvtTrack);
+                        obj.Dlev.setStepSize(cfg.DlevStepSizePvtTrack);
+                    end
+                end
+            end
+
+            rawDelta = nan(1, obj.Ffe.TapCount);
+            appliedDelta = zeros(1, obj.Ffe.TapCount);
+            proposedCoefficients = nan(1, obj.Ffe.TapCount);
+            adaptationCalculated = false;
+            writeApplied = false;
+            gateInhibitsWrite = strcmp(cfg.FfeGateMode, 'freeze');
+            if numel(ffeOutput) == cfg.BlockSize
+                errorBlock = decision - ffeOutput;
+                rawDelta = obj.FfeLoop.updateSsLms(blockRegressor, errorBlock);
+                rawDelta(obj.Ffe.MainTapIndex) = 0;
+                proposedCoefficients = obj.Ffe.Coefficients + rawDelta;
+                adaptationCalculated = true;
+                if ~obj.Monitor.Frozen || ~gateInhibitsWrite
+                    obj.Ffe.applyCoefficientDelta(rawDelta);
+                    appliedDelta = rawDelta;
+                    writeApplied = true;
+                end
+            end
+
+            obj.Monitor.recordDlevOuter(blockIndex, obj.Dlev.DLevOuter);
+            obj.BlockIndex = blockIndex;
+            obj.CurrentLocalIndexFloat = ...
+                obj.PhaseInterpolator.getLocalIndex();
+
+            output = struct();
+            output.HasOutput = true;
+            output.BlockIndex = blockIndex;
+            output.SampleCodeWrapped = codeWrapped;
+            output.SampleUiSlip = uiSlip;
+            output.UnwrappedCode = uiSlip * cfg.SamplesPerSymbol + codeWrapped;
+            output.FfeOutput = ffeOutput;
+            output.ValidMask = blockValid;
+            output.Decision = decision;
+            output.SliceError = sliceError;
+            output.DataSymbol = dataSymbol;
+            output.ErrorBit = errorBit;
+            output.PhaseDecision = phaseDecision;
+            output.ValidTransition = validTransition;
+            output.PhaseError = phaseError;
+            output.DeltaCode = deltaCode;
+            % 环路滤波器的亚码连续量：LoopControl 是量化前的相位速度需求
+            % (code/block)，LoopFrequencyState 是积分态。整数 PI code 会把
+            % 亚码运动藏起来，这两个量用于区分"真抖动"与"缓慢漂移"。
+            output.LoopControl = obj.LoopFilter.LastControl;
+            output.LoopFrequencyState = obj.LoopFilter.FrequencyState;
+            output.LoopCodeResidue = obj.LoopFilter.CodeResidue;
+            output.LoopPendingCode = obj.LoopFilter.PendingCode;
+            output.NextCodeWrapped = obj.PhaseInterpolator.CodeWrapped;
+            output.NextUiSlip = obj.PhaseInterpolator.UiSlip;
+            output.DlevInner = obj.Dlev.DLevInner;
+            output.DlevOuter = obj.Dlev.DLevOuter;
+            output.DlevThreshold = obj.Dlev.Threshold;
+            output.FfeCoefficients = obj.Ffe.Coefficients;
+            output.FfeRawDelta = rawDelta;
+            output.FfeAppliedDelta = appliedDelta;
+            output.FfeProposedCoefficients = proposedCoefficients;
+            output.FfeAdaptationCalculated = adaptationCalculated;
+            output.FfeWriteApplied = writeApplied;
+            output.GateTriggered = gateTriggered;
+            output.GateEngaged = cfg.FfeGateEnable && obj.Monitor.Frozen;
+            output.SettleDone = obj.SettleDone;
+            output.SnrDb = snrDb;
+            output.SnrEwmaDb = obj.Monitor.SnrEwmaDb;
+            output.SnrSettleDone = obj.Monitor.SnrSettleDone;
+            output.SnrSettleBlock = obj.Monitor.SnrSettleBlock;
+            output.DlevStepSize = obj.Dlev.StepSize;
+            output.FfeStepSize = obj.FfeLoop.StepSize;
+        end
+
+        function output = emptyConfiguredOutput(obj)
+            output = struct();
+            output.HasOutput = false;
+            output.BlockIndex = 0;
+            output.SampleCodeWrapped = NaN;
+            output.SampleUiSlip = NaN;
+            output.UnwrappedCode = NaN;
+            output.FfeOutput = zeros(1, 0);
+            output.ValidMask = false(1, obj.Config.BlockSize);
+            output.Decision = zeros(1, 0);
+            output.SliceError = zeros(1, 0);
+            output.DataSymbol = zeros(1, 0);
+            output.ErrorBit = zeros(1, 0);
+            output.PhaseDecision = zeros(1, 0, 'int8');
+            output.ValidTransition = false(1, 0);
+            output.PhaseError = NaN;
+            output.DeltaCode = NaN;
+            output.LoopControl = NaN;
+            output.LoopFrequencyState = obj.LoopFilter.FrequencyState;
+            output.LoopCodeResidue = obj.LoopFilter.CodeResidue;
+            output.LoopPendingCode = obj.LoopFilter.PendingCode;
+            output.NextCodeWrapped = obj.PhaseInterpolator.CodeWrapped;
+            output.NextUiSlip = obj.PhaseInterpolator.UiSlip;
+            output.DlevInner = obj.Dlev.DLevInner;
+            output.DlevOuter = obj.Dlev.DLevOuter;
+            output.DlevThreshold = obj.Dlev.Threshold;
+            output.FfeCoefficients = obj.Ffe.Coefficients;
+            output.FfeRawDelta = nan(1, obj.Ffe.TapCount);
+            output.FfeAppliedDelta = zeros(1, obj.Ffe.TapCount);
+            output.FfeProposedCoefficients = nan(1, obj.Ffe.TapCount);
+            output.FfeAdaptationCalculated = false;
+            output.FfeWriteApplied = false;
+            output.GateTriggered = false;
+            output.GateEngaged = obj.Config.FfeGateEnable && obj.Monitor.Frozen;
+            output.SettleDone = obj.SettleDone;
+            output.SnrDb = NaN;
+            output.SnrEwmaDb = obj.Monitor.SnrEwmaDb;
+            output.SnrSettleDone = obj.Monitor.SnrSettleDone;
+            output.SnrSettleBlock = obj.Monitor.SnrSettleBlock;
+            output.DlevStepSize = obj.Dlev.StepSize;
+            output.FfeStepSize = obj.FfeLoop.StepSize;
+        end
+
+        function configurePiNonideal(obj)
+            if strcmp(obj.Config.PiNonideal, 'ideal')
+                obj.PhaseInterpolator.resetNonideal();
+            else
+                obj.PhaseInterpolator.setDefaultNonideal();
+            end
+        end
+
+        function cfg = validateConfig(obj, cfg)
+            if ~isscalar(cfg)
+                error('cdr_top:InvalidConfig', 'config must be a scalar struct.');
+            end
+            expected = fieldnames(cdr_top.defaultConfig());
+            for index = 1:numel(expected)
+                field = expected{index};
+                if ~isfield(cfg, field)
+                    error(['cdr_top:Invalid' field], ...
+                        'config.%s is required.', field);
+                end
+            end
+
+            obj.requirePositiveInteger(cfg.BlockSize, 'BlockSize');
+            if cfg.BlockSize > double(intmax('int16'))
+                obj.invalidField('BlockSize');
+            end
+            obj.requirePositiveInteger(cfg.SamplesPerSymbol, 'SamplesPerSymbol');
+            cfg.Detector = obj.requireTextChoice(cfg.Detector, 'Detector', ...
+                {'bbpd', 'mmpd', 'ssmmpd'});
+            if strcmp(cfg.Detector, 'ssmmpd')
+                cfg.Detector = 'mmpd';
+            end
+            if ~(isscalar(cfg.TransitionFilter) && ...
+                    (islogical(cfg.TransitionFilter) || ...
+                    (isnumeric(cfg.TransitionFilter) && ...
+                    isreal(cfg.TransitionFilter) && ...
+                    ismember(double(cfg.TransitionFilter), [0 1 2]))))
+                error('cdr_top:InvalidTransitionFilter', ...
+                    'TransitionFilter must be logical or numeric 0/1/2.');
+            end
+            cfg.TransitionFilter = double(cfg.TransitionFilter);
+            obj.requirePolarity(cfg.PdPolarity, 'PdPolarity');
+            cfg.VoterMode = obj.requireTextChoice(cfg.VoterMode, ...
+                'VoterMode', {'linear', 'constant', 'mean'});
+            cfg.VoterDenominator = obj.requireDenominator(cfg.VoterDenominator);
+            obj.requireNonnegativeScalar(cfg.Kp, 'Kp');
+            obj.requireNonnegativeScalar(cfg.Ki, 'Ki');
+            obj.requireNonnegativeScalar(cfg.FrequencyLimit, 'FrequencyLimit');
+            obj.requirePositiveInteger(cfg.MaxDeltaCode, 'MaxDeltaCode');
+            obj.requirePositiveInteger(cfg.PiNumBit, 'PiNumBit');
+            if cfg.PiNumBit > 30
+                obj.invalidField('PiNumBit');
+            end
+            cfg.PiNonideal = obj.requireTextChoice(cfg.PiNonideal, ...
+                'PiNonideal', {'ideal', 'ab_constant'});
+            obj.requireIntegerScalar(cfg.PiInitialCode, 'PiInitialCode');
+            if cfg.PiInitialCode < 0 || cfg.PiInitialCode >= 2^cfg.PiNumBit
+                obj.invalidField('PiInitialCode');
+            end
+            obj.requirePositiveScalar(cfg.DlevInnerInit, 'DlevInnerInit');
+            obj.requirePositiveScalar(cfg.DlevOuterInit, 'DlevOuterInit');
+            if cfg.DlevOuterInit <= cfg.DlevInnerInit
+                obj.invalidField('DlevOuterInit');
+            end
+            obj.requirePolarity(cfg.DlevPolarity, 'DlevPolarity');
+            obj.requirePositiveScalar(cfg.DlevStepSize, 'DlevStepSize');
+            obj.requirePositiveScalar(cfg.DlevStepSizeSettle, ...
+                'DlevStepSizeSettle');
+            obj.requirePositiveInteger(cfg.DlevSettleWindow, ...
+                'DlevSettleWindow');
+            obj.requireNonnegativeScalar(cfg.DlevSettleTol, 'DlevSettleTol');
+
+            if ~(isnumeric(cfg.FfeInitCoefficients) && ...
+                    isreal(cfg.FfeInitCoefficients) && ...
+                    isvector(cfg.FfeInitCoefficients) && ...
+                    ~isempty(cfg.FfeInitCoefficients) && ...
+                    all(isfinite(cfg.FfeInitCoefficients(:))))
+                obj.invalidField('FfeInitCoefficients');
+            end
+            cfg.FfeInitCoefficients = reshape( ...
+                double(cfg.FfeInitCoefficients), 1, []);
+            obj.requireNonnegativeInteger(cfg.FfePreTapCount, 'FfePreTapCount');
+            if cfg.FfePreTapCount >= numel(cfg.FfeInitCoefficients)
+                obj.invalidField('FfePreTapCount');
+            end
+            mainTapIndex = cfg.FfePreTapCount + 1;
+            if cfg.FfeInitCoefficients(mainTapIndex) ~= 1
+                obj.invalidField('FfeInitCoefficients');
+            end
+            obj.requireNonnegativeScalar(cfg.FfeStepSize, 'FfeStepSize');
+            obj.requireNonnegativeScalar(cfg.FfeStepSizeSettle, ...
+                'FfeStepSizeSettle');
+            if ~((islogical(cfg.FfeAdaptEnableMask) || ...
+                    isnumeric(cfg.FfeAdaptEnableMask)) && ...
+                    isvector(cfg.FfeAdaptEnableMask) && ...
+                    numel(cfg.FfeAdaptEnableMask) == ...
+                    numel(cfg.FfeInitCoefficients) && ...
+                    all(ismember(cfg.FfeAdaptEnableMask(:), [0 1])))
+                obj.invalidField('FfeAdaptEnableMask');
+            end
+            cfg.FfeAdaptEnableMask = logical( ...
+                reshape(cfg.FfeAdaptEnableMask, 1, []));
+            cfg.FfeGateEnable = obj.requireLogicalScalar( ...
+                cfg.FfeGateEnable, 'FfeGateEnable');
+            cfg.FfeGateMode = obj.requireTextChoice(cfg.FfeGateMode, ...
+                'FfeGateMode', {'freeze', 'pvt-track'});
+            obj.requireNonnegativeScalar(cfg.FfeStepSizePvtTrack, ...
+                'FfeStepSizePvtTrack');
+            obj.requirePositiveInteger(cfg.FfeGateMinModeOccurrences, ...
+                'FfeGateMinModeOccurrences');
+            obj.requirePositiveInteger(cfg.FfeGateMinEvents, ...
+                'FfeGateMinEvents');
+            obj.requireNonnegativeInteger(cfg.FfeGateBandHalfWidth, ...
+                'FfeGateBandHalfWidth');
+            obj.requirePositiveInteger(cfg.FfeGateStartBlock, ...
+                'FfeGateStartBlock');
+            cfg.SettleGate = obj.requireTextChoice(cfg.SettleGate, ...
+                'SettleGate', {'dlev', 'snr'});
+            obj.requirePositiveScalar(cfg.DlevStepSizePvtTrack, ...
+                'DlevStepSizePvtTrack');
+            if ~(isnumeric(cfg.SnrSettleThresholdDb) && ...
+                    isreal(cfg.SnrSettleThresholdDb) && ...
+                    isscalar(cfg.SnrSettleThresholdDb) && ...
+                    isfinite(cfg.SnrSettleThresholdDb))
+                obj.invalidField('SnrSettleThresholdDb');
+            end
+            if ~(isnumeric(cfg.SnrSettleAlpha) && isreal(cfg.SnrSettleAlpha) && ...
+                    isscalar(cfg.SnrSettleAlpha) && ...
+                    isfinite(cfg.SnrSettleAlpha) && cfg.SnrSettleAlpha > 0 && ...
+                    cfg.SnrSettleAlpha <= 1)
+                obj.invalidField('SnrSettleAlpha');
+            end
+            obj.requirePositiveInteger(cfg.SnrSettleMinBlock, ...
+                'SnrSettleMinBlock');
+
+            numericFields = setdiff(expected, {'Detector', 'VoterMode', ...
+                'VoterDenominator', 'PiNonideal', 'FfeInitCoefficients', ...
+                'FfeAdaptEnableMask', 'FfeGateMode', 'TransitionFilter', ...
+                'FfeGateEnable', 'SettleGate'});
+            for index = 1:numel(numericFields)
+                field = numericFields{index};
+                cfg.(field) = double(cfg.(field));
+            end
+        end
+
+        function value = requireTextChoice(obj, value, field, choices)
+            if isstring(value) && isscalar(value)
+                value = char(value);
+            end
+            if ~(ischar(value) && isrow(value) && ~isempty(value))
+                obj.invalidField(field);
+            end
+            value = lower(value);
+            if ~any(strcmp(value, choices))
+                obj.invalidField(field);
+            end
+        end
+
+        function value = requireLogicalScalar(obj, value, field)
+            valid = isscalar(value) && (islogical(value) || ...
+                (isnumeric(value) && isreal(value) && isfinite(value) && ...
+                (value == 0 || value == 1)));
+            if ~valid
+                obj.invalidField(field);
+            end
+            value = logical(value);
+        end
+
+        function value = requireDenominator(obj, value)
+            if isstring(value) && isscalar(value)
+                value = char(value);
+            end
+            if ischar(value) && isrow(value) && strcmpi(value, 'auto')
+                value = 'auto';
+                return;
+            end
+            if ~(isnumeric(value) && isreal(value) && isscalar(value) && ...
+                    isfinite(value) && value > 0)
+                obj.invalidField('VoterDenominator');
+            end
+            value = double(value);
+        end
+
+        function requirePositiveInteger(obj, value, field)
+            if ~(isnumeric(value) && isreal(value) && isscalar(value) && ...
+                    isfinite(value) && value >= 1 && value == fix(value))
+                obj.invalidField(field);
+            end
+        end
+
+        function requireNonnegativeInteger(obj, value, field)
+            if ~(isnumeric(value) && isreal(value) && isscalar(value) && ...
+                    isfinite(value) && value >= 0 && value == fix(value))
+                obj.invalidField(field);
+            end
+        end
+
+        function requireIntegerScalar(obj, value, field)
+            if ~(isnumeric(value) && isreal(value) && isscalar(value) && ...
+                    isfinite(value) && value == fix(value))
+                obj.invalidField(field);
+            end
+        end
+
+        function requirePositiveScalar(obj, value, field)
+            if ~(isnumeric(value) && isreal(value) && isscalar(value) && ...
+                    isfinite(value) && value > 0)
+                obj.invalidField(field);
+            end
+        end
+
+        function requireNonnegativeScalar(obj, value, field)
+            if ~(isnumeric(value) && isreal(value) && isscalar(value) && ...
+                    isfinite(value) && value >= 0)
+                obj.invalidField(field);
+            end
+        end
+
+        function requirePolarity(obj, value, field)
+            if ~(isnumeric(value) && isreal(value) && isscalar(value) && ...
+                    isfinite(value) && (value == 1 || value == -1))
+                obj.invalidField(field);
+            end
+        end
+
+        function invalidField(~, field)
+            error(['cdr_top:Invalid' field], ...
+                'config.%s has an invalid type or value.', field);
+        end
+
         function dataPrevBlock = buildPreviousBlock(obj, dataCurrBlock)
-            % buildPreviousBlock  构造与 D[n] 对齐的 D[n-1] block。
-            %
-            % 对当前 block：
-            %   Dprev(1)     = 上一个 block 保存的最后一个 symbol；
-            %   Dprev(2:end) = Dcurr(1:end-1)。
-            %
-            % 显式区分行/列向量，保证输出方向与输入完全一致，从而满足 cdr_pd
-            % 对 dataPrev、edgeBit、dataCurr 三者 same-size 的接口要求。
             if isrow(dataCurrBlock)
                 dataPrevBlock = [obj.PreviousSymbol, dataCurrBlock(1:end - 1)];
             else
@@ -232,59 +869,56 @@ classdef cdr_top < handle
         end
 
         function validateBlockShape(obj, dataCurrBlock, edgeBitBlock)
-            % validateBlockShape  检查顶层 validated 路径的单 block 结构约定。
-            %
-            % 这里只检查数据类型、实数性、向量形状、block 长度及两个输入的尺寸
-            % 一致性。具体 symbol/edge 码值合法性由 cdr_pd.bbpd 继续检查，避免在
-            % 顶层复制 NRZ/PAM4 模式相关规则。
             isDataTypeValid = isnumeric(dataCurrBlock) || islogical(dataCurrBlock);
-            isDataShapeValid = isDataTypeValid && isreal(dataCurrBlock) && isvector(dataCurrBlock);
+            isDataShapeValid = isDataTypeValid && isreal(dataCurrBlock) && ...
+                isvector(dataCurrBlock);
             isDataLengthValid = numel(dataCurrBlock) == obj.Voter.BlockSize;
             if ~(isDataTypeValid && isDataShapeValid && isDataLengthValid)
-                error('cdr_top:InvalidDataBlock', 'dataCurrBlock must be a real vector with Voter.BlockSize elements.');
+                error('cdr_top:InvalidDataBlock', ...
+                    ['dataCurrBlock must be a real vector with ' ...
+                    'Voter.BlockSize elements.']);
             end
 
             isEdgeTypeValid = isnumeric(edgeBitBlock) || islogical(edgeBitBlock);
-            isEdgeShapeValid = isEdgeTypeValid && isreal(edgeBitBlock) && isvector(edgeBitBlock);
+            isEdgeShapeValid = isEdgeTypeValid && isreal(edgeBitBlock) && ...
+                isvector(edgeBitBlock);
             isEdgeSizeValid = isequal(size(edgeBitBlock), size(dataCurrBlock));
             if ~(isEdgeTypeValid && isEdgeShapeValid && isEdgeSizeValid)
-                error('cdr_top:InvalidEdgeBlock', 'edgeBitBlock must be a real vector with the same size and orientation as dataCurrBlock.');
+                error('cdr_top:InvalidEdgeBlock', ...
+                    ['edgeBitBlock must be a real vector with the same size ' ...
+                    'and orientation as dataCurrBlock.']);
             end
         end
 
         function validateInitialSymbol(obj, initialSymbol)
-            % validateInitialSymbol  检查首 block 之前的显式历史 symbol。
-            %
-            % initialSymbol 必须是有限实整数标量；合法码值范围随 Pd.Mode 变化：
-            % NRZ 使用 0/1，PAM4 使用 0/1/2/3。这里提前检查可避免 reset 之后才在
-            % 第一次 PD 调用中暴露不合法的跨 block 状态。
-            isNumericScalar = isnumeric(initialSymbol) && isreal(initialSymbol) && isscalar(initialSymbol);
-            isFiniteInteger = isNumericScalar && isfinite(initialSymbol) && initialSymbol == round(initialSymbol);
+            isNumericScalar = isnumeric(initialSymbol) && isreal(initialSymbol) && ...
+                isscalar(initialSymbol);
+            isFiniteInteger = isNumericScalar && isfinite(initialSymbol) && ...
+                initialSymbol == round(initialSymbol);
             if ~(isNumericScalar && isFiniteInteger)
-                error('cdr_top:InvalidInitialSymbol', 'initialSymbol must be a finite integer scalar.');
+                error('cdr_top:InvalidInitialSymbol', ...
+                    'initialSymbol must be a finite integer scalar.');
             end
-
             if strcmp(obj.Pd.Mode, 'nrz')
                 isValid = initialSymbol >= 0 && initialSymbol <= 1;
             else
                 isValid = initialSymbol >= 0 && initialSymbol <= 3;
             end
             if ~isValid
-                error('cdr_top:InvalidInitialSymbol', 'initialSymbol is invalid for the configured PD mode.');
+                error('cdr_top:InvalidInitialSymbol', ...
+                    'initialSymbol is invalid for the configured PD mode.');
             end
         end
 
         function validateComponents(~, pd, voter, loopFilter, phaseInterpolator)
-            % validateComponents  确认顶层接入的是当前工程定义的四类 CDR 对象。
-            %
-            % 使用明确 isa 检查，而不是仅检查同名方法，可以尽早发现错误接线，
-            % 并确保 processBlock/processBlockFast 所依赖的属性和状态语义一致。
             isPdValid = isa(pd, 'cdr_pd');
             isVoterValid = isa(voter, 'cdr_voter');
             isLoopValid = isa(loopFilter, 'cdr_loop');
             isPiValid = isa(phaseInterpolator, 'cdr_pi');
             if ~(isPdValid && isVoterValid && isLoopValid && isPiValid)
-                error('cdr_top:InvalidComponent', 'Components must be cdr_pd, cdr_voter, cdr_loop, and cdr_pi objects.');
+                error('cdr_top:InvalidComponent', ...
+                    ['Components must be cdr_pd, cdr_voter, cdr_loop, ' ...
+                    'and cdr_pi objects.']);
             end
         end
     end

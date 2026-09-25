@@ -1,5 +1,25 @@
 ﻿# Decisions
 
+## 2026-09-23: PI slew limit set to one code per update; drift-vs-dither instrumentation
+
+- User-confirmed physical assumption change: `MaxDeltaCode` default goes `12 -> 1` in `cdr_top.defaultConfig` and in the v4 runner, because a real phase interpolator moves one code per update. The previous `12` was a behavioural-study value. Measured impact on the v4 no-argument default run: lock unchanged at 8/8, `AllPhaseLock = 1`, common phase 113, spread 4; only 5 of 120000 block-phase updates ever hit the limiter, all during acquisition (last at block 5432). v3 keeps `12`, so v3-vs-v4 equivalence runs now pass `MaxDeltaCode` explicitly; with it pinned the refactor is still bit-exact in all three configurations.
+- `cdr_top` exports the loop filter's pre-quantization state per block (`LoopControl`, `LoopFrequencyState`, `LoopCodeResidue`, `LoopPendingCode`) and v4 stores four traces plus `cdr_loop_dither_vs_drift.fig`. Rationale: `LastRawDeltaCode` and the applied `deltaCode` are both integers, so the PI code trace cannot separate a converged dither from a slow drift.
+- Criterion ranking is explicit to avoid over-claiming: `LoopControl` long-window mean and `FrequencyState` steady value are the decisive quantities; `CodeResidue` is corroborating only, because its `(-1,1)` range is structural and always filled, leaving only its sign distribution informative. `PendingCode` persistently non-zero means the loop is slew-limited and therefore not converged.
+- `CodeResidue` (fractional truncation remainder) and `PendingCode` (integer slew backlog) are orthogonal and must not be conflated; this is now stated in `MODEL_ASSUMPTIONS.md`.
+
+
+
+- User-approved scope: do **not** create a separate waveform-level `cdr_rx_top` yet (the DSP path is not modelled). Instead extend `cdr_top` itself with a second, config-struct construction path that owns the full code-domain CDR core: `cdr_ffe` plus its pending window, the unified PAM4 slicer, `cdr_pd` (MMPD), `cdr_voter`, `cdr_loop`, `cdr_pi`, `dlev_loop`, `cdr_ffe_loop` and the FFE write gate. The legacy 5-argument component-injection constructor, its `processBlock(data, edge)` semantics and `test_cdr_top`'s 6 checks are preserved unchanged.
+- `cdr_top` must not reference the ADC. The boundary is "chronological, zero-centred ADC code in, sampling phase out": the caller owns waveform access, `ti_adc_top`, physical-lane-to-time reordering and absolute UI addressing driven by `getSamplingPhase()`. `dlev_loop`, `cdr_ffe_loop`, `cdr_ffe`, `cdr_pd`, `cdr_loop` and `cdr_pi` are reused **without any modification**; the top level only adds four guards (full-block gating for dLev/FFE, pre-slice dLev level read, compute-but-do-not-write under freeze, single-shot mu downshift).
+- The one-block loop dead time is modelled inside `cdr_top` as a physical consequence of the CDR FFE precursor look-ahead: block *k* is sampled with `phase[k]`, processed one call later, so `phase[k+1] == phase[k]` and `phase[k+2] == phase[k] + delta[k]`. `flush()` drains the final pending block with zero future samples. The legacy BBPD path keeps its original zero-latency semantics.
+- Canonical behaviour is the current executable v3, not the older prose: `transitionFilter = true` (symmetric `0<->3`/`1<->2` only) is the `cdr_top` default, and `FfeTrainingBlocks = 0` means the supervised golden-training path is dead code. The v4 runner therefore **deletes** training entirely (golden TX cache, `channelMainCursorUi` alignment, `FfeTrainingReferenceMode`/`FfeTrainingOuterRef`/`FfeTrainingInnerRef`, training traces and the post-training histogram row). With `T = 0` that deletion is bit-exact; the FFE reference is always the live decision produced from the live dLev levels.
+- `mmpd` and `ssmmpd` are **not** two numerical paths. `cdr_pd.mmpd` only accepts 0-3 symbols and 0/1 error bits, so symbolisation is already intrinsic to its interface; `'ssmmpd'` is accepted as an alias that normalises to `'mmpd'`. A genuinely different detector would have to be a full-precision MM (`tau = e[n]*d[n-1] - e[n-1]*d[n]`) requiring a new `cdr_pd` method; that is deliberately not added now.
+- `cdr_voter` gains a `'mean'` mode with a configurable denominator (`'auto'` = actual valid-sample count, or a fixed positive scalar) returning `double`. `'auto'` is the default because v3 divides by `numel(ffeOutput)`, which is 61/62/64 on the boundary blocks. `linear`/`constant` keep their strict `== BlockSize` length check and `int16` return, so the existing 7 checks are unaffected.
+- The FFE gate keeps v3's two post-trigger actions: `'freeze'` permanently inhibits coefficient writes while still computing and recording raw SS-LMS deltas, and `'pvt-track'` (default) keeps writing but collapses the FFE step to `FfeStepSizePvtTrack`. The causal detector was promoted from the suite helpers to `src/CDR` and gains `resetState()` because the reusable top level now owns it; `test_cdr_validation_paths` asserts the new location.
+- The class was renamed `ffe_freeze_monitor -> loop_monitor` and now holds **both** causal adaptation-policy state machines: the FFE write gate (`updateFfeGate`, unchanged logic and thresholds) and a new dLev settle detector (`recordDlevOuter` / `updateDlevSettle`). The monitor only decides; it never holds a loop object and never calls `setStepSize`, so `cdr_top` still applies every action and keeps the data path. This removed `cdr_top`'s `SettleDone` bool and its unbounded `DlevOuterHistory`; the settle history is now a bounded ring buffer of `DlevSettleWindow+1` entries inside the monitor. The rename is behaviour-neutral: v3 reproduces its pre-rename results bit for bit across the three equivalence configs (26/26 fields, `max abs diff 0`), and `cdr_top.SettleDone` remains as a read-only dependent proxy for backward compatibility. Error identifiers moved to `loop_monitor:*` and the test moved to `tests/CDR/test_loop_monitor.m`.
+- `PdOffset` is not carried into the new API. It was parsed and exported by v3 but never participated in any update equation, so silently wiring it in would have been a behaviour change.
+- Loop parameters are fully configurable and there are no silent defaults: `cdr_top(config)` requires every field and raises `cdr_top:Invalid<Field>`. `cdr_top.defaultConfig()` mirrors the current v3 defaults as a starting point only, and must be re-synchronised whenever the v3 experimental defaults move.
+
 ## 2026-09-20: remove redundant separate SS-MMPD methods
 
 - Reverse the separate-method portion of the earlier decision below: SS-MMPD is the existing uniform-weight MMPD kernel when sign-derived PAM4 symbols (`0-3`) and error bits (`0/1`) are passed to `mmpd`/`mmpdFast` with `transitionFilter=false`; separate `ssmmpd` methods are redundant and removed.
@@ -405,3 +425,80 @@ The following values appear in current ADC waveform studies but are not yet perm
   non-locked phases are the likely symptom. Next step to reach 32/32: add a
   small `FfeTargetSkew` (e.g. 0.02) so pre1=c-skew, post1=c+skew breaks the
   degeneracy while keeping the S-curve alive.
+
+## 2026-09-25: Two-stage mu downshift gated on eye quality (fixes -100 ppm all-phase capture)
+
+- **Problem**: the three-loop ppm suite
+  (`validation/CDR/test_cdr_three_loop_wi_ppm`) captured all 32 start phases at
+  `+100 ppm` and `0 ppm` but **0/32** at `-100 ppm`, with every start phase
+  driving the loop frequency state to the `-4` clamp against a theoretical
+  requirement of `+0.8192 code/block`.
+- **Root cause (causally verified, not inferred)**: `loop_monitor.m`
+  `updateDlevSettle` is a two-point displacement test,
+  `abs(dlevOuter - dlevOuter_{k-W}) <= tol`, i.e. an *implicit drift-rate
+  threshold* of `tol/W = 0.5/16 = 0.031 code/block`. The measured cold-start
+  dLev drift rate is only ~`0.012 code/block`, so it reported settle at
+  **block 84** with the outer level at 41.36 against a final 31.99 — 59% of the
+  trajectory still ahead and the eye still closed. `cdr_top.m` then cut both
+  step sizes in one shot: dLev `0.5 -> 0.1` (5x) and FFE `0.004 -> 2e-4`
+  (**20x**). The only loop that can open the eye was slowed 20x while a ppm
+  drift was racing it, so the eye never opened, the decision-directed PD bias
+  stayed one-signed negative, and the integrator wound to the clamp.
+- **Isolation**: keeping only the FFE capture step gives 8/8 lock; keeping only
+  the dLev capture step gives 0/8. The fatal element is the FFE downshift; the
+  dLev downshift is harmless.
+- The previously documented "+/- acquisition asymmetry" is real but is an
+  *amplification mechanism*, not the root cause: the natural closed-eye PD bias
+  is negative (~-0.016), which opposes the `+0.8192` that `-100 ppm` needs and
+  assists the `-0.8192` that `+100 ppm` needs.
+- **Parameter tuning cannot fix it**: no `(DlevSettleWindow, DlevSettleTol)`
+  pair satisfies all three ppm cases. Tightening the rate threshold
+  (`128/0.1`, `200/0.05`) gives `+/-100 ppm` 32/32 but degrades the `0 ppm`
+  locked-phase spread from 4 to 13-15 code (limit `captureBandHalfWidth = 6`),
+  because the downshift then effectively never fires and steady-state gradient
+  noise is never suppressed. A fixed-block trigger (`fire@2001`) appears to pass
+  all three over 8 start phases but drops `-100 ppm` to 31/32 over 32 start
+  phases. The required downshift instant varies with start phase and with ppm,
+  so neither a fixed flatness threshold nor a fixed block number can express it.
+- **Decision**: replace the stage-1 gate with an **eye-quality** criterion and
+  make the downshift explicitly two-stage.
+  - Stage 1 (`capture -> settle`), both loops together, gated on the averaged
+    decision-directed SNR `10*log10(mean(decision^2)/mean(sliceError^2))`.
+    `cdr_top.blockSnrDb` computes the per-block FOM from values `slicePam4`
+    already produces; `loop_monitor.updateSnrSettle` makes the decision, keeping
+    the monitor's "decide only, never apply" contract and its bounded-memory
+    guarantee (the EWMA is one scalar). Enabled via the new
+    `loop_monitor.enableSnrSettle(thresholdDb, alpha, minBlock)` so the
+    documented 4/6 constructor arity stays valid for existing callers.
+    New `cdr_top` config: `SettleGate` (`'snr'` default, `'dlev'` legacy),
+    `SnrSettleThresholdDb = 15`, `SnrSettleAlpha = 1/128`,
+    `SnrSettleMinBlock = 200`.
+  - Stage 2 (`settle -> PVT tracking`) reuses the existing phase-band lock gate
+    `updateFfeGate` and now drops **both** loops: FFE to `FfeStepSizePvtTrack`
+    and dLev to the new `DlevStepSizePvtTrack = 0.02` (previously only the FFE
+    was dropped).
+- **Averaging is load-bearing, not cosmetic**: per-block SNR distributions
+  overlap badly. In the failing run the closed-eye p99 is 22.55 dB, *above* the
+  17.50 dB tail minimum of a passing run, because once the integrator is at the
+  clamp the PI rotates and the sampling point periodically sweeps the eye
+  centre. Only after EWMA do the two separate: failing-run EWMA peaks at
+  13.02-13.12 dB with `alpha = 1/128` (14.59-14.73 dB with `1/32`, too thin a
+  margin) against 21.6-24.4 dB when the eye is open. Measured threshold floor:
+  11 dB breaks `-100 ppm` (0/8), `>= 12 dB` works; 15 dB is the chosen operating
+  point (~1.9 dB above the closed-eye peak, ~6.6 dB below the open-eye level).
+- **Capture-mu FFE step reduced `0.004 -> 0.001` in the ppm suite**: with the
+  main tap frozen (`FfeAdaptEnableMask = [1 1 0 1 1 1]`) the loop can only
+  reshape the pulse through the pre/post taps, which walks the effective cursor
+  and therefore moves the MMPD zero, so different start phases converge to
+  different locked phases. The walk is proportional to the capture step —
+  measured locked-phase spread for `0.001/0.002/0.004/0.008` is `3/6/12/21` code
+  at 0 ppm and `1/2/5/13` code at +100 ppm. `0.001` is the largest step that
+  keeps all three ppm cases inside the capture band. The `cdr_top` library
+  default stays `0.004`; only the ppm suite default changed.
+- **Result** (32 start phases, `NumBlock = 8000`, runner defaults):
+  `-100 ppm` 32/32 `AllPhaseLock=1` spread 3 code `freqStateMean +0.8193..+0.8194`;
+  `+100 ppm` 32/32 `AllPhaseLock=1` spread 2 code `freqStateMean -0.8192..-0.8191`;
+  `0 ppm` 32/32 `AllPhaseLock=1` spread 3 code. Theory is `+/-0.8192`.
+- `0 ppm` is retained as a mandatory regression sentinel for this policy, since
+  it is the case most sensitive to the downshift actually happening and to the
+  capture-mu cursor walk.

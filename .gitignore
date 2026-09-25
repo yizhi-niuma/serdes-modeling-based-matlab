@@ -16,3 +16,14 @@ results/*.pid
 .DS_Store
 Thumbs.db
 .vscode/
+
+# PiCode agent state: session scratch, downloaded reference PDFs, notes
+.picode/
+picode.md
+
+# Scratch directories from v3/v4 equivalence replays
+.tmp_eq_*/
+
+# Stray artifact from a "> nul" redirect run under a POSIX-style shell on
+# Windows, where nul is not the null device
+nul

@@ -151,8 +151,9 @@ Stateless block voter with:
 - One configurable parallel phase-decision block per call; the default block size is 64.
 - Linear mode returning the signed sum of the `-1/0/+1` phase decisions.
 - Constant mode returning `+K`, `-K`, or zero from the sign of the block sum; the default magnitude is 8.
+- Mean mode returning a `double` normalized vote with a configurable denominator: `'auto'` divides by the actual decision count (so boundary blocks shorter than `BlockSize` are handled), or a fixed positive scalar can be supplied. Mean mode accepts `1..BlockSize` decisions; linear and constant keep the strict `== BlockSize` check and `int16` return.
 - Validated `vote` and reduced-overhead single-block `voteFast` paths.
-- `int16` accumulation and output.
+- `int16` accumulation and output for linear and constant modes.
 
 The voter does not accumulate across blocks or model the RTL output register. The future CDR top-level owns block scheduling and pipeline latency.
 
@@ -193,7 +194,25 @@ Block-rate digital integration model with:
 
 The current top-level input is already-sliced digital data-symbol and edge-bit
 blocks. It does not yet own waveform sampling, the dedicated CDR FFE, slicers,
-or the TI ADC connection.
+or the TI ADC connection. This describes the legacy component-injection path only; the configured mode below owns the CDR FFE and the slicer, but still never the ADC.
+
+### `cdr_top` configured code-domain mode (2026-09-23)
+
+`cdr_top` now also accepts a single configuration struct. That second construction path turns the class into the reusable code-domain CDR DSP core while leaving the legacy five-argument BBPD path byte-for-byte unchanged.
+
+- Owns `cdr_ffe` plus its cross-block window, a static PAM4 slicer (`cdr_top.slicePam4`), `cdr_pd` in MMPD mode, `cdr_voter` in mean mode, `cdr_loop`, `cdr_pi`, `dlev_loop`, `cdr_ffe_loop` and `loop_monitor`.
+- Input is one block of chronological, zero-centred ADC codes; output is the next sampling phase through `getSamplingPhase`. The class contains no reference to any ADC model, so the caller keeps waveform access, TI ADC instantiation, lane reordering and absolute UI addressing.
+- Models one block of loop dead time caused by the FFE precursor look-ahead: `processBlock` returns `HasOutput = false` while the pipeline fills, and `flush` drains the final pending block with zero future samples.
+- Runs the v3 block order exactly: FFE -> slicer -> MMPD -> voter -> loop -> PI -> mu downshift -> dLev -> FFE gate -> FFE SS-LMS write.
+- The FFE gate supports `freeze` (stop writing, keep computing raw deltas) and `pvt-track` (keep writing at a collapsed step size). Both the gate and the mu-downshift decisions live in `loop_monitor`, which only reports events; `cdr_top` applies the actions.
+- The mu downshift is two-stage (2026-09-25). Stage 1 (`capture -> settle`) drops the dLev and FFE steps together and is gated by `SettleGate`: `'snr'` (default) uses the averaged decision-directed eye SNR through `loop_monitor.updateSnrSettle`, `'dlev'` selects the legacy outer-dLev displacement test. Stage 2 (`settle -> PVT tracking`) is the existing phase-band lock gate and now drops both loops, FFE to `FfeStepSizePvtTrack` and dLev to `DlevStepSizePvtTrack`. The per-block eye FOM is `cdr_top.blockSnrDb`, computed from the `decision`/`sliceError` pair `slicePam4` already returns, so no new data path exists.
+- `Detector` accepts `bbpd`, `mmpd` and the `ssmmpd` alias; the alias normalizes to `mmpd` because `cdr_pd.mmpd` already requires symbolized inputs and there is no second numerical path.
+- Every loop parameter is injected explicitly; missing or invalid fields raise `cdr_top:Invalid<Field>`. `cdr_top.defaultConfig` returns the current v3 aligned starting point.
+- Each block output also exports the loop filter's pre-quantization continuous state (`LoopControl`, `LoopFrequencyState`, `LoopCodeResidue`, `LoopPendingCode`). The integer PI code hides sub-code motion, so these are what distinguish a genuine limit-cycle dither from a slow drift.
+
+`ffe_freeze_monitor.m` was renamed to `loop_monitor.m` and moved into `src/CDR`. Besides the FFE write gate it now also owns the causal dLev settle detector (a bounded ring buffer), so `cdr_top` no longer keeps its own `SettleDone` flag or an unbounded dLev history. The monitor only decides; `cdr_top` applies the mu downshift and the gate action.
+
+`loop_monitor` carries three independent causal detectors after 2026-09-25: the FFE write gate, the legacy dLev settle detector, and an eye-quality (SNR) settle detector. The third is a one-shot trigger on an EWMA of a per-block decision-directed SNR in dB, so its memory is a single scalar. It is enabled explicitly through `enableSnrSettle(thresholdDb, alpha, minBlock)` rather than through extra constructor arguments, which keeps the documented 4/6 constructor arity valid for every existing caller. It exists because the dLev detector is a displacement test over a fixed window, i.e. an implicit drift-rate threshold of `DlevSettleTol/DlevSettleWindow`, which a slowly ramping dLev satisfies while the eye is still closed. Averaging is part of the criterion, not decoration: per-block SNR readings of an unlocked loop whose PI is rotating sweep the eye centre periodically and reach open-eye values.
 
 ## CDR/dlev/FFE validation runner layout
 
@@ -204,9 +223,13 @@ session-local runtime paths: the suite root, `helpers`, the current runner direc
 `src/CDR`, and `src/ADC/TI_ADC`.
 
 - The current entry point is
-  `src/cdr_dlev_cdrffe_sslms_v3/cdr_dlev_cdrffe_sslms_v3.m`.
-- The six runtime helpers are `detect_pi_center_touch_lock`,
-  `select_slowest_pi_capture`, `ffe_freeze_monitor`, `build_cdr_ffe_eye`,
+  `src/cdr_dlev_cdrffe_sslms_v3/cdr_dlev_cdrffe_sslms_v3.m`, and the thin
+  runner that drives the configured `cdr_top` is
+  `src/cdr_dlev_cdrffe_sslms_v4/cdr_dlev_cdrffe_sslms_v4.m`. Both runner
+  directories are on the runtime path, and v4 writes to
+  `result/cdr_dlev_cdrffe_sslms_v4`.
+- The five runtime helpers are `detect_pi_center_touch_lock`,
+  `select_slowest_pi_capture`, `build_cdr_ffe_eye`,
   `build_cdr_ffe_eye_pair`, and `plot_cdr_ffe_eyes`.
 - `debug` and `legacy` are opt-in path scopes; `archive` contains inert historical
   source-search excerpts and is not added to the runtime path.

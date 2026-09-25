@@ -1,0 +1,105 @@
+================================================================================
+cdr_three_loop_ppm.m  实现说明与频偏采集分析 (+100 ppm 结果)
+================================================================================
+生成日期: 2026-09-24
+对应结果: result/cdr_three_loop_ppm_p100/cdr_three_loop_ppm_result.mat
+被测脚本: validation/CDR/test_cdr_three_loop_wi_ppm/src/cdr_three_loop_ppm/cdr_three_loop_ppm.m
+
+--------------------------------------------------------------------------------
+一、验证目标与整体结构
+--------------------------------------------------------------------------------
+在标准以太网要求的 +/-100 ppm 采样时钟频偏下，验证 CDR 三个并发环路
+(SS-MMPD 相位环 / dLev 电平环 / CDR-FFE SS-LMS) 能否实现"全初始相位捕获"。
+脚本派生自 cdr_dlev_cdrffe_sslms_v4，被测 DSP 核仍为 cdr_top(config)，本脚本
+只负责缓存读取、TI ADC 采样、频偏注入、起始相位扫描、trace 收集、判据与绘图。
+
+--------------------------------------------------------------------------------
+二、关键实现要点与设计取舍
+--------------------------------------------------------------------------------
+1. 频偏注入 = 方案 A (RX 时钟模型)，波形缓存不重采样：
+   - 一个数据符号在缓存网格上恒占 128 个样本；频偏体现在 RX 采样步长：
+     每个 RX UI 读指针前进 128*(1+delta) 个样本, delta = FreqOffsetPpm*1e-6。
+   - 128*(1+delta) 非整数，故维护浮点累积漂移，只在取 block 起始地址时对
+     "累积值"取整一次: driftSample = round(driftRatePerBlockCode*(blockIndex-1))，
+     加到 blockStart。对累积值取整(不对增量)使量化误差恒 <= 0.5 sample = 1/128 UI，
+     与 PI 分辨率同阶。块内 64 个采样仍按 128 等间隔(块内漂移 <=0.82 sample 不建模)。
+   - driftRatePerBlockCode = ppm*1e-6*128*64。100 ppm => 0.8192 code/block，
+     PI 旋转周期 = 128/0.8192 = 156.25 block/UI。cdr_top 完全不知情(激励/被测边界干净)。
+
+2. 锁定判据可切换(保留 0 ppm 判据，不删除):
+   - FreqOffsetPpm==0: 沿用 v4 的众数 center-touch (detect_pi_center_touch_lock)。
+   - FreqOffsetPpm~=0: src/CDR/loop_monitor.m 新增两个静态判据，二者都成立才算锁:
+       (a) detectFrequencyStateLock: 环路积分器频率态尾窗均值恒定(前后半均值一致、
+           std 小)且量级匹配期望漂移率。量级匹配对符号不敏感(避免 PD/采样极性约定影响)。
+       (b) detectRotationPeriodLock: PI 旋转周期(相邻 UI-slip 间隔)恒定(CoV 小)=已跟踪，
+           不恒定=仍在采集。
+   - 需求诊断(不入判据): result.PiTrackingErrorTrace / cdr_pi_tracking_error.fig =
+     PI 实际码减去理想偏移补偿码(= unwrapped+driftSample-C)，跟踪后为平线，采集中为斜坡。
+
+3. 频率采集的先决条件(重要结论): 采集期"眼必须是开的"。冷启动 planB([0 0 1 0 0 0])下
+   眼在前若干 block 是闭的，而频偏已在漂移，从远端起始相位环路会把积分器锁到错误的
+   S 曲线斜率并冲到频率钳位。本 +100 ppm 结果用的是冷启动 planB 且默认参数即可全相位锁定，
+   因为 +100 ppm 所需的补偿方向恰好与冷启动初始瞬态偏置一致(见四)。-100 ppm 不成立，
+   详见 result/cdr_three_loop_ppm_m100/impl_notes.txt。
+
+--------------------------------------------------------------------------------
+三、本次运行配置
+--------------------------------------------------------------------------------
+FreqOffsetPpm = +100 , FfeInitMode = planB(冷启动 [0 0 1 0 0 0]) , FreqAcqPonly = false
+Kp=8 , Ki=0.03 , MaxDeltaCode=1 , FrequencyLimit=4 , PdPolarity=1
+DlevOuterInit=48 , DlevInnerInit=16 , StepSize=0.5->0.1 , FfeStepSize=0.004->0.0002
+缓存 = channel_ctle_cosim_prbs22 , samplePerSymbol=128 , adcBlockUi=64
+NumBlock = 8000 (=> numBlocks=8000, AnalysisNumUi 自动含两侧漂移余量并对齐 64)
+StartPhaseStep = 16 => 8 个起始相位 0:16:112 ; LockWindowBlocks=2000
+
+--------------------------------------------------------------------------------
+四、关键结果与结论 (+100 ppm)
+--------------------------------------------------------------------------------
+- 8/8 起始相位全部锁定, AllPhaseLock=1 (ppm 一致性带宽 16 code = 1/8 UI)。
+- 频率态尾窗均值 FreqStateMean 全部 = -0.8191 (理论期望 -0.8192, 误差 <1e-4 code/block)。
+- 旋转周期 156.17..156.42 block/UI (理论 156.25), 周期 CoV 0.004..0.010 (跟踪极稳)。
+- 眼相位码 114/124/126/127/0/117/116/115 (circular 都落在 ~120±7 一致弧, spread=14 code)。
+- 采集(首捕)块 77..589, 快速捕获。dLev 收敛正常。
+- 结论: +100 ppm 冷启动 planB 默认参数即可实现全初始相位频率捕获与跟踪，
+  两个频域判据(频率态均值恒定 + 旋转周期恒定)一致判定锁定。
+
+--------------------------------------------------------------------------------
+五、复现方法
+--------------------------------------------------------------------------------
+从仓库根目录:
+  addpath(fullfile(pwd,'validation','CDR','test_cdr_three_loop_wi_ppm'));
+  setup_cdr_three_loop_wi_ppm_paths();
+  r = cdr_three_loop_ppm('FreqOffsetPpm', 100);              % 默认 NumBlock=15000
+  r = cdr_three_loop_ppm('FreqOffsetPpm', 100, 'NumBlock', 8000);  % 本次配置
+快速 smoke:
+  cdr_three_loop_ppm('FreqOffsetPpm',100,'NumBlock',4000,'StartPhaseList',[16 64],'SaveOutputs',false);
+输出目录随 ppm 正负自动为 result/cdr_three_loop_ppm_p100 / _m100。
+================================================================================
+
+================================================================================
+2026-09-25 追加: 两级降档 + 眼质量门控后重跑 (32 起始相位, 离散度 14 -> 2 码)
+================================================================================
+为修复 -100 ppm 全相位捕获失败, 换挡策略与 capture 期 FFE 步长已改动。根因分析与
+判据设计的完整记录见 result/cdr_three_loop_ppm_m100/impl_notes.txt 的同日小节;
+本节只记录 +100 ppm 侧的影响与新结果。
+
+改动摘要:
+- 第一级降档(capture->settle)门控由 dLev 位移判据改为判决导向 SNR 的 EWMA 判据
+  (SettleGate='snr', 阈值 15 dB, alpha=1/128, minBlock=200), dLev 与 FFE 同时降。
+  旧判据是隐式速率门限 0.5/16=0.031 code/block, 冷启动 dLev 漂移率仅 0.012, 会在
+  block 84 误判收敛并把 FFE 步长砍 20 倍。
+- 第二级降档(settle->PVT)沿用既有相位带锁定门控, 新增 dLev 侧 DlevStepSizePvtTrack
+  = 0.02 (原先只降 FFE)。
+- capture 期 FfeStepSize 0.004 -> 0.001: 主抽头被冻结时环路只能靠前后抽头整形,
+  会移动有效游标从而移动 MMPD 零点, 走位量与步长成正比。+100 ppm 侧实测锁定相位
+  离散度随步长 0.001/0.002/0.004/0.008 = 1/2/5/13 码。
+
+新结果 (32 起始相位 0:4:127, NumBlock=8000, 纯默认参数):
+- 32/32 起始相位锁定, AllPhaseLock=1, 频率判据 32/32。
+- freqStateMean -0.8192..-0.8191 (理论期望 -0.8192)。
+- commonLockPhase=120, 锁定相位离散度 2 码 (上文 8 相位旧配置为 14 码)。
+- 对照同配置下 -100 ppm 与 0 ppm 亦为 32/32 AllPhaseLock=1 (离散度 3 / 3 码)。
+
+即上文"+100 ppm 默认参数即可全相位捕获"的结论仍然成立, 且锁定相位一致性显著改善;
+同时 -100 ppm 不再是待定项。复现方式不变(默认参数)。
+================================================================================

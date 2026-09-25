@@ -173,6 +173,19 @@ This document is derived only from `src/TX+Channel`, `src/AFE`, `src/ADC`, and `
 - The block's voter and loop-filter result updates the PI after the decisions are processed, so the updated local PI index applies to the following block.
 - `processBlockFast` assumes caller-validated digital vectors and intentionally does not update the top-level debug snapshot.
 
+### Configured code-domain CDR core assumptions (2026-09-23)
+
+- The configured `cdr_top(config)` path models the receiver DSP in the **code domain only**. Its input is one block of chronological, zero-centred ADC codes; it never samples a waveform and never references `ti_adc_top`. Physical-lane-to-time reordering, absolute UI addressing and UI-slip-driven waveform indexing remain the caller's responsibility.
+- The configured path carries **one block of loop dead time**, and this is treated as physical rather than incidental: the CDR FFE needs `PreTapCount` precursor samples from the following block, so a block cannot be equalized until its successor has been sampled. Consequently `phase[k+1] == phase[k]` and `phase[k+2] == phase[k] + delta[k]`. The legacy component-injection path keeps its original zero-dead-time behaviour, so the two paths are not interchangeable for loop-stability statements.
+- Boundary blocks are shorter than `BlockSize`: the first processed block loses its leading `PostTapCount` outputs (no past samples) and the `flush()` block loses its trailing `PreTapCount` outputs (no future samples). Invalid samples are discarded, never zero-padded. The phase loop still updates on short blocks, while dLev and FFE adaptation are skipped because both engines normalize by a fixed `BlockSize`.
+- The `'mean'` voter divides by the actual number of valid decisions by default, so boundary blocks use 61/62 rather than 64 with the production geometry. A fixed denominator is configurable but changes the boundary-block loop gain.
+- The MMPD input is inherently symbolized: `cdr_pd.mmpd` only accepts 0-3 PAM4 symbols and 0/1 error bits, and those come from hard-slicing the FFE output against the live dLev thresholds. There is therefore no separate "SS-MMPD" numerical path, and no amplitude information reaches the phase detector. Modelling a full-precision Mueller-Muller detector would require a new `cdr_pd` method.
+- The FFE write gate is a causal, per-instance state machine keyed on the unwrapped PI code observed when the block was sampled, evaluated before any coefficient write. `'freeze'` inhibits writes permanently while still computing raw SS-LMS deltas; `'pvt-track'` keeps writing with a collapsed step size. Neither action stops the phase or dLev loops.
+- The mu downshift is a single-shot event gated only on dLev settling (`|DLevOuter[k] - DLevOuter[k-W]| <= tol`). It is not gated on phase lock, because at capture-mu the phase can free-run and a lock-gated downshift would deadlock.
+- Supervised golden-symbol training is not modelled in the configured path at all. The FFE reference is always the live decision derived from the live dLev levels, so cold-start behaviour is purely decision-directed.
+- The PI advances by at most one code per block (`MaxDeltaCode = 1`) in both `cdr_top.defaultConfig` and the v4 runner, because a real phase interpolator updates one code per update. This replaces the earlier `12`, which was a behavioural-study value and is not physical. Integer demand clipped by this limit is retained in `cdr_loop.PendingCode`, not in `CodeResidue`. Measured impact on the v4 no-argument default run: lock is unchanged at 8/8 with `AllPhaseLock = 1`, common phase 113 and spread 4; the limiter engaged on only 5 of 120000 block-phase updates, all during acquisition and none after block 5432. v3 still defaults to `12`, so v3-versus-v4 comparisons must pass `MaxDeltaCode` explicitly.
+- Distinguishing a converged limit-cycle dither from a slow drift requires the loop filter's pre-quantization state, because both `LastRawDeltaCode` and the applied `deltaCode` are integers and the PI code therefore hides sub-code motion. The decisive quantities are `LoopControl` (long-window mean should be about 0) and `FrequencyState` (steady value is the sustained drift velocity). `CodeResidue` is only corroborating evidence: its `(-1,1)` range is structural and always filled, so only its sign distribution is informative.
+
 ## Dedicated CDR FFE assumptions
 
 - The CDR timing path uses its own FFE and does not share coefficients or dynamic state with the data-recovery FFE/DFE path.
@@ -374,3 +387,45 @@ This document is derived only from `src/TX+Channel`, `src/AFE`, `src/ADC`, and `
 - PAM4 slicer centers are estimated from phase-19 equalized codes. A linear fit maps those centers to full PAM4 amplitudes `[-3,-1,+1,+3]`, and that mapping remains fixed across the scan.
 - The offline classic Mueller-Muller diagnostics use signed full-amplitude residuals in `tau[n]=d[n-1]*e[n]-d[n]*e[n-1]`, with `e[n]=y[n]-d[n]`. The unfiltered curve remakes `d` at every phase. A fixed-decision reference instead freezes the phase-19 decision sequence, while a symmetric-live curve retains only current-phase decisions satisfying `d[n]=-d[n-1]` (`-3<->+3` and `-1<->+1`). The comparison axis is centered on phase 19 over `[-0.5,+0.5) UI`; fixed decisions are shifted by one symbol when the raw ADC phase wraps across a UI boundary.
 - The CTLE eye diagnostic reads the exact first 1024 cached UI `[0,1024)`; unlike the S-curve analysis segment, it intentionally includes the beginning of the cached waveform.
+
+### Two-stage mu downshift and the eye-quality FOM (2026-09-25)
+
+- The stage-1 (`capture -> settle`) gate uses a **decision-directed** SNR,
+  `10*log10(mean(decision^2)/mean(sliceError^2))`, computed per block by
+  `cdr_top.blockSnrDb` from the values `slicePam4` already returns. It is
+  explicitly **not** truth-referenced: when the eye is closed and a sample is
+  sliced to the wrong level, the error is measured against that wrong level, so
+  single-block readings can be optimistic. Any conclusion drawn from this FOM
+  must therefore rest on its EWMA, never on a per-block value. This was measured,
+  not assumed: in a run where no start phase locked, the per-block distribution
+  reached 26.56 dB max and 22.55 dB p99, above the 17.50 dB tail minimum of a
+  passing run, because a clamped frequency integrator leaves the PI rotating so
+  the sampling point periodically sweeps the eye centre.
+- `decision` and `sliceError` are already valid-sample-only, since `cdr_top`
+  masks the FFE output (`ffeOutput = blockOutput(blockValid)`) before slicing.
+  No additional masking is applied when forming the FOM.
+- Blocks with no valid samples, or with exactly zero error power, produce a
+  non-finite FOM. `loop_monitor.updateSnrSettle` skips those blocks instead of
+  folding them into the average, so they can neither poison nor inflate it.
+- The EWMA is seeded with the first usable reading rather than with zero, so the
+  trigger is not delayed by a ramp-up of order `1/alpha` blocks. `SnrSettleMinBlock`
+  is the only warm-up guard.
+- Default operating point: `SnrSettleThresholdDb = 15`, `SnrSettleAlpha = 1/128`,
+  `SnrSettleMinBlock = 200`. The threshold floor is a measured quantity: 11 dB
+  fires inside the closed-eye window and breaks `-100 ppm` acquisition (0/8),
+  while `>= 12 dB` works. 15 dB sits ~1.9 dB above the observed closed-eye EWMA
+  peak (13.02..13.12 dB) and ~6.6 dB below the open-eye level (21.6..24.4 dB).
+- Stage 2 (`settle -> PVT tracking`) assumes the existing phase-band lock gate
+  (`FfeGate*`, `updateFfeGate`) is a valid lock indicator; that assumption is
+  unchanged, only its action was extended to drop the dLev step as well.
+- The capture-mu FFE step is assumed to be bounded by **cursor walk**, not by
+  convergence speed alone: with `FfeAdaptEnableMask = [1 1 0 1 1 1]` the main tap
+  is frozen, so the loop can only reshape the pulse through pre/post taps, which
+  moves the effective cursor and hence the MMPD zero. Locked-phase spread is
+  therefore proportional to the capture step (measured `3/6/12/21` code at 0 ppm
+  for `0.001/0.002/0.004/0.008`). The ppm suite uses `0.001`; the `cdr_top`
+  library default remains `0.004`.
+- `0 ppm` is assumed to be the binding constraint for the downshift *happening*
+  and for cursor walk, while `+/-100 ppm` is binding for the downshift *not
+  happening too early*. Both directions must be validated together; passing
+  either alone does not establish the policy.

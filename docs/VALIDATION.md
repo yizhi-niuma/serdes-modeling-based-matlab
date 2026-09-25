@@ -21,6 +21,74 @@ Most ADC validation is currently level 1-2. The CDR PD validation contains expli
 
 All 13 scripts under `validation/` completed with exit code 0 in independent MATLAB batch sessions during the repository reorganization. The run record is `results/validation_summary.csv`.
 
+### CDR: configured `cdr_top` code-domain core and v4 runner (2026-09-23)
+
+`src/CDR/cdr_top.m` gained a config-struct construction path that owns the full code-domain CDR core, and `validation/CDR/test_cdr_dlev_cdrffe/src/cdr_dlev_cdrffe_sslms_v4/cdr_dlev_cdrffe_sslms_v4.m` drives it. The acceptance gate for the refactor was block-level bit exactness against the v3 runner, not a behavioural resemblance.
+
+Equivalence evidence (MATLAB R2025b). Each run pair used identical name/value options, `SaveOutputs=false`, `EyeDiagramEnable=false`, start phases `[20 64]`, and compared 26 result fields with `max(abs(v3 - v4))`:
+
+| Case | Options | Result |
+|---|---|---|
+| gate | `NumBlock=1500`, gate `100/20`, `FfeFreezeMode='pvt-track'` | 26/26 fields diff 0 |
+| freeze | `NumBlock=1500`, gate `100/20`, `FfeFreezeMode='freeze'` | 26/26 fields diff 0 |
+| prod | `NumBlock=6000`, gate `500/100`, `FfeFreezeMode='pvt-track'` | 26/26 fields diff 0 |
+
+The compared fields are `PhaseCodeTrace`, `UiSlipTrace`, `UnwrappedPhaseTrace`, `TimingErrorTrace`, `DeltaCodeTrace`, `EdgeCountTrace`, the three dLev traces, `FfeCoeffTrace`, `FfeRawDeltaTrace`, `FfeAppliedDeltaTrace`, `FfeProposedCoefficientTrace`, `FfeAdaptationCalculatedTrace`, `FfeWriteAppliedTrace`, `FfeFrozenTrace`, `FfeFreezeBlock`, `FfeFreezeCenterUnwrapped`, `FfeFreezeEventCount`, `FfeFrozenCoefficients`, `LockedFlag`, `LockedPhaseCode`, `CommonLockPhase`, the dLev finals and `FfeFinalCoefficients`. In the gate case the PVT-track gate fired at block 1455 for start phase 64 in both runners; in the prod case both starts locked.
+
+v4 no-argument default run (PRBS22, `NumBlock=30000`, `StartPhaseStep=16`, 8 start phases), 134.1 s:
+
+- 8/8 start phases locked and `AllPhaseLock = 1`; common lock phase 113, spread 4, modes `[111 112 113 114 111 114 115 112]`, final-window center-touch counts 72..87 against the unchanged 51-event criterion.
+- First-capture blocks `[3217 3445 4071 5434 3770 4494 3748 2544]`; the convergence figures select start phase 48 (slowest first capture, block 5434).
+- The PVT-track gate engaged on all 8 starts at blocks `[6558 10960 9064 9328 7474 15982 12356 6013]`.
+- `DlevConsistent = 1`, inner/outer means 10.019/30.286 code.
+- Failing criteria, recorded without retuning: `FfeConsistent = 0` (max coefficient spread 0.04466 > 0.02) and `FfeConstraintHeld = 0` (pre1 = +0.0051 passes, post1 = -0.0218 marginally exceeds 0.02). dLev truth error is -2.231/-6.431 code. These reproduce v3 bit for bit and are therefore pre-existing SS-LMS limits, not refactor regressions.
+- Outputs and the required implementation summary are under `validation/CDR/test_cdr_dlev_cdrffe/result/cdr_dlev_cdrffe_sslms_v4/` (`impl_notes.md`, result MAT, 10 figures, two CSV summaries).
+
+Unit regressions rerun in MATLAB R2025b: `test_cdr_top` 6/6 (legacy path unchanged), the new `test_cdr_top_configured` 11/11, `test_cdr_voter` 7/7, `test_cdr_loop` 10/10, `test_loop_monitor` 11/11, `test_cdr_ffe_freeze_integration` 5/5 and `test_cdr_validation_paths` pass. `test_cdr_top_configured` covers default-config synchronisation with v3, the one-block dead time (`phase[k+1]==phase[k]`, `phase[k+2]==phase[k]+delta[k]`), the boundary valid mask and its adaptation skip, `cdr_top.slicePam4` encoding, the `ssmmpd`-to-`mmpd` alias producing identical block traces, `freeze` inhibiting writes while still computing raw deltas, `pvt-track` continuing to write with a collapsed step, the single-shot mu downshift, reset-and-replay determinism, per-field invalid-config rejection, and the legacy path rejecting `flush`.
+
+Follow-up rename (same session): `ffe_freeze_monitor` was renamed to `src/CDR/loop_monitor.m` and absorbed the dLev mu-downshift FSM as a second causal detector (`recordDlevOuter`/`updateDlevSettle`, bounded ring buffer). Behaviour neutrality was proved by snapshotting v3 in the three equivalence configs before the rename and re-running after: 26/26 fields, `max abs diff 0` in every config (`V3_RENAME_NEUTRAL=1`). The v3->v4 equivalence was then re-confirmed unchanged. `test_loop_monitor` adds the dLev-settle one-shot latch, ring-buffer boundedness over 5000 blocks, and disabled-mode/invalid-input rejection.
+
+`checkcode` is clean on `cdr_top.m`, `cdr_voter.m` and `loop_monitor.m`; the v4 runner reports one ISCL advisory and the paths test keeps its pre-existing MSNU/NASGU advisories.
+
+### CDR: three-loop steady state is a dither, not a drift (2026-09-23)
+
+The integer PI code hides sub-code motion: both `LastRawDeltaCode` and the applied `deltaCode` are integers, so a slow drift and a true lock both render as a staircase on the phase-code trace. `cdr_top` therefore exports the loop filter's pre-quantization state per block (`LoopControl = Kp*phaseError + FrequencyState`, `LoopFrequencyState`, `LoopCodeResidue`, `LoopPendingCode`), which v4 stores as four traces plus `cdr_loop_dither_vs_drift.fig`.
+
+Criterion ranking, stated explicitly to avoid over-claiming:
+
+- **Decisive**: `LoopControl` long-window mean (should be about 0) and `FrequencyState` steady value (the sustained drift velocity a real drift would require).
+- **Corroborating only**: `LoopCodeResidue`. Its `(-1,1)` range is structural and always filled, so the range proves nothing; only its sign distribution is informative, since a one-directional drift keeps `residueAccum = residue + v` same-signed and `fix()` truncation pins the residue to one side.
+- **Disqualifying**: `LoopPendingCode` persistently non-zero means the loop is slew-limited and therefore still chasing.
+
+Measured on the v4 no-argument default run (PRBS22, 15000 blocks, 8 starts, `MaxDeltaCode = 1`), statistics over the last 2000 blocks:
+
+| start | mean `LoopControl` | `FrequencyState(end)` | net drift (UI) |
+|---|---|---|---|
+| 0 | -3.62e-06 | 4.203e-03 | 0.0000 |
+| 16 | 2.157e-04 | 5.571e-03 | 0.0078 |
+| 32 | 4.355e-05 | 4.740e-03 | 0.0000 |
+| 48 | -2.056e-05 | 3.857e-03 | -0.0078 |
+| 64 | 3.080e-04 | 5.248e-03 | -0.0078 |
+| 80 | -4.181e-04 | 1.490e-03 | 0.0000 |
+| 96 | 3.532e-04 | 6.131e-03 | -0.0078 |
+| 112 | -2.367e-04 | 4.218e-03 | -0.0078 |
+
+- Residual phase velocity is order 1e-4 code/block, i.e. about 0.05 ppm — effectively zero.
+- `FrequencyState` settles around 5e-3 with no ramp, so there is no unacquired frequency offset.
+- `LoopPendingCode` was non-zero on only 5 of 120000 block-phase updates, all during acquisition and none after block 5432, so the one-code slew limit is not what constrains convergence.
+- Net tail drift is 0 or +/-0.0078 UI, which is exactly one PI code.
+
+**Conclusion: the converged state is a genuine limit-cycle dither, not a slow drift.** Reusable criterion over the last 2000 blocks: `|mean(LoopControl)| < 1e-3`, sign-flip ratio of non-zero `DeltaCode` `> 0.4`, and `|net drift| < 0.05 UI`.
+
+`MaxDeltaCode` was changed from `12` to `1` in this run to match a real phase interpolator. Lock is unchanged at 8/8 with `AllPhaseLock = 1`, common phase 113 and spread 4. Because v3 still defaults to `12`, equivalence runs pin `MaxDeltaCode` explicitly; with it pinned the v3-to-v4 refactor remained bit-exact in all three configurations, and `test_cdr_top` 6/6, `test_cdr_top_configured` 11/11, `test_cdr_voter` 7/7, `test_cdr_loop` 10/10, `test_loop_monitor` 11/11, `test_cdr_ffe_freeze_integration` 5/5 and `test_cdr_validation_paths` all passed.
+
+### CDR sub-block documentation audit rerun (2026-09-22)
+
+- MATLAB R2025b reran the current digital control-chain regressions: `validation/CDR/test_subBlock/test_cdr_pd.m` passed 13/13 groups, `tests/CDR/test_cdr_voter.m` passed 7/7, `tests/CDR/test_cdr_loop.m` passed 10/10, and `tests/CDR/test_cdr_top.m` passed 6/6. A direct current-signature dLev SS-LMS smoke (`dlevSsLms(d,e)`) passed one four-sample update and produced inner/outer/threshold 1.05/3.05/2.05.
+- `tests/CDR/test_cdr_ffe.m` currently fails at line 74 because it expects `cdr_ffe:MainTapUpdate`, but `cdr_ffe.applyCoefficientDelta` accepts and applies a nonzero main-tap delta. `tests/CDR/test_cdr_ffe_loop.m` currently fails at line 132 because it expects `cdr_ffe_loop:MainTapAdaptEnabled`, while the corresponding source validation has been commented out and a custom all-enabled mask is accepted. These are stale test-contract assertions; they do not supersede the separately validated default-mask FFE adaptation results below.
+- `validation/CDR/test_subBlock/test_lms_loop.m` is not a current dLev regression: it still calls `dlevLms(rxSamples)` / `dlevSsLms(rxSamples)`, while the source API requires the shared slicer outputs `(d,e)`. The script also has no numerical pass/fail assertions. No claim of dLev convergence is made from that legacy script.
+- The source-backed implementation summary and exact boundaries are recorded in `docs/CDR_SUB_BLOCKS.md`. This audit changed no model code, parameter, physical assumption or acceptance criterion.
+
 ### TX and S-parameter channel
 
 - MATLAB R2025b automated regression passed 5/5 checks for the default 56 GBd, 128-samples/UI configuration.
@@ -496,3 +564,52 @@ MATLAB R2025b batch execution passed (no-argument default, 32 start phases `0:4:
 - The `mmpd_s_curve_own_data_0.05.m` comparison reused phase 19, the same cached UI range `[512,8704)`, and the same ADC/MMPD flow while changing only the constrained normalized CDR-FFE targets to `pre1=post1=0.05` with main one.
 - MATLAB R2025b execution passed all 128 phases. The optimized coefficients are approximately `[-0.0463002,0.120119,-0.323510,1,0.211501,0.0631387,0.116410,0.0422674,0.0181705,0.0175457]`; the remaining normalized cursor RMS is `0.002959`, the maximum residual is `0.008366`, and the nearest-zero integer phase is 61.
 - The comparison outputs are stored separately under `validation/AFE/test_mmpd_v1/result/mmpd_s_curve_own_data_0.05`.
+
+### Three-loop CDR with +/-100 ppm receiver frequency offset (2026-09-25)
+
+`validation/CDR/test_cdr_three_loop_wi_ppm/src/cdr_three_loop_ppm/cdr_three_loop_ppm.m`
+runs the SS-MMPD timing loop, the dLev SS-LMS level loop and the CDR-FFE SS-LMS
+coefficient loop concurrently from a planB cold start (`[0 0 1 0 0 0]`) while the
+receiver sampling clock carries a frequency offset. MATLAB R2025b, 32 start
+phases (`0:4:127`), `NumBlock = 8000`, runner defaults:
+
+| Offset | Locked | AllPhaseLock | Locked-phase spread | `freqStateMean` | Theory |
+| --- | --- | --- | --- | --- | --- |
+| `-100 ppm` | 32/32 | 1 | 3 code | `+0.8193..+0.8194` | `+0.8192` |
+| `+100 ppm` | 32/32 | 1 | 2 code | `-0.8192..-0.8191` | `-0.8192` |
+| `0 ppm` | 32/32 | 1 | 3 code | not applicable | 0 |
+
+At `0 ppm` the frequency-state and rotation-period criteria are not applicable
+(`rotationApplicable = false`, `FreqLockDiagnostics.MeanValue = NaN`); the lock
+decision there comes from the phase-band dwell criterion alone. This is expected
+and is not a failed criterion.
+
+The earlier `-100 ppm` result in the same suite was 0/32 with every start phase
+driven to the `-4` frequency clamp. That was traced to the stage-1 mu-downshift
+detector, not to loop parameters, and the causal chain was verified by disabling
+the downshift (0/8 -> 8/8) and by isolating which loop mattered (FFE capture step
+only: 8/8; dLev capture step only: 0/8). Details and the full parameter-sweep
+history are in
+`validation/CDR/test_cdr_three_loop_wi_ppm/result/cdr_three_loop_ppm_m100/impl_notes.txt`
+(2026-09-25 section).
+
+Negative results recorded so they are not retried:
+
+- No `(DlevSettleWindow, DlevSettleTol)` pair satisfies all three offsets.
+  `128/0.1` and `200/0.05` give `+/-100 ppm` 32/32 but push the `0 ppm`
+  locked-phase spread to 13-15 code against a `captureBandHalfWidth = 6` limit.
+- A fixed-block stage-1 trigger at block 2001 passes all three offsets over 8
+  start phases but drops `-100 ppm` to 31/32 over 32 start phases.
+- MMPD transition filtering cannot substitute for opening the eye. Outer-only
+  qualification (`transitionFilter = 2`) reduces the open-loop PD bias in the
+  critical window from `-0.01586` to `-0.00023` (69x) but halves the PD event
+  count, and the closed-loop result is worse (`-50 ppm`: 4/8 with the symmetric
+  filter, 0/8 with outer-only). Filtering trades bias against loop gain; it
+  cannot create eye opening.
+- `FreqAcqPonly` (proportional-only acquisition) does not help while the stage-1
+  gate is the legacy one, because the gate releases the integral path at block 84
+  anyway.
+
+This validates all-start-phase acquisition and tracking at the IEEE Ethernet
+`+/-100 ppm` limit on a static cached Channel+CTLE fixture. It does not measure
+BER, jitter tolerance, or combined noise/PVT robustness.

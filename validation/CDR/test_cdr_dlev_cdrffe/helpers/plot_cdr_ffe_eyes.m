@@ -25,9 +25,9 @@ if ~exist(resultDir, 'dir')
     end
 end
 uiCountRequested = double(config.UiCountRequested);
-paths.Freeze = fullfile(resultDir, sprintf('cdr_ffe_eye_at_freeze_%dui.png', uiCountRequested));
-paths.Final = fullfile(resultDir, sprintf('cdr_ffe_eye_final_%dui.png', uiCountRequested));
-paths.Comparison = fullfile(resultDir, 'cdr_ffe_eye_freeze_vs_final.png');
+paths.Freeze = fullfile(resultDir, sprintf('cdr_ffe_eye_at_freeze_%dui.fig', uiCountRequested));
+paths.Final = fullfile(resultDir, sprintf('cdr_ffe_eye_final_%dui.fig', uiCountRequested));
+paths.Comparison = fullfile(resultDir, 'cdr_ffe_eye_freeze_vs_final.fig');
 
 [sharedYLimits, sharedColorLimits] = sharedDensityLimits(freezeEye, finalEye);
 metadataLabel = fixedFfeMetadata(freezeEye, finalEye, config);
@@ -189,10 +189,12 @@ annotation(fig, 'textbox', [0.04 0.015 0.92 0.04], 'String', footerText, ...
 end
 
 function writeFigure(fig, filePath)
+set(fig, 'Visible', 'on');
 try
-    exportgraphics(fig, filePath, 'Resolution', 150);
+    savefig(fig, filePath);
 catch
-    print(fig, filePath, '-dpng', '-r150');
+    pause(0.5);
+    savefig(fig, filePath);
 end
 end
 

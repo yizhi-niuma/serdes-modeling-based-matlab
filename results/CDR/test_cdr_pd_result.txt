@@ -1,0 +1,40 @@
+test_cdr_pd started: 2026-09-22 11:16:01
+Test script: C:\Work\MatLab_Lib\validation\CDR\test_subBlock\test_cdr_pd
+Result folder: C:\Work\MatLab_Lib\results\CDR
+
+[PASS] NRZ truth table
+[PASS] PAM4 symmetric edges
+[PASS] polarity
+[PASS] mode and state
+[PASS] matrix input
+[PASS] fast path equivalence
+[PASS] explicit block overlap
+[PASS] invalid input
+[PASS] MMPD framework
+[PASS] MMPD transition filter
+[PASS] MMPD transition-filter validation
+[PASS] MMPD filtered polarity
+[PASS] external slicer waveform
+       waveform transitions: 8, valid decisions: 8
+       phaseDecision sequence: [1 -1 1 0 -1 0 1 -1 1 0 -1]
+
+Summary:
+  NRZ truth table          : PASS
+  PAM4 symmetric edges     : PASS
+  polarity                 : PASS
+  mode and state           : PASS
+  matrix input             : PASS
+  fast path equivalence    : PASS
+  explicit block overlap   : PASS
+  invalid input            : PASS
+  MMPD framework           : PASS
+  MMPD transition filter   : PASS
+  MMPD transition-filter validation : PASS
+  MMPD filtered polarity   : PASS
+  external slicer waveform : PASS
+
+Passed 13 / 13 tests.
+Text result : C:\Work\MatLab_Lib\results\CDR\test_cdr_pd_result.txt
+Waveform PNG: C:\Work\MatLab_Lib\results\CDR\test_cdr_pd_waveform.png
+
+test_cdr_pd all tests passed.

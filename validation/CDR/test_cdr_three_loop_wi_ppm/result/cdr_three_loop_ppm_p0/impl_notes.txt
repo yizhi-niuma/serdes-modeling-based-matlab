@@ -1,0 +1,82 @@
+================================================================================
+cdr_three_loop_ppm.m  实现说明 (0 ppm 结果 / 零频偏基线与回归对照)
+================================================================================
+生成日期: 2026-09-25
+对应结果: result/cdr_three_loop_ppm_p0/cdr_three_loop_ppm_result.mat
+被测脚本: validation/CDR/test_cdr_three_loop_wi_ppm/src/cdr_three_loop_ppm/cdr_three_loop_ppm.m
+根因分析与换挡判据设计的完整记录见 result/cdr_three_loop_ppm_m100/impl_notes.txt
+(2026-09-25 小节); 方案与判据的原始说明见 result/cdr_three_loop_ppm_p100/impl_notes.txt。
+
+--------------------------------------------------------------------------------
+一、本工况的作用
+--------------------------------------------------------------------------------
+0 ppm 是零频偏基线, 在本套件中承担两个职责:
+  1) 基线: 确认三环(SS-MMPD 相位环 / dLev 电平环 / CDR-FFE 系数环)在无频偏下能从
+     全部初始相位收敛到同一采样相位, 即 v4 套件原本验证的能力;
+  2) 回归哨兵: 换挡策略是三个工况共用的。0 ppm 对"降档是否发生"最敏感 —— 降档负责
+     压低稳态梯度噪声并收紧锁定相位, 如果为了让 -100 ppm 通过而把降档推迟到几乎
+     不触发, 0 ppm 的锁定相位一致性就会退化。因此 0 ppm 与 ±100 ppm 必须同时通过,
+     单独调通任一侧都不算完成。
+
+该约束是实测出来的, 不是假设: 把第一级降档判据收紧到 DlevSettleWindow/Tol =
+128/0.1 或 200/0.05 时, ±100 ppm 可达 32/32 AllPhaseLock=1, 但 0 ppm 的锁定相位
+离散度从 4 码恶化到 13~15 码 (判据上限 captureBandHalfWidth=6) => AllPhaseLock=0。
+改用固定块触发(fire@2001)在 8 起始相位下看似三者皆过, 扩到 32 起始相位后 -100 ppm
+退化为 31/32 => 说明所需降档时刻随起始相位与 ppm 变化, 固定阈值/固定块号都不成立。
+
+--------------------------------------------------------------------------------
+二、关键实现要点 (与 ±100 ppm 共用)
+--------------------------------------------------------------------------------
+两级降档:
+  第一级 capture -> settle , 门控 = 判决导向 SNR 的 EWMA
+      FOM = 10*log10(mean(decision^2)/mean(sliceError^2)) , 逐 block
+      cdr_top.blockSnrDb 算 FOM , loop_monitor.updateSnrSettle 做判决(只判决不施加)
+      SettleGate='snr' , 阈值 15 dB , alpha=1/128 , minBlock=200
+      触发后 dLev 0.5 -> 0.1 , FFE 0.001 -> 2e-4
+  第二级 settle -> PVT tracking , 门控 = 既有相位带锁定门控 loop_monitor.updateFfeGate
+      触发后 FFE -> FfeStepSizePvtTrack=2e-4 , dLev -> DlevStepSizePvtTrack=0.02
+
+capture 期 FfeStepSize 取 0.001 (库默认 0.004 的 1/4): FfeAdaptEnableMask=[1 1 0 1 1 1]
+冻结主抽头, 环路只能靠前后抽头整形脉冲, 这会移动有效游标从而移动 MMPD 零点, 不同
+起始相位因此收敛到不同锁定相位。走位量与步长成正比, 0 ppm 侧实测锁定相位离散度:
+    FfeStepSize  0.001  0.002  0.004  0.008
+    离散度(code)     3      6     12     21
+0 ppm 正是这一项的最敏感工况 —— 库默认 0.004 在此已超判据(12 > 6)。
+
+--------------------------------------------------------------------------------
+三、本次运行配置
+--------------------------------------------------------------------------------
+纯默认无参配置, FreqOffsetPpm=0:
+  SettleGate='snr' , SnrSettleThresholdDb=15 , SnrSettleAlpha=1/128 ,
+  SnrSettleMinBlock=200 , FfeStepSize=0.001 , FfeStepSizeSettle=2e-4 ,
+  FfeStepSizePvtTrack=2e-4 , StepSize=0.5 , StepSizeSettle=0.1 ,
+  DlevStepSizePvtTrack=0.02 , Kp=8 , Ki=0.03 , MaxDeltaCode=1 ,
+  FrequencyLimit=4 , dLev init 48/16 , FfeInitMode=planB([0 0 1 0 0 0]) ,
+  TransitionFilter=1(对称) , NumBlock=8000 , StartPhaseStep=4 (32 个起始相位)。
+
+--------------------------------------------------------------------------------
+四、关键结果与结论
+--------------------------------------------------------------------------------
+- 32/32 起始相位锁定, AllPhaseLock=1。
+- commonLockPhase=113 , 锁定相位离散度 3 码。
+- 频率判据不适用: 0 ppm 下理论频率态为 0, 旋转周期判据亦不适用(rotationApplicable
+  =false), 故 FreqLockFlag 全 0 且 FreqLockDiagnostics.MeanValue 为 NaN 属预期,
+  该工况的锁定判定由相位带驻留判据(events/band)给出, 不参与频域判据。
+- 同配置下 -100 ppm 与 +100 ppm 亦为 32/32 AllPhaseLock=1 (离散度 3 / 2 码,
+  freqStateMean +0.8193 / -0.8192, 理论 ±0.8192)。三工况同时达成全相位捕获。
+
+--------------------------------------------------------------------------------
+五、复现方法
+--------------------------------------------------------------------------------
+从仓库根目录:
+  addpath(fullfile(pwd,'validation','CDR','test_cdr_three_loop_wi_ppm'));
+  setup_cdr_three_loop_wi_ppm_paths();
+  r = cdr_three_loop_ppm('FreqOffsetPpm', 0);                      % 默认块数
+  r = cdr_three_loop_ppm('FreqOffsetPpm', 0, 'NumBlock', 8000, ...
+          'StartPhaseStep', 4, 'SaveOutputs', true);               % 本次产物
+快速 smoke:
+  cdr_three_loop_ppm('FreqOffsetPpm',0,'NumBlock',4000,'StartPhaseList',[16 64],'SaveOutputs',false);
+复现旧判据下的 0 ppm 退化(离散度 12 码, AllPhaseLock=0):
+  cdr_three_loop_ppm('FreqOffsetPpm',0,'FfeStepSize',0.004);
+输出目录为 result/cdr_three_loop_ppm_p0。
+================================================================================

@@ -70,7 +70,7 @@ addpath(fullfile(pwd, 'tests', 'CDR'));
 test_cdr_validation_paths;
 test_detect_pi_center_touch_lock;
 test_select_slowest_pi_capture;
-test_ffe_freeze_monitor;
+test_loop_monitor;
 test_build_cdr_ffe_eye;
 test_build_cdr_ffe_eye_pair;
 test_cdr_ffe_training_reference;

@@ -104,11 +104,11 @@ classdef cdr_pd < handle
             if ~(isscalar(transitionFilter) && (islogical(transitionFilter) || ...
                     (isnumeric(transitionFilter) && isreal(transitionFilter) && ...
                     isfinite(transitionFilter) && ...
-                    (transitionFilter == 0 || transitionFilter == 1))))
+                    ismember(transitionFilter, [0 1 2]))))
                 error('cdr_pd:InvalidTransitionFilter', ...
-                    'transitionFilter must be a scalar logical or numeric 0/1.');
+                    'transitionFilter must be a scalar logical or numeric 0/1/2.');
             end
-            transitionFilter = logical(transitionFilter);
+            transitionFilter = double(transitionFilter);
             if obj.ModeId ~= 1
                 error('cdr_pd:MMPDUnsupportedMode', ...
                     'The reference MMPD behavior supports PAM4 mode only.');
@@ -150,10 +150,13 @@ classdef cdr_pd < handle
             outerTransition = (dataPrev == 0 & dataCurr == 3) | (dataPrev == 3 & dataCurr == 0);
             innerTransition = (dataPrev == 1 & dataCurr == 2) | (dataPrev == 2 & dataCurr == 1);
             symmetricTransition = outerTransition | innerTransition;
-            if transitionFilter
-                dataTransition = symmetricTransition;
-            else
-                dataTransition = dataPrev ~= dataCurr;
+            switch double(transitionFilter)
+                case 0
+                    dataTransition = dataPrev ~= dataCurr;
+                case 1
+                    dataTransition = symmetricTransition;
+                otherwise
+                    dataTransition = outerTransition;
             end
             risingTransition = dataCurr > dataPrev;
             valid = sameError & dataTransition;

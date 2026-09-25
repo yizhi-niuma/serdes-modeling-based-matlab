@@ -25,6 +25,10 @@ opts.FfeTrainingInnerRef = 12;
 % the freeze regression stays independent of the option default (now 'live-dlev').
 opts.FfeTrainingReferenceMode = 'fixed';
 opts.FfeFreezeEnable = true;
+% This fixture asserts permanent write inhibition, so pin the gate action too:
+% the option default moved to 'pvt-track', which keeps writing after the
+% trigger and would invalidate checks 2/5 and 3/5.
+opts.FfeFreezeMode = 'freeze';
 opts.FfeFreezeMinModeOccurrences = 100;
 opts.FfeFreezeMinEvents = 50;
 opts.FfeFreezeBandHalfWidth = 3;
@@ -64,7 +68,7 @@ assert(all(frozen.FfeFreezeEventCount(:) == 50));
 assert(isequal(reshape(frozen.FfeFreezeCenterWrapped, 1, []), ...
     mod(reshape(frozen.FfeFreezeCenterUnwrapped, 1, []), frozen.SamplePerSymbol)));
 for row = 1:n
-    monitor = ffe_freeze_monitor(100, 50, 3, frozen.FfeTrainingBlocks + 1);
+    monitor = loop_monitor(100, 50, 3, frozen.FfeTrainingBlocks + 1);
     for block = 1:freezeBlock(row)
         monitor.update(baseline.UnwrappedPhaseTrace(row, block), block);
     end

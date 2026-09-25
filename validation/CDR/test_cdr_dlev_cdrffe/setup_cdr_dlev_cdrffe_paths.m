@@ -35,6 +35,7 @@ paths.Root = rootDir;
 paths.CdrValidationDir = cdrValidationDir;
 paths.RepoRoot = repoRoot;
 paths.V3Dir = fullfile(rootDir, 'src', 'cdr_dlev_cdrffe_sslms_v3');
+paths.V4Dir = fullfile(rootDir, 'src', 'cdr_dlev_cdrffe_sslms_v4');
 paths.HelpersDir = fullfile(rootDir, 'helpers');
 paths.DebugDir = fullfile(rootDir, 'debug');
 paths.LegacyDir = fullfile(rootDir, 'legacy');
@@ -43,7 +44,7 @@ paths.ResultDir = fullfile(rootDir, 'result');
 paths.AdcSourceDir = fullfile(repoRoot, 'src', 'ADC', 'TI_ADC');
 paths.CdrSourceDir = fullfile(repoRoot, 'src', 'CDR');
 
-runtimeDirs = {paths.Root, paths.HelpersDir, paths.V3Dir, ...
+runtimeDirs = {paths.Root, paths.HelpersDir, paths.V3Dir, paths.V4Dir, ...
     paths.AdcSourceDir, paths.CdrSourceDir};
 for index = 1:numel(runtimeDirs)
     requireDirectory(runtimeDirs{index});
@@ -65,6 +66,7 @@ end
 addpath(paths.Root, '-begin');
 addpath(paths.HelpersDir, '-begin');
 addpath(paths.V3Dir, '-begin');
+addpath(paths.V4Dir, '-begin');
 addpath(paths.CdrSourceDir, '-begin');
 addpath(paths.AdcSourceDir, '-begin');
 end

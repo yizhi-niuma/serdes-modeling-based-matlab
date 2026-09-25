@@ -391,7 +391,7 @@ for startIndex = 1:numStartPhase
     adcModel.setInputMargin(0);
     ffeModel = cdr_ffe(ffeInitCoefficients, cdrFfePreTapCount);
     % 每个起始相位独立检测并冻结,不跨相位继承候选、计数或已冻结状态。
-    freezeMonitor = ffe_freeze_monitor(ffeFreezeMinModeOccurrences, ...
+    freezeMonitor = loop_monitor(ffeFreezeMinModeOccurrences, ...
         ffeFreezeMinEvents, ffeFreezeBandHalfWidth, ffeFreezeStartBlock);
 
     % cdr_ffe 无跨块缓存,采样与处理错开一个块。pendingCentered 暂存待处理块整块
