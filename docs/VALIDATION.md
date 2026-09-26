@@ -860,3 +860,90 @@ pk-pk table as a three-level staircase. The `+110 ppm` rows are an 8-start
 probe, not a 32-start all-phase result, and are reported as a margin
 measurement only. The negative-direction boundary was not re-probed under the
 nonideal PI.
+
+### CDR: trackable frequency-offset range of the ppm suite (2026-09-26)
+
+**Claim under test.** What is the largest frequency offset the suite can track
+in the current configuration, i.e. all runner defaults including
+`PiNonideal = 'ab_constant'` and `NumBlock = 15000`?
+
+**Method.** `validation/CDR/test_cdr_three_loop_wi_ppm/ppm_tracking_range.m`.
+An 8-start ladder brackets the boundary, integer bisection closes it, and the
+surviving candidates are re-confirmed at the full 32 starts. Only PASS
+candidates need the 32-start re-check: `0:16:112` is a strict subset of
+`0:4:127` and each start phase is an independent deterministic run, so a FAIL
+at 8 starts implies a FAIL at 32. Every run uses `SaveOutputs = false`. Pass
+requires all three of: every start locked, `AllPhaseLock = 1`, and no start
+flagged slew-saturated.
+
+**Result A - the suite's own criterion.** 32-start confirmation:
+
+| ppm | locked | all-phase | saturated | `max mean|PendingCode|` | max freq-state error | common phase |
+|---:|---:|---:|---:|---:|---:|---:|
+| +102 | 32/32 | 1 | 0 | 0.4130 | 1.81e-4 | 121 |
+| -105 | 32/32 | 1 | 0 | 0.4340 | 2.02e-4 | 106 |
+
+First failures are `+103` (2/8 locked, 6 saturated) and `-106` (7/8, 1
+saturated). **The trackable range is therefore `-105 .. +102 ppm`**, leaving
+2 ppm of positive and 5 ppm of negative margin against the `+/-100 ppm`
+Ethernet requirement.
+
+**Result B - that boundary is set by the guard, not by tracking loss.** This is
+the important qualification. `runner:482-490` computes
+`lockedFlag = freqLock && rotationLock && ~slewSaturated`, so the
+slew-saturation guard is a **veto inside the lock verdict**; a falling locked
+count and a rising saturated count are not independent evidence. Relaxing the
+guard as far as the validators allow (`SlewSatPendingTol = 1e9`,
+`SlewSatDeltaFrac = 1`; `Inf` is rejected as non-finite) and leaving everything
+else at default:
+
+| ppm | freq lock | rotation lock | all-phase | `max mean|PendingCode|` | `max mean|DeltaCode|` | max freq-state error |
+|---:|---:|---:|---:|---:|---:|---:|
+| +103 | 8/8 | 8/8 | 1 | 0.6070 | 0.8445 | 2.03e-4 |
+| +110 | 8/8 | 8/8 | 1 | 1.0240 | 0.9015 | 2.39e-4 |
+| +115 | 8/8 | 8/8 | 1 | 1.7195 | 0.9435 | 2.78e-4 |
+| +120 | 7/8 | 8/8 | 0 | 12.7570 | 0.9840 | 1.53e-2 |
+| -110 | 8/8 | 8/8 | 1 | 0.7270 | 0.9020 | 3.04e-4 |
+| -115 | 8/8 | 8/8 | 1 | 1.3405 | 0.9430 | 3.89e-4 |
+| -120 | 8/8 | 8/8 | 1 | 6.7635 | 0.9840 | 5.44e-3 |
+
+Both criteria still hold at `+115` and `-120` with frequency-state error under
+`4e-4`. Tracking itself only breaks near `+/-120 ppm`. The reason a relaxed
+guard still tracks is that a **bounded** backlog forces the applied average
+rate to equal the demanded rate in steady state, otherwise the backlog would
+grow without bound; `max mean|DeltaCode|` confirms it, equalling the
+theoretical demand `ppm/122.07` at every point. The cost is a static phase lag
+of roughly `mean|PendingCode|` codes, e.g. `1.02 code = 8 mUI` at `+110`. So
+`SlewSatPendingTol = 0.5` (about `3.9 mUI` of lag) is a **design judgement
+about acceptable slew lag, not a lock failure point**, and the `-105 .. +102`
+figure inherits that judgement.
+
+Backlog growth against utilisation follows the queueing signature: util
+`0.8445 / 0.9015 / 0.9435 / 0.9840` gives `maxPend`
+`0.607 / 1.024 / 1.720 / 12.757`, tracking `1/(1-util)` (62x at util `0.984`).
+
+**Result C - arithmetic ceiling and the cost of the nonideal PI.** The PI
+applies at most `MaxDeltaCode = 1` code once per 64-UI block, and one code is
+`1/128 UI`, so the fastest sustainable rate is `1/(128*64) UI per UI`:
+
+```
+ppm_max = 1e6 / 8192 = 122.07 ppm        (100 ppm uses 0.8192 code/block = 81.92%)
+```
+
+No tuning can exceed this. The ideal-PI contrast under the default guard is
+symmetric at `+/-110` pass and `+/-115` fail (8 starts), so the nonideal phase
+table costs about 8 ppm positive and 5 ppm negative, and costs it
+**asymmetrically**. At equal `|ppm|` the nonideal backlog is larger (`+110`:
+`1.024` versus `0.453` ideal), consistent with the `+/-1`-sample INL address
+quantisation demanding extra code motion. Why the positive direction is dearer
+was not attributed; the two directions lock at different phases (121 versus
+106/107), hence different parts of the INL curve.
+
+**Limits.** Static Channel+CTLE cache with PRBS22, no noise, jitter or PVT, so
+this is deterministic frequency-offset tracking and not a jitter-tolerance
+figure. Only `+102` and `-105` were confirmed at 32 starts; every Result B and
+Result C row is an 8-start probe, and an 8-start pass does not imply a 32-start
+pass (only the converse holds). Bisection assumes the verdict is monotonic in
+`|ppm|`; no tested point violated it, but not every integer ppm was evaluated.
+Failure severity is **not** monotonic: `-107` diverged outright
+(`maxPend 9259`, freq error `3.72`) while `-106` and `-110` failed cleanly.

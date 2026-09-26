@@ -2,6 +2,15 @@
 
 Updated: 2026-09-26
 
+## 2026-09-26: measured trackable frequency-offset range of the ppm suite
+
+- New reusable probe `validation/CDR/test_cdr_three_loop_wi_ppm/ppm_tracking_range.m` (ladder + integer bisection + 32-start confirmation, always `SaveOutputs = false`). Full evidence in `docs/VALIDATION.md` and `result/ppm_tracking_range_notes.txt`.
+- **Trackable range in the current configuration (all runner defaults, nonideal PI, `NumBlock = 15000`): `-105 .. +102 ppm`**, confirmed at 32 start phases (32/32, `AllPhaseLock = 1`, zero saturated). First failures are `+103` and `-106`. That leaves 2 ppm positive and 5 ppm negative margin on the `+/-100 ppm` Ethernet requirement.
+- **That number is guard-defined, not a tracking limit.** `runner:482-490` has `lockedFlag = freqLock && rotationLock && ~slewSaturated`, so the slew guard vetoes lock and the locked/saturated counts are not independent evidence. With the guard relaxed (`SlewSatPendingTol = 1e9`, `SlewSatDeltaFrac = 1`) both real criteria still pass 8/8 at `+115` and `-120 ppm` with frequency-state error under `4e-4`; tracking only breaks near `+/-120`. A bounded backlog still delivers the correct average rate - `max mean|DeltaCode|` equals the theoretical demand `ppm/122.07` at every point - at the price of a static lag of about `mean|PendingCode|` codes (`1.02 code = 8 mUI` at `+110`). So `SlewSatPendingTol = 0.5` encodes an acceptable-lag judgement of roughly `3.9 mUI`.
+- Arithmetic ceiling, now recorded in `MODEL_ASSUMPTIONS.md`: `ppm_max = MaxDeltaCode*1e6/(PiCodesPerUi*AdcBlockUi) = 1e6/8192 = 122.07 ppm`, of which `+/-100 ppm` uses 81.92%. Counter-intuitively a finer PI lowers this ceiling at a fixed one-code-per-update limit.
+- Ideal-PI contrast is symmetric (`+/-110` pass, `+/-115` fail, 8 starts), so the nonideal phase table costs about 8 ppm positive and 5 ppm negative, asymmetrically. Backlog growth follows `1/(1-util)`: util `0.8445/0.9015/0.9435/0.9840` gives `maxPend` `0.607/1.024/1.720/12.757`.
+- The committed probe was executed and reproduced the tabulated boundary values exactly (`+102` PASS, `+103` FAIL, `-105` PASS, `-106` FAIL, guard-relaxed `+110` PASS), so reproducibility is tested rather than asserted.
+
 ## 2026-09-26: nonideal PI phase table in the ppm suite, mu-downshift markers, 32-start regeneration
 
 - The ppm runner now exposes `PiNonideal` (`'ideal'` or `'ab_constant'`, default `'ab_constant'`) and forwards it to `cdr_top`; it previously hard-coded `cfg.PiNonideal = 'ideal'`. The `cdr_pi` `a+b=1`/`atan2` phase-table model and the `cdr_top` `PiNonideal` validation are both pre-existing and were not modified.

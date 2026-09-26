@@ -420,6 +420,43 @@ This document is derived only from `src/TX+Channel`, `src/AFE`, `src/ADC`, and `
   persistently nonzero pending code implies non-convergence applies to the
   zero-offset case.
 
+### Phase-slew ceiling on trackable frequency offset
+
+- The PI applies at most `MaxDeltaCode` codes once per ADC block. With one code
+  equal to `1/128 UI` and one block equal to 64 UI, the fastest sustainable
+  phase rate is `MaxDeltaCode/(128*64) UI per UI`, while an offset of `X` ppm
+  demands `X*1e-6 UI per UI`. Hence a hard, tuning-independent ceiling:
+
+  ```
+  ppm_max = MaxDeltaCode * 1e6 / (PiCodesPerUi * AdcBlockUi) = 1e6/8192 = 122.07 ppm
+  ```
+
+  `+/-100 ppm` consumes `0.8192 code/block`, i.e. 81.92% of that budget, which
+  is what `result.SlewUtilization` reports. Everything else the phase path must
+  do (PD dither, INL correction, acquisition transient, FFE cursor walk) has to
+  fit in the remaining `0.1808 code/block`.
+- The ceiling moves the counter-intuitive way with PI resolution: at a fixed one
+  code per update, a **finer** PI lowers `ppm_max` because one code is a smaller
+  phase step. `PiNumBit = 8` would halve it to 61 ppm. Raising it requires a
+  larger `MaxDeltaCode`, a shorter block (more updates per UI), or a coarser PI,
+  so PI resolution and slew ceiling are in direct conflict at a fixed update
+  rate.
+- The reasons real designs restrict the PI to one code per update - glitch-free
+  and monotonic transitions through the weight encoding, jitter and spur
+  generation from instantaneous phase steps, interpolator settling time, and
+  DNL under mismatch - are **not modelled here**. `cdr_pi` is an integer-indexed
+  phase table with no encoder, no switching transient and no bit skew, so this
+  repository cannot be used as evidence for or against any encoding choice
+  (thermometer, Gray or binary).
+- The measured boundary is not the same quantity as this ceiling, and neither is
+  it purely physical. Because `lockedFlag` includes `~slewSaturated` as a veto,
+  the reported trackable range `-105 .. +102 ppm` is set by
+  `SlewSatPendingTol = 0.5`, i.e. by a judgement that about `3.9 mUI` of static
+  phase lag is the acceptable limit. With that guard relaxed the frequency-state
+  and rotation-period criteria still hold at `+115`/`-120 ppm`. See
+  `docs/VALIDATION.md` and
+  `validation/CDR/test_cdr_three_loop_wi_ppm/result/ppm_tracking_range_notes.txt`.
+
 ## Current validity limits
 
 - The digital CDR component chain and one validation-only Channel+CTLE+TI-ADC+fixed-FFE+MMPD loop are integrated at block rate. This validates deterministic initial-phase acquisition only; tracking bandwidth, jitter transfer, jitter tolerance, and BER remain unvalidated.
