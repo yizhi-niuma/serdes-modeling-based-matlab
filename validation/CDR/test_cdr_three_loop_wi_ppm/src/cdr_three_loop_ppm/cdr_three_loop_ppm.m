@@ -161,6 +161,36 @@ driftRatePerBlockCode = options.FreqOffsetPpm * 1e-6 * ...
     samplePerSymbol * adcBlockUi;
 isZeroPpm = options.FreqOffsetPpm == 0;
 expectedFreqState = -driftRatePerBlockCode;
+% PI nonideality. 'ab_constant' is cdr_pi's physical a+b=1 / atan2 model; at
+% 7-bit PI and 128 samples/UI its INL is 2.891 LSB pk-pk (1 LSB = 1 code =
+% 1 waveform sample), which the integer cache addressing quantizes to three
+% distinct sample offsets. 'ideal' restores the exactly-linear table, under
+% which the phase-table lookup degenerates to the raw code and the run is
+% bit-identical to the pre-nonideality behaviour.
+piNonideal = lower(char(options.PiNonideal));
+if ~ismember(piNonideal, {'ideal', 'ab_constant'})
+    error('cdr_three_loop_ppm:InvalidPiNonideal', ...
+        'PiNonideal must be ''ideal'' or ''ab_constant''; got ''%s''.', ...
+        piNonideal);
+end
+% Resolve the second-stage gate criterion before it reaches cdr_top, which
+% only accepts a concrete name. 'auto' follows the same zero/nonzero split
+% the offline lock verdict uses.
+ffeGateCriterion = lower(char(options.FfeGateCriterion));
+switch ffeGateCriterion
+    case 'auto'
+        if isZeroPpm
+            ffeGateCriterion = 'center-touch';
+        else
+            ffeGateCriterion = 'freq-state';
+        end
+    case {'center-touch', 'freq-state'}
+        % Explicit override, used by the A/B comparison.
+    otherwise
+        error('cdr_three_loop_ppm:InvalidFfeGateCriterion', ...
+            ['FfeGateCriterion must be ''auto'', ''center-touch'', or ', ...
+            '''freq-state''; got ''%s''.'], ffeGateCriterion);
+end
 if isZeroPpm
     expectedRotationPeriod = NaN;
 else
@@ -197,6 +227,12 @@ timingErrorTrace = zeros(numStartPhase, numBlocks);
 deltaCodeTrace = zeros(numStartPhase, numBlocks);
 loopControlTrace = zeros(numStartPhase, numBlocks);
 loopFrequencyTrace = zeros(numStartPhase, numBlocks);
+% Block at which the stage-2 (settle -> PVT-track) gate actually fired for
+% each start phase; NaN if it never fired over the run.
+stage2GateBlock = nan(1, numStartPhase);
+% Block at which the stage-1 (capture -> settle) SNR downshift fired. NaN
+% when SettleGate is not 'snr', in which case no SNR block exists.
+stage1SettleBlock = nan(1, numStartPhase);
 loopCodeResidueTrace = zeros(numStartPhase, numBlocks);
 loopPendingCodeTrace = zeros(numStartPhase, numBlocks);
 unwrappedPhaseTrace = zeros(numStartPhase, numBlocks);
@@ -268,7 +304,7 @@ for startIndex = 1:numStartPhase
     cfg.FrequencyLimit = options.FrequencyLimit;
     cfg.MaxDeltaCode = options.MaxDeltaCode;
     cfg.PiNumBit = 7;
-    cfg.PiNonideal = 'ideal';
+    cfg.PiNonideal = piNonideal;
     cfg.PiInitialCode = startPhase;
     cfg.DlevInnerInit = options.DlevInnerInit;
     cfg.DlevOuterInit = options.DlevOuterInit;
@@ -294,6 +330,22 @@ for startIndex = 1:numStartPhase
     cfg.FfeGateMinEvents = options.FfeFreezeMinEvents;
     cfg.FfeGateBandHalfWidth = options.FfeFreezeBandHalfWidth;
     cfg.FfeGateStartBlock = 1;
+    % Second-stage (settle -> PVT-track) downshift gate. 'center-touch' is
+    % the code-domain modal test, which can only fire when the PI code dwells
+    % on one code, i.e. at zero frequency offset. 'freq-state' instead uses
+    % the loop integrator frequency-state flatness criterion, the online form
+    % of the same loop_monitor.detectFrequencyStateLock used for the offline
+    % pass/fail verdict, so it remains meaningful at any ppm. The window and
+    % tolerances are deliberately the SAME ones the verdict uses, so the gate
+    % fires on the criterion the run is judged by rather than on a second,
+    % independently tuned rule.
+    cfg.FfeGateCriterion = ffeGateCriterion;
+    cfg.FfeGateFreqWindowBlocks = piLockWindowBlocks;
+    cfg.FfeGateFreqExpectedRate = expectedFreqState;
+    cfg.FfeGateFreqMeanHalfDiffTol = options.FreqMeanHalfDiffTol;
+    cfg.FfeGateFreqStdTol = options.FreqStdTol;
+    cfg.FfeGateFreqRateTol = options.FreqRateTol;
+    cfg.FfeGateFreqMinBlock = 1;
     top = cdr_top(cfg);
     % Frequency-acquisition schedule: enable the integral gain once the eye is
     % open. Uses cdr_loop.setGains on the (public-read) loop-filter handle, so
@@ -308,13 +360,27 @@ for startIndex = 1:numStartPhase
     appliedDriftSample = zeros(1, numBlocks);
     for sampleBlockIndex = 1:numBlocks + 1
         if sampleBlockIndex <= numBlocks
-            [sampleCodeWrapped, sampleUiSlip] = top.getSamplingPhase();
+            [~, sampleUiSlip] = top.getSamplingPhase();
             firstUi = baseUi + (sampleBlockIndex - 1) * adcBlockUi + ...
                 sampleUiSlip;
+            % In-UI sampling offset in waveform samples. Taking it from the PI
+            % PHASE TABLE rather than from the raw code is what makes PI
+            % nonideality (INL) observable: the raw code assumes a perfectly
+            % linear code->phase map, so a nonideal table would be computed by
+            % cdr_pi and then discarded here. Under PiNonideal='ideal' the
+            % table is exactly the identity, so round(getLocalIndex()) ==
+            % CodeWrapped and this is a bit-exact no-op.
+            %
+            % The cache is addressed with integer samples, so the offset is
+            % rounded. At 128 samples/UI one PI code is one sample, i.e. one
+            % LSB, and rounding quantizes INL to +-0.5 LSB. That is adequate
+            % for INL of a few LSB pk-pk (6 LSB pk-pk retains ~88% by RMS,
+            % 7 distinct offsets) but it annihilates INL below ~0.7 LSB pk-pk.
+            sampleOffset = round(top.PhaseInterpolator.getLocalIndex());
             % Scheme-A ppm injection: cumulative floating drift, rounded once.
             driftSample = round(driftRatePerBlockCode * (sampleBlockIndex - 1));
             appliedDriftSample(sampleBlockIndex) = driftSample;
-            blockStart = firstUi * samplePerSymbol + sampleCodeWrapped + 1 + ...
+            blockStart = firstUi * samplePerSymbol + sampleOffset + 1 + ...
                 driftSample;
             blockStop = blockStart + nominalBlockLength - 1;
             assert(blockStart >= 1 && blockStop <= numel(ctleSegment), ...
@@ -335,6 +401,18 @@ for startIndex = 1:numStartPhase
             deltaCodeTrace(startIndex, blockIndex) = out.DeltaCode;
             loopControlTrace(startIndex, blockIndex) = out.LoopControl;
             loopFrequencyTrace(startIndex, blockIndex) = out.LoopFrequencyState;
+            if out.GateTriggered && ~isfinite(stage2GateBlock(startIndex))
+                % Record the ACTUAL stage-2 downshift block. Replaying the
+                % gate offline would have to assume a criterion, and would be
+                % wrong whenever FfeGateCriterion is not the one assumed.
+                stage2GateBlock(startIndex) = blockIndex;
+            end
+            if isfinite(out.SnrSettleBlock) && ...
+                    ~isfinite(stage1SettleBlock(startIndex))
+                % Stage-1 downshift block, taken from the monitor's own latch
+                % rather than re-derived from the SNR trace.
+                stage1SettleBlock(startIndex) = out.SnrSettleBlock;
+            end
             loopCodeResidueTrace(startIndex, blockIndex) = out.LoopCodeResidue;
             loopPendingCodeTrace(startIndex, blockIndex) = out.LoopPendingCode;
             unwrappedPhaseTrace(startIndex, blockIndex) = out.UnwrappedCode;
@@ -504,6 +582,18 @@ if ~selectionFlag
     selectedCaptureBlock = firstCaptureBlock(plotIndex);
 end
 plotSelected = isfinite(plotIndex);
+% Mu-downshift milestones for the plotted start phase. These are the two
+% events that change the loop step sizes, so marking them makes the kinks in
+% the convergence traces attributable:
+%   stage 1 = capture -> settle, gated by the SNR-EWMA threshold
+%   stage 2 = settle -> PVT-track, gated by FfeGateCriterion
+% Both are NaN-safe: a milestone that never happened is simply not drawn.
+selectedStage1Block = NaN;
+selectedStage2Block = NaN;
+if plotSelected
+    selectedStage1Block = stage1SettleBlock(plotIndex);
+    selectedStage2Block = stage2GateBlock(plotIndex);
+end
 if plotIsLocked
     plotRowTag = 'slowest locked first-capture';
 else
@@ -622,6 +712,8 @@ if options.SaveOutputs
                 sprintf('acquisition block %g', selectedCaptureBlock), ...
                 'LineWidth', 1.2);
         end
+        drawStageMarkers(selectedStage1Block, selectedStage2Block, ...
+            options.SnrSettleThresholdDb, ffeGateCriterion, true);
         hold off; grid on;
         xlim([blockAxis(1) blockAxis(end)]);
         ylim([0 samplePerSymbol - 1]);
@@ -684,6 +776,8 @@ if options.SaveOutputs
                 sprintf('acquisition block %g', selectedCaptureBlock), ...
                 'LineWidth', 1.2);
         end
+        drawStageMarkers(selectedStage1Block, selectedStage2Block, ...
+            options.SnrSettleThresholdDb, ffeGateCriterion, true);
         hold off; grid on;
         xlim([blockAxis(1) blockAxis(end)]);
         xlabel('CDR Block Index (64 UI per block)');
@@ -721,6 +815,8 @@ if options.SaveOutputs
             if isfinite(selectedCaptureBlock)
                 xline(selectedCaptureBlock, 'r--', 'LineWidth', 1.0);
             end
+            drawStageMarkers(selectedStage1Block, selectedStage2Block, ...
+                options.SnrSettleThresholdDb, ffeGateCriterion, false);
             hold off; grid on;
             xlim([blockAxis(1) blockAxis(end)]);
             thisOffset = cdrFfeTapOffset(tapIndex);
@@ -823,6 +919,8 @@ if options.SaveOutputs
         if isfinite(selectedCaptureBlock)
             xline(selectedCaptureBlock, 'r--', 'LineWidth', 1.0);
         end
+        drawStageMarkers(selectedStage1Block, selectedStage2Block, ...
+            options.SnrSettleThresholdDb, ffeGateCriterion, false);
         hold off; grid on; xlim([blockAxis(1) blockAxis(end)]);
         ylabel('FrequencyState (code/block)');
         title(freqLayout, sprintf(['Loop frequency state @ %+g ppm | %s: start ' ...
@@ -869,6 +967,8 @@ if options.SaveOutputs
                 sprintf('acquisition block %g', selectedCaptureBlock), ...
                 'LineWidth', 1.2);
         end
+        drawStageMarkers(selectedStage1Block, selectedStage2Block, ...
+            options.SnrSettleThresholdDb, ffeGateCriterion, true);
     end
     yline(0, 'k--', 'ideal offset-compensated PI code', 'LineWidth', 1.0);
     yline(captureBandHalfWidth, 'k:', 'LineWidth', 0.8);
@@ -903,6 +1003,11 @@ result.SlewPendingMeanAbs = slewPendingMeanAbs;
 result.AnalysisStartUi = analysisStartUi;
 result.AnalysisNumUi = analysisNumUi;
 result.SamplePerSymbol = samplePerSymbol;
+% Sampling-address descriptors. Saved so an offline consumer can rebuild the
+% per-block cached-waveform address without re-deriving constants from the
+% runner source (see helpers/build_ppm_eye_set.m).
+result.AdcBlockUi = adcBlockUi;
+result.CdrFfePreTapCount = cdrFfePreTapCount;
 result.ReferencePhase = referencePhase;
 result.EvalPhase = evalPhase;
 result.AdcResolutionBits = adcResolutionBits;
@@ -969,6 +1074,8 @@ result.FreqLockDiagnostics = [freqDiagList{:}];
 result.RotationLockDiagnostics = [rotationDiagList{:}];
 result.PiCenterDiagnostics = [piCenterDiagnostics{:}];
 result.FirstCaptureBlock = firstCaptureBlock;
+result.Stage2GateBlock = stage2GateBlock;
+result.Stage1SettleBlock = stage1SettleBlock;
 result.SlowestCapturePhaseIndex = slowestIndex;
 result.SlowestCaptureStartPhase = slowestLockedStartPhase;
 result.SlowestFirstCaptureBlock = slowestLockedCaptureBlock;
@@ -1010,20 +1117,18 @@ result.TotalPathResponseFigurePath = totalPathResponseFigurePath;
 result.LoopFreqStateFigurePath = loopDitherFigurePath;
 result.TrackingErrorFigurePath = trackingErrorFigurePath;
 result.ResultMatPath = resultMatPath;
-result.LockSummaryPath = fullfile(resultDir, 'ppm_lock_summary.csv');
+% Resolved second-stage gate criterion for this run, recorded so a saved
+% result is self-describing about which gate produced its Stage2 block.
+result.FfeGateCriterion = ffeGateCriterion;
+% PI nonideality actually applied. The waveform address now comes from the PI
+% phase table, so this field changes the simulated sampling instants.
+result.PiNonideal = piNonideal;
 
 if options.SaveOutputs
-    freqMeanValues = arrayfun(@(d) d.MeanValue, result.FreqLockDiagnostics);
-    rotationPeriods = arrayfun(@(d) d.PeriodMean, result.RotationLockDiagnostics);
-    rotationCov = arrayfun(@(d) d.PeriodCov, result.RotationLockDiagnostics);
-    writetable(table(startPhaseList(:), lockedFlag(:), freqLockFlag(:), ...
-        rotationLockFlag(:), slewSaturatedFlag(:), lockedPhaseCode(:), ...
-        firstCaptureBlock(:), freqMeanValues(:), rotationPeriods(:), ...
-        rotationCov(:), slewDeltaMeanAbs(:), slewPendingMeanAbs(:), ...
-        'VariableNames', {'StartPhase', 'Locked', 'FreqLock', 'RotationLock', ...
-        'SlewSaturated', 'EyePhaseCode', 'AcquisitionBlock', 'FreqStateMean', ...
-        'RotationPeriod', 'RotationCov', 'DeltaCodeMeanAbs', ...
-        'PendingCodeMeanAbs'}), result.LockSummaryPath);
+    % The former ppm_lock_summary.csv was removed: helpers/
+    % write_ppm_lock_summary_txt.m emits ppm_lock_summary.txt, a strict
+    % superset of those columns in a human-readable per-start-phase form,
+    % recomputed from this result MAT.
     save(resultMatPath, 'result', '-v7.3');
 end
 
@@ -1124,6 +1229,14 @@ defaults.FfeFreezeMinEvents = 100;
 defaults.FfeFreezeBandHalfWidth = 3;
 defaults.FfeFreezeMode = 'pvt-track';
 defaults.FfeStepSizePvtTrack = 0.0002;
+% Gate criterion for the second-stage downshift. 'auto' picks 'center-touch'
+% at exactly zero frequency offset and 'freq-state' otherwise, mirroring the
+% way the offline pass/fail verdict already switches between the modal and the
+% frequency-domain criteria. Force either name to override.
+defaults.FfeGateCriterion = 'auto';
+% PI phase-table nonideality: 'ab_constant' (cdr_pi's physical a+b=1 atan2
+% model, 2.891 LSB pk-pk INL) or 'ideal' (exactly linear).
+defaults.PiNonideal = 'ab_constant';
 defaults.LockWindowBlocks = 2000;
 defaults.FreqMeanHalfDiffTol = 0.03;
 defaults.FreqStdTol = 0.08;
@@ -1417,6 +1530,52 @@ for attempt = 1:maxAttempts
             return;
         end
         pause(0.5);
+    end
+end
+end
+
+function drawStageMarkers(stage1Block, stage2Block, snrThresholdDb, ...
+        gateCriterion, labeled)
+%DRAWSTAGEMARKERS Mark the two mu-downshift milestones on a block-axis plot.
+%
+% The convergence traces change slope at the two step-size downshifts, so
+% marking them makes those kinks attributable instead of mysterious:
+%   stage 1: capture -> settle, gated by the SNR-EWMA threshold
+%            (dLev 0.5 -> 0.1, FFE 1e-3 -> 2e-4)
+%   stage 2: settle -> PVT-track, gated by FfeGateCriterion
+%            (dLev 0.1 -> 0.02; FFE unchanged at the default tuning)
+%
+% The stage-2 label names the armed gate rather than calling the event a
+% "lock": only the 'freq-state' gate is a component of the lock criterion.
+% The 'center-touch' gate is an independent code-domain test, so labelling its
+% trigger as a lock would misstate what the line marks.
+%
+% Both inputs are NaN-safe: a milestone that never fired is simply not drawn,
+% which is the normal case for stage 2 under the legacy center-touch gate at
+% a nonzero frequency offset. Colors are deliberately distinct from the red
+% acquisition marker already present on these axes.
+if isfinite(stage1Block)
+    if labeled
+        xline(stage1Block, '--', ...
+            sprintf('stage-1 downshift (SNR>%gdB) block %g', ...
+            snrThresholdDb, stage1Block), ...
+            'Color', [0.00 0.55 0.25], 'LineWidth', 1.2, ...
+            'LabelVerticalAlignment', 'bottom');
+    else
+        xline(stage1Block, '--', 'Color', [0.00 0.55 0.25], ...
+            'LineWidth', 1.0);
+    end
+end
+if isfinite(stage2Block)
+    if labeled
+        xline(stage2Block, '--', ...
+            sprintf('stage-2 downshift (gate: %s) block %g', ...
+            char(gateCriterion), stage2Block), ...
+            'Color', [0.50 0.15 0.70], 'LineWidth', 1.2, ...
+            'LabelVerticalAlignment', 'middle');
+    else
+        xline(stage2Block, '--', 'Color', [0.50 0.15 0.70], ...
+            'LineWidth', 1.0);
     end
 end
 end

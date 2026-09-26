@@ -1,5 +1,72 @@
 ﻿# Decisions
 
+## 2026-09-26: ppm suite samples through the PI phase table and defaults to the nonideal PI
+
+- **Decision:** the ppm three-loop suite runs with a physically nonideal phase
+  interpolator by default. `cdr_three_loop_ppm` gains `PiNonideal`
+  (`'ideal'` or `'ab_constant'`) defaulting to `'ab_constant'`, and forwards it
+  to `cdr_top`, which previously received a hard-coded `'ideal'`. Neither
+  `cdr_pi`'s `a+b=1`/`atan2` table nor `cdr_top`'s existing `PiNonideal`
+  validation was changed; only the harness stopped overriding them.
+- **Why the option alone is not enough:** the harness addressed the cached
+  waveform with the raw `CodeWrapped`, which assumes a perfectly linear
+  code-to-phase map. A nonideal table would have been built by `cdr_pi` and
+  then discarded, so the option would have been inert. The in-UI offset is now
+  `round(top.PhaseInterpolator.getLocalIndex())`, taken from the phase table
+  itself. Under `'ideal'` that table is the identity, so the expression equals
+  `CodeWrapped` and the change is a bit-exact no-op; `'ideal'` is retained
+  precisely so the previous behaviour stays reachable and A/B-comparable.
+- **Accepted modelling limit:** the cache is addressed in integer samples, so
+  the offset is rounded. At 128 samples/UI one PI code is one sample, hence
+  one LSB, and rounding quantizes INL to `+/-0.5 LSB`. For the `ab_constant`
+  table (`+/-1.445352 LSB`, 2.890703 LSB pk-pk, 1.037876 LSB RMS at 7 bits)
+  this retains three distinct offsets `{-1, 0, +1}` across 52/24/52 codes, so
+  104 of 128 codes move by one sample. The same rounding would annihilate an
+  INL below about 0.7 LSB pk-pk. Sub-LSB INL therefore cannot be studied in
+  this harness without a resampled or fractionally interpolated cache, which
+  was deliberately not built.
+- **Rejected:** an amplitude-scaling knob (`PiInlPkPkLsb`) to sweep INL
+  magnitude. The native 2.891 LSB pk-pk table is the physical model of record
+  and a synthetic scale factor would invite reporting an INL level that the
+  integer addressing cannot actually represent.
+- **Evidence the default is safe:** a controlled A/B with the PI table as the
+  only variable (32 start phases, `NumBlock = 15000`, `SaveOutputs = false`)
+  keeps 32/32 lock and `AllPhaseLock = 1` in all four arms, holds
+  `|FreqStateMean|` within `2.6e-4` of the expected 0.8192 code/block, and
+  reports `SlewSaturatedFlag = 0` everywhere. The locked-phase centroid moves
+  by one code (106->107 at -100 ppm, 120->121 at +100 ppm) and the spread by at
+  most one code, which is what a `+/-1` sample address quantization should do.
+- **Known cost, recorded rather than smoothed over:** mean `|PendingCode|`
+  roughly doubles to triples (`0.0855..0.1325 -> 0.1805..0.2720` at -100 ppm;
+  `0.1220..0.1985 -> 0.3320..0.4625` at +100 ppm). The worst +100 ppm start
+  phase sits at 0.4625 against the `SlewSatPendingTol = 0.5` guard, cutting
+  that margin from about 60% to about 7.5%. Note that under a frequency offset
+  a nonzero mean pending code is **structural**, not evidence of non-
+  convergence as the 2026-09-23 entry states for the zero-offset case: the
+  required rate 0.8192 code/block is fractional while the PI moves whole codes
+  under `MaxDeltaCode = 1`, so a fractional backlog always exists. What the
+  measurement shows is that the nonideal table enlarges that backlog, and that
+  this guard, not lock or tracking accuracy, is the first thing that will trip
+  if INL or offset grows further.
+
+## 2026-09-26: stage markers label the armed gate, not "lock"
+
+- Convergence figures mark both mu downshifts, so the slope changes in the
+  traces are attributable. The stage-2 marker is labelled
+  `stage-2 downshift (gate: <criterion>)` rather than `(lock)`. Only the
+  `freq-state` gate is a component of the lock criterion; `center-touch` is an
+  independent code-domain test that at 0 ppm fired on 29 of 32 start phases at
+  blocks unrelated to the lock verdict, so a "lock" label would have been
+  simply wrong on the zero-ppm figures.
+- For the same reason `ppm_lock_summary.txt` no longer claims that a
+  freq-state `Stage2Block` equals `LockBlock` "by construction". The gate is
+  the frequency-state **component** of a verdict that, where
+  `RotationCriterionApplicable` holds, also requires
+  `detectRotationPeriodLock`; the sound structural claim is
+  `Stage2Block <= LockBlock`. The writer now states that and prints the
+  measured agreement (32/32 rows exact, 0 earlier, at both offsets), so the
+  claim is checkable from the artefact instead of asserted.
+
 ## 2026-09-23: PI slew limit set to one code per update; drift-vs-dither instrumentation
 
 - User-confirmed physical assumption change: `MaxDeltaCode` default goes `12 -> 1` in `cdr_top.defaultConfig` and in the v4 runner, because a real phase interpolator moves one code per update. The previous `12` was a behavioural-study value. Measured impact on the v4 no-argument default run: lock unchanged at 8/8, `AllPhaseLock = 1`, common phase 113, spread 4; only 5 of 120000 block-phase updates ever hit the limiter, all during acquisition (last at block 5432). v3 keeps `12`, so v3-vs-v4 equivalence runs now pass `MaxDeltaCode` explicitly; with it pinned the refactor is still bit-exact in all three configurations.
@@ -460,8 +527,9 @@ The following values appear in current ADC waveform studies but are not yet perm
   all three over 8 start phases but drops `-100 ppm` to 31/32 over 32 start
   phases. The required downshift instant varies with start phase and with ppm,
   so neither a fixed flatness threshold nor a fixed block number can express it.
-- **Decision**: replace the stage-1 gate with an **eye-quality** criterion and
-  make the downshift explicitly two-stage.
+- **Decision at the time**: replace the stage-1 gate with an **eye-quality**
+  criterion and configure a second downshift stage. The 2026-09-26 entry below
+  records that this second stage does not actually fire under frequency offset.
   - Stage 1 (`capture -> settle`), both loops together, gated on the averaged
     decision-directed SNR `10*log10(mean(decision^2)/mean(sliceError^2))`.
     `cdr_top.blockSnrDb` computes the per-block FOM from values `slicePam4`
@@ -473,9 +541,10 @@ The following values appear in current ADC waveform studies but are not yet perm
     New `cdr_top` config: `SettleGate` (`'snr'` default, `'dlev'` legacy),
     `SnrSettleThresholdDb = 15`, `SnrSettleAlpha = 1/128`,
     `SnrSettleMinBlock = 200`.
-  - Stage 2 (`settle -> PVT tracking`) reuses the existing phase-band lock gate
-    `updateFfeGate` and now drops **both** loops: FFE to `FfeStepSizePvtTrack`
-    and dLev to the new `DlevStepSizePvtTrack = 0.02` (previously only the FFE
+  - Stage 2 was intended to perform `settle -> PVT tracking` by reusing the
+    existing phase-band gate `updateFfeGate`; if triggered, it drops **both**
+    loops: FFE to `FfeStepSizePvtTrack` and dLev to the new
+    `DlevStepSizePvtTrack = 0.02` (previously only the FFE
     was dropped).
 - **Averaging is load-bearing, not cosmetic**: per-block SNR distributions
   overlap badly. In the failing run the closed-eye p99 is 22.55 dB, *above* the
@@ -502,3 +571,78 @@ The following values appear in current ADC waveform studies but are not yet perm
 - `0 ppm` is retained as a mandatory regression sentinel for this policy, since
   it is the case most sensitive to the downshift actually happening and to the
   capture-mu cursor walk.
+
+## 2026-09-26: Retire the two-eye ppm workflow; anchor row 2 on verdict replay and leave stage-2 redesign open
+
+- **Retirement decision**: replace the former two-eye capture/final offline path
+  with `make_ppm_stage_eyes.m`, `helpers/build_ppm_eye_set.m`,
+  `helpers/plot_ppm_eye_set.m`, and `tests/CDR/test_build_ppm_eye_set.m`. The old
+  driver, pair builder, pair plotter, and pair-builder test are deleted. The new
+  builder accepts N anchor blocks and appends a trailing tail window; the current
+  driver supplies stage-1 SNR settle and first-satisfied lock, producing three
+  standalone 2048-UI eyes plus one 1500x1500 three-row comparison.
+- **Row-2 decision**: anchor the second row by sliding the run's own pass/fail
+  lock detectors and tolerances over prefixes `1:k`. Nonzero ppm uses
+  `loop_monitor.detectFrequencyStateLock` and, when
+  `RotationCriterionApplicable`, `detectRotationPeriodLock`; zero ppm uses
+  `detect_pi_center_touch_lock`. This avoids inventing a new eye-only definition
+  of lock and keeps the diagnostic aligned with the acceptance verdict.
+- **Window limitation**: `LockWindowBlocks = 2000`; therefore the replay cannot
+  produce a row-2 anchor before block 2000. The label means “after the lock
+  criterion is satisfied,” specifically the first complete trailing 2000-block
+  window that passes, not the instantaneous physical lock time and not “after
+  the second downshift.” `CaptureBlock` is retained as context only.
+- **Defect recorded**: the live stage-2 gate is not connected to that verdict.
+  `cdr_top.m:509-511` sends raw unwrapped PI code to
+  `loop_monitor.updateFfeGate`. `observeSearch` requires one exact code to occur
+  500 times before nominating a centre; under `+/-100 ppm` the code ramps at
+  `0.8192 code/block` and each exact code appears about once. Actual monitor
+  replay across all saved starts fired on 0/32 phases at -100 ppm, 0/32 at
+  +100 ppm, and 28/32 at zero ppm (blocks 3937..7653). The plotted zero-ppm start
+  (phase index 10, phase 36) is one of the four non-latching cases. Maximum mode
+  counts were 75 and 46 for -100 and +100 ppm against 500, with zero events.
+- **Consequence**: the accepted `+/-100 ppm` runs are single-stage in practice;
+  their 32/32 all-phase capture result was achieved with stage 1 only. The
+  pass/fail criterion was upgraded to frequency-domain lock for ppm, while the
+  nominal after-lock stage-2 gate remained the zero-ppm code-domain centre-touch
+  detector. The two control concepts were never connected.
+- **Historical status:** at the time of this eye-set decision, moving stage 2 to
+  frequency-state lock was left open. The following 2026-09-26 decision records
+  the implemented resolution; this entry remains as the provenance of the
+  defect and the separation between lock replay and stage-2 firing.
+
+## 2026-09-26: Switch the ppm stage-2 gate by criterion and retire the lock-summary CSV
+
+- **Decision:** add a selectable stage-2 criterion. `cdr_top` accepts
+  `FfeGateCriterion = 'center-touch'` or `'freq-state'` and keeps
+  `'center-touch'` as its library default for backward compatibility. The ppm
+  runner adds `'auto'` as its default, resolving to `'center-touch'` at exactly
+  0 ppm and `'freq-state'` otherwise. The center-touch implementation is
+  retained, not deleted, and remains the normal zero-ppm path.
+- **Why:** the old code-domain modal gate requires one raw unwrapped PI code to
+  recur 500 times and then counts 100 center touches/crossings inside a
+  half-width-3 band. Under a frequency offset, unwrapped PI code ramps and does
+  not dwell. Consequently the gate was enabled but dead: it fired for 0/32
+  starts at both -100 and +100 ppm despite `FfeGateEnable = true` and
+  `FfeGateMode = 'pvt-track'`. This was not an intentional disabling policy.
+- **Criterion reuse:** `loop_monitor.enableFreqStateGate` configures a bounded
+  trailing-window ring and `updateFreqStateGate` passes its ordered full window
+  to the existing static `detectFrequencyStateLock`. There is no second
+  implementation of frequency lock; online and offline verdicts are identical
+  by construction for the same samples. The ppm runner passes the exact verdict
+  window, expected rate, and frequency tolerances.
+- **Layering:** stage 1 remains the SNR-EWMA `capture -> settle` event. Stage 2
+  remains `settle -> pvt-track`. The ppm steps are dLev
+  `0.5 -> 0.1 -> 0.02` and FFE `0.001 -> 2e-4 -> 2e-4`, so stage 2 changes only
+  dLev at the defaults. The pass/fail lock verdict is not the stage-2 gate:
+  nonzero-ppm `Locked` still requires frequency-state lock **and** rotation-period
+  lock. `LockBlock` and `Stage2GateBlock` therefore remain separate milestones.
+- **Zero-ppm compatibility evidence:** with the new default, `auto` resolved to
+  center-touch, 2/2 starts locked, and start phase 0 fired at block 3937, exactly
+  the minimum in the existing p0 artefact.
+- **Output decision:** remove `ppm_lock_summary.csv` and the runner's
+  `result.LockSummaryPath`. `ppm_lock_summary.txt` is the sole lock summary and
+  is a strict superset of the former CSV columns. The similarly named
+  `ppm_stage_eye_summary.csv` is a different eye-summary artefact and remains.
+  The text writer uses recorded `result.Stage2GateBlock` for current MATs and
+  replays center-touch only as a compatibility fallback for older MATs.

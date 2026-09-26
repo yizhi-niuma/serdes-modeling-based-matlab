@@ -39,6 +39,25 @@ classdef loop_monitor < handle
     %    the average is mandatory rather than cosmetic. Enable it explicitly
     %    with enableSnrSettle; the constructor arity is unchanged.
     %
+    % 4) Loop-frequency-state lock gate. A one-shot ONLINE form of the
+    %    detectFrequencyStateLock criterion defined below. It keeps a ring
+    %    buffer of the last windowBlocks loop frequency-state samples and,
+    %    once that buffer is full, hands the ordered window to that very same
+    %    static detector. The online verdict is therefore identical by
+    %    construction to the offline one evaluated over the same trailing
+    %    window: there is no second copy of the criterion to drift out of
+    %    sync. Memory is one window regardless of run length, and the cost is
+    %    O(windowBlocks) per block only until the gate latches.
+    %
+    %    It exists because detector 1 above is a CODE-DOMAIN center-touch
+    %    test. Under a frequency offset the PI code ramps continuously and
+    %    never dwells on a single code, so detector 1 can never reach its
+    %    mode count and a gate built on it never fires. The loop frequency
+    %    state is instead exactly the quantity that goes constant once the
+    %    loop tracks the offset, so it stays meaningful at any ppm including
+    %    zero. Enable it explicitly with enableFreqStateGate; the documented
+    %    constructor arity is unchanged.
+    %
     % The detector previously named ffe_freeze_monitor is unchanged in
     % behaviour; only the class name and error identifiers moved.
 
@@ -67,6 +86,17 @@ classdef loop_monitor < handle
         SnrEwmaDb = NaN
         SnrSettleDone = false
         SnrSettleBlock = NaN
+        FreqGateEnabled = false
+        FreqGateWindow = NaN
+        FreqGateExpectedRate = NaN
+        FreqGateMeanHalfDiffTol = NaN
+        FreqGateStdTol = NaN
+        FreqGateRateTol = NaN
+        FreqGateMinBlock = NaN
+        FreqGateDone = false
+        FreqGateBlock = NaN
+        FreqGateSampleCount = 0
+        FreqGateSkippedCount = 0
     end
 
     properties (Access = private)
@@ -76,6 +106,7 @@ classdef loop_monitor < handle
         PreviousCode = NaN
         DlevRingValue = zeros(1, 0)
         DlevRingBlock = zeros(1, 0)
+        FreqRingValue = zeros(1, 0)
     end
 
     methods
@@ -143,6 +174,15 @@ classdef loop_monitor < handle
             else
                 obj.DlevRingValue = zeros(1, 0);
                 obj.DlevRingBlock = zeros(1, 0);
+            end
+            obj.FreqGateDone = false;
+            obj.FreqGateBlock = NaN;
+            obj.FreqGateSampleCount = 0;
+            obj.FreqGateSkippedCount = 0;
+            if obj.FreqGateEnabled
+                obj.FreqRingValue = nan(1, obj.FreqGateWindow);
+            else
+                obj.FreqRingValue = zeros(1, 0);
             end
         end
 
@@ -337,6 +377,118 @@ classdef loop_monitor < handle
             end
         end
 
+        function enableFreqStateGate(obj, windowBlocks, expectedRate, ...
+                meanHalfDiffTol, stdTol, rateTol, minBlock)
+            %ENABLEFREQSTATEGATE Turn on the online frequency-state lock gate.
+            %
+            %   windowBlocks, expectedRate, meanHalfDiffTol, stdTol and
+            %   rateTol carry exactly the meaning documented on the static
+            %   detectFrequencyStateLock, because the online gate forwards
+            %   them to that function unchanged. expectedRate may be NaN and
+            %   rateTol may be Inf to test flatness only.
+            %
+            %   minBlock suppresses the trigger while the loop is still in its
+            %   capture transient, in the same spirit as the SNR settle
+            %   detector's own minBlock. The gate additionally cannot fire
+            %   before windowBlocks samples have been observed, since a short
+            %   window is rejected by the criterion itself.
+            %
+            %   This is a separate configuration call rather than extra
+            %   constructor arguments so the documented 4/6 constructor arity
+            %   stays valid for every existing caller.
+            if nargin ~= 7
+                error('loop_monitor:InvalidFreqGateConfig', ...
+                    ['Expected windowBlocks, expectedRate, ', ...
+                    'meanHalfDiffTol, stdTol, rateTol, and minBlock.']);
+            end
+            obj.validateInteger(windowBlocks, 2, ...
+                'InvalidFreqGateWindow', 'windowBlocks');
+            loop_monitor.validateFiniteOrNaNScalar(expectedRate, ...
+                'expectedRate');
+            loop_monitor.validateNonnegativeScalar(meanHalfDiffTol, ...
+                'meanHalfDiffTol');
+            loop_monitor.validateNonnegativeScalar(stdTol, 'stdTol');
+            loop_monitor.validateNonnegativeScalarOrInf(rateTol, 'rateTol');
+            obj.validateInteger(minBlock, 1, ...
+                'InvalidFreqGateMinBlock', 'minBlock');
+
+            obj.FreqGateEnabled = true;
+            obj.FreqGateWindow = double(windowBlocks);
+            obj.FreqGateExpectedRate = double(expectedRate);
+            obj.FreqGateMeanHalfDiffTol = double(meanHalfDiffTol);
+            obj.FreqGateStdTol = double(stdTol);
+            obj.FreqGateRateTol = double(rateTol);
+            obj.FreqGateMinBlock = double(minBlock);
+            obj.FreqGateDone = false;
+            obj.FreqGateBlock = NaN;
+            obj.FreqGateSampleCount = 0;
+            obj.FreqGateSkippedCount = 0;
+            obj.FreqRingValue = nan(1, double(windowBlocks));
+        end
+
+        function [triggered, diag] = updateFreqStateGate(obj, blockIndex, ...
+                freqState)
+            %UPDATEFREQSTATEGATE Report the one-shot frequency-lock transition.
+            %
+            % freqState is this block's loop-filter integrator frequency state
+            % in code/block, taken AFTER the loop filter update for the block,
+            % so the observed sequence matches the recorded frequency-state
+            % trace sample for sample.
+            %
+            % Non-finite samples are skipped rather than stored, because the
+            % criterion rejects a non-finite window outright; such a sample
+            % would make the offline detector error rather than return false.
+            % Skips are counted in FreqGateSkippedCount so a run that relied
+            % on them is not silently indistinguishable from a clean one.
+            obj.requireFreqGateEnabled('updateFreqStateGate');
+            obj.validateInteger(blockIndex, 1, 'InvalidBlock', 'blockIndex');
+            isValidState = isnumeric(freqState) && isreal(freqState) && ...
+                isscalar(freqState);
+            if ~isValidState
+                error('loop_monitor:InvalidFreqState', ...
+                    'freqState must be a real scalar.');
+            end
+
+            triggered = false;
+            diag = struct('WindowLength', 0, 'MeanValue', NaN, ...
+                'MeanHalfDiff', NaN, 'TailStd', NaN, ...
+                'ExpectedRate', obj.FreqGateExpectedRate, ...
+                'RateError', NaN, 'FlatnessOk', false, 'RateOk', false);
+            if obj.FreqGateDone
+                return;
+            end
+            if ~isfinite(freqState)
+                obj.FreqGateSkippedCount = obj.FreqGateSkippedCount + 1;
+                return;
+            end
+
+            window = obj.FreqGateWindow;
+            obj.FreqGateSampleCount = obj.FreqGateSampleCount + 1;
+            slot = mod(obj.FreqGateSampleCount - 1, window) + 1;
+            obj.FreqRingValue(slot) = double(freqState);
+
+            if obj.FreqGateSampleCount < window
+                return;
+            end
+            if blockIndex < obj.FreqGateMinBlock
+                return;
+            end
+
+            % Oldest-to-newest view of the ring, i.e. the same trailing window
+            % the offline criterion would take from the full trace.
+            ordered = [obj.FreqRingValue(slot + 1:end), ...
+                obj.FreqRingValue(1:slot)];
+            [locked, diag] = loop_monitor.detectFrequencyStateLock( ...
+                ordered, window, obj.FreqGateExpectedRate, ...
+                obj.FreqGateMeanHalfDiffTol, obj.FreqGateStdTol, ...
+                obj.FreqGateRateTol);
+            if locked
+                obj.FreqGateDone = true;
+                obj.FreqGateBlock = blockIndex;
+                triggered = true;
+            end
+        end
+
         function state = getState(obj)
             %GETSTATE Return a copy of configuration and bounded diagnostics.
             state = struct();
@@ -374,6 +526,17 @@ classdef loop_monitor < handle
             state.SnrEwmaDb = obj.SnrEwmaDb;
             state.SnrSettleDone = obj.SnrSettleDone;
             state.SnrSettleBlock = obj.SnrSettleBlock;
+            state.FreqGateEnabled = obj.FreqGateEnabled;
+            state.FreqGateWindow = obj.FreqGateWindow;
+            state.FreqGateExpectedRate = obj.FreqGateExpectedRate;
+            state.FreqGateMeanHalfDiffTol = obj.FreqGateMeanHalfDiffTol;
+            state.FreqGateStdTol = obj.FreqGateStdTol;
+            state.FreqGateRateTol = obj.FreqGateRateTol;
+            state.FreqGateMinBlock = obj.FreqGateMinBlock;
+            state.FreqGateDone = obj.FreqGateDone;
+            state.FreqGateBlock = obj.FreqGateBlock;
+            state.FreqGateSampleCount = obj.FreqGateSampleCount;
+            state.FreqGateSkippedCount = obj.FreqGateSkippedCount;
         end
     end
 
@@ -614,6 +777,14 @@ classdef loop_monitor < handle
                 error('loop_monitor:SnrSettleDisabled', ...
                     ['%s requires the eye-quality settle detector; call ', ...
                     'enableSnrSettle first.'], methodName);
+            end
+        end
+
+        function requireFreqGateEnabled(obj, methodName)
+            if ~obj.FreqGateEnabled
+                error('loop_monitor:FreqGateDisabled', ...
+                    ['%s requires the frequency-state lock gate; call ', ...
+                    'enableFreqStateGate first.'], methodName);
             end
         end
 

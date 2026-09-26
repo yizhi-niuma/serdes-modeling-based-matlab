@@ -3,7 +3,8 @@ cdr_three_loop_ppm.m  实现说明 (0 ppm 结果 / 零频偏基线与回归对�
 ================================================================================
 生成日期: 2026-09-25
 对应结果: result/cdr_three_loop_ppm_p0/cdr_three_loop_ppm_result.mat
-被测脚本: validation/CDR/test_cdr_three_loop_wi_ppm/src/cdr_three_loop_ppm/cdr_three_loop_ppm.m
+被测脚本: validation/CDR/test_cdr_three_loop_wi_ppm/
+          src/cdr_three_loop_ppm/cdr_three_loop_ppm.m
 根因分析与换挡判据设计的完整记录见 result/cdr_three_loop_ppm_m100/impl_notes.txt
 (2026-09-25 小节); 方案与判据的原始说明见 result/cdr_three_loop_ppm_p100/impl_notes.txt。
 
@@ -36,7 +37,8 @@ cdr_three_loop_ppm.m  实现说明 (0 ppm 结果 / 零频偏基线与回归对�
   第二级 settle -> PVT tracking , 门控 = 既有相位带锁定门控 loop_monitor.updateFfeGate
       触发后 FFE -> FfeStepSizePvtTrack=2e-4 , dLev -> DlevStepSizePvtTrack=0.02
 
-capture 期 FfeStepSize 取 0.001 (库默认 0.004 的 1/4): FfeAdaptEnableMask=[1 1 0 1 1 1]
+capture 期 FfeStepSize 取 0.001（库默认 0.004 的 1/4）；
+FfeAdaptEnableMask=[1 1 0 1 1 1]
 冻结主抽头, 环路只能靠前后抽头整形脉冲, 这会移动有效游标从而移动 MMPD 零点, 不同
 起始相位因此收敛到不同锁定相位。走位量与步长成正比, 0 ppm 侧实测锁定相位离散度:
     FfeStepSize  0.001  0.002  0.004  0.008
@@ -75,8 +77,182 @@ capture 期 FfeStepSize 取 0.001 (库默认 0.004 的 1/4): FfeAdaptEnableMask=
   r = cdr_three_loop_ppm('FreqOffsetPpm', 0, 'NumBlock', 8000, ...
           'StartPhaseStep', 4, 'SaveOutputs', true);               % 本次产物
 快速 smoke:
-  cdr_three_loop_ppm('FreqOffsetPpm',0,'NumBlock',4000,'StartPhaseList',[16 64],'SaveOutputs',false);
+  cdr_three_loop_ppm('FreqOffsetPpm',0,'NumBlock',4000, ...
+      'StartPhaseList',[16 64],'SaveOutputs',false);
 复现旧判据下的 0 ppm 退化(离散度 12 码, AllPhaseLock=0):
   cdr_three_loop_ppm('FreqOffsetPpm',0,'FfeStepSize',0.004);
 输出目录为 result/cdr_three_loop_ppm_p0。
+================================================================================
+
+================================================================================
+2026-09-26 追加: 离线三阶段 FFE 眼图与第二级门控缺陷
+================================================================================
+本节记录基于既有 cdr_three_loop_ppm_result.mat 与 CTLE 缓存的离线重建；不重跑仿真。
+旧的两眼流程及其四个实现/测试文件已退役删除，现由三眼集合流程替代。
+
+--------------------------------------------------------------------------------
+六、三眼窗口、结果、限制与复现
+--------------------------------------------------------------------------------
+make_ppm_stage_eyes.m 先从保存的 SnrDbTrace 精确重放
+loop_monitor.updateSnrSettle 的 EWMA，再用与运行 pass/fail 完全相同的锁定检测器和容差
+逐个前缀 1:k 重放首次锁定。三个 2048-UI 窗口依次为：
+  1) 第一级 SNR mu 降档后：从 block 961 开始；这是 block>=200 后 EWMA(alpha=1/128)
+     首次达到 15 dB 的位置。
+  2) 锁定判据首次满足后：从 block 2732 开始；0 ppm 使用
+     detect_pi_center_touch_lock，频率态单项判据不适用。
+  3) final：运行最后 2048 UI。
+LockWindowBlocks=2000，忠实的滑窗判定在 block 2000 前没有完整窗口，因此第二行锚点
+下限为 2000；它表示“末尾 2000-block 窗口首次满足判据的块”，不是环路锁定的瞬时刻。
+CaptureBlock=768 只保留作上下文，不再作为眼图锚点。
+
+helpers/build_ppm_eye_set.m 接受 N 个锚点并追加一个尾窗，按
+    absSample0(k) = (BaseUi + (k-1)*AdcBlockUi + UiSlipTrace(k)) * ...
+        SamplesPerUi + PhaseCodeTrace(k) + DriftSampleTrace(k)
+重建地址；0 ppm 时 DriftSampleTrace 为零，自然退化为无漂移地址。helper 逐块精确核对
+sub-UI code 与 EyePhaseUnwrappedTrace。每个锚点窗口使用该锚点块自己的 FFE 系数快照，
+final 使用末块快照；它们都是整窗固定抽头的离线视图，不是运行期逐块变化抽头的重放。
+ADC、固定抽头 FFE 和 2-UI 密度仍委托同级 build_cdr_ffe_eye。
+helpers/plot_ppm_eye_set.m 输出三个独立图，并另画一个刻意设为 1500x1500 的三行比较图。
+marker 由未包裹的 tracked-eye phase 先统计、再包裹到一 UI；span 因而可跨越 0/128
+边界。相邻 2-UI 密度列彼此重叠，不能视为独立样本。
+
+本目录结果（8000 blocks，32 start phases，PRBS22，套件默认值）：
+  ppm=0; result dir=cdr_three_loop_ppm_p0; phase idx=10; start phase=36
+  CaptureBlock(context only)=768; SNR settle=961; lock=2732; freq-only lock=NaN
+  stage-2 fire=NaN
+  marker(SNR/lock/final)=113/113.78125/114.15625 code
+  span(SNR/lock/final)=0/1/2 code
+  startUi(SNR/lock/final)=61695/175039/510207
+  MarkerDeltaSettleToFinal=1.15625; MarkerDeltaLockToFinal=0.375 code
+第二行必须标作“after the lock criterion is satisfied”，不能标作“after the second
+mu downshift”。三个工况中，从 lock block 到末尾的残余游标走位
+(0.09/0.375/0.59 code)均远小于从第一级 settle block 到末尾的走位
+(3.81/1.16/0.75 code)，所以到锁定判据满足时抽头已基本停止移动；该比较不说明适配
+时长、步长或机理，也不支持三个工况间的单调性结论。
+
+历史缺陷（本节记录旧产物）：第二级 mu 降档在本目录所画的默认起始相位没有触发。
+cdr_top.m:509-511
+把原始未包裹 PI code (uiSlip*SamplesPerSymbol + codeWrapped)送给
+loop_monitor.updateFfeGate；loop_monitor.observeSearch 约第 572 行先要求同一个精确
+code 重复 FfeGateMinModeOccurrences=500 次，才提名 center，再开始统计触碰/跨越事件。
+真实 monitor 重放全部相位所得结果为：-100 ppm 0/32、+100 ppm 0/32、0 ppm 28/32；
+0 ppm 的触发块为 3937..7653，而默认 phase idx 10/start phase 36 正是未触发的 4 个相位
+之一。频偏两侧的原始 code 以 0.8192 code/block 近似单调爬升，每个 code 约只访问一次；
+最大 ModeOccurrences 在 -100 ppm 仅 75、+100 ppm 仅 46，门限为 500，EventCount 始终
+为 0。因此 ±100 ppm 所谓“两级 mu 降档”实际只有第一级，32/32 全相位捕获结果仅靠
+第一级取得。pass/fail 锁定判据已在 ppm 下改为频域，但“锁后”第二级门仍留在零频偏
+code-domain center-touch 检测器，两者从未连接。迁移频率态判据在本节记录时仍是
+开放问题；后续实现见第七节。
+
+从套件目录复现：
+    make_ppm_stage_eyes('ResultDirs', {'cdr_three_loop_ppm_p0'})
+产物：
+  - cdr_ffe_eye_at_snr_settle_2048ui.fig
+  - cdr_ffe_eye_at_lock_2048ui.fig
+  - cdr_ffe_eye_final_2048ui.fig
+  - cdr_ffe_eye_stage_comparison.fig
+  - ppm_stage_eye_summary.csv
+  - ppm_lock_summary.txt（32 相位可读锁定摘要，完整保留 CSV 字段）
+本工况 28/32 行触发 Stage2Block，触发块范围为 3937..7653。
+新 driver 会自动删除已退役的两眼产物。test_build_ppm_eye_set 通过 9/9 检查。
+
+--------------------------------------------------------------------------------
+七、2026-09-26 第二级门控改线与 CSV 移除说明
+--------------------------------------------------------------------------------
+本目录已保存的结果是在旧 center-touch 门控下生成，未重跑、未重新生成；本目录记录的
+Stage2Block（28/32，3937..7653）仍是该旧运行的真实值。
+
+新 runner 默认 FfeGateCriterion='auto'，在 0 ppm 精确解析为 center-touch，因此零频偏
+路径不变。回归测试中 2/2 锁定，start phase 0 的第二级触发块为 3937，与本目录产物的
+最小值完全一致。
+
+ppm_lock_summary.csv 已移除；ppm_lock_summary.txt 现为唯一锁定摘要，并完整覆盖旧 CSV
+列。ppm_stage_eye_summary.csv 是另一份眼图摘要，仍由 make_ppm_stage_eyes.m 生成。
+================================================================================
+
+================================================================================
+2026-09-26 追加: 非理想 PI 下的 0 ppm 哨兵重跑 (32 相位, 15000 block)
+================================================================================
+本节对应的产物是**本次真正重跑并覆盖**的结果: 本目录下的 result.mat、8 张运行期
+.fig、3+1 张离线眼图、ppm_stage_eye_summary.csv 与 ppm_lock_summary.txt 全部由本次
+运行/重建生成。上文第六、七节中"本目录结果未重跑"的说明自本节起失效, 仅作历史保留。
+
+--------------------------------------------------------------------------------
+八、本次改动与本工况的作用
+--------------------------------------------------------------------------------
+1. runner 新增 PiNonideal('ideal'|'ab_constant', 默认 'ab_constant'), 并把 UI 内采样
+   偏移从原始 CodeWrapped 改为取自 PI 相位表:
+       sampleOffset = round(top.PhaseInterpolator.getLocalIndex())
+   在 'ideal' 下相位表恰为恒等表, 该式等于 CodeWrapped, 改动逐比特 no-op。
+   定量(7 bit PI, 128 sample/UI, 1 LSB = 1 code = 1 样点): ab_constant 的 INL =
+   ±1.445352 LSB = 2.890703 LSB pk-pk (RMS 1.037876); 整数寻址把它量化成
+   round(localIndex)-code ∈ {-1,0,+1}, 覆盖 52/24/52 个 code, 即 128 个 code 中有 104
+   个采样点移动了一整个样点(1/128 UI)。0.7 LSB pk-pk 以下的 INL 会被该 round 抹平。
+2. 本工况是**降档与游标走位的哨兵**, 必须与 ±100 ppm 同批跑: 它是唯一仍使用
+   center-touch 第二级门控的工况(FfeGateCriterion='auto' 只在恰好 0 ppm 时解析为
+   center-touch), 也是判断锁定相位离散度是否由 capture 期 FFE 步长引起的对照点。
+3. 五张收敛图新增两级降档标记; stage-2 标签写**armed 的门控名**(本工况为
+   "gate: center-touch")而不是 "lock"。这一点在本目录尤其重要: center-touch 与锁定
+   判据无关, 把它标成 lock 在 0 ppm 图上是明确错误的。
+
+--------------------------------------------------------------------------------
+九、本次运行配置
+--------------------------------------------------------------------------------
+FreqOffsetPpm = 0 , PiNonideal = ab_constant , FfeGateCriterion = auto
+  -> 0 ppm 解析为 center-touch
+NumBlock = 15000 (runner 默认) , StartPhaseStep = 4 => 32 个起始相位 0:4:127
+LockWindowBlocks = 2000 , LockMode = center-touch
+  (ExpectedRotationPeriod = NaN, RotationCriterionApplicable = 0)
+SnrSettleThresholdDb = 15 dB , alpha = 1/128 , SnrSettleMinBlock = 200
+其余全部 runner 默认。本节 NumBlock=15000, 上文第三节是 8000, 不可逐块直比。
+
+--------------------------------------------------------------------------------
+十、关键结果 (0 ppm, 32 相位)
+--------------------------------------------------------------------------------
+- 32/32 起始相位锁定, AllPhaseLock=1, CommonLockPhase=113, 离散度 2 码
+  (三个工况里最小, 与 ±100 ppm 的 3/3 码同量级)。
+- FreqStateMean 不适用(0 ppm 走 center-touch 判据, 汇总里记为 n/a);
+  离线所选行的实测频率态为 -1.13772e-05 code/block, 即基本为零。
+- Stage1Block(SNR EWMA 到 15 dB) 501..1028, 32/32 都触发。
+- LockBlock 2000..2519。下限 2000 是 LockWindowBlocks 的结构性下限(尾窗必须填满),
+  不是环路在第 2000 块才锁上。
+- Stage2Block: **29/32 触发**, 触发块 3512..8048; 有 **3 个起始相位从未闩锁**
+  (汇总里如实记为 n/a), 这些相位一直以 settle 步长跑到结束。
+  这是 center-touch 码域判据的已知局限(锁定相位若不停驻在被提名的中心码上, 该门可能
+  永不满足 FfeGateMinModeOccurrences=500), 不是本次引入的回归, 也不掩盖为"全部通过"。
+  历史对照: 旧的 8000 block 产物在该门下是 28/32。
+- SlewSaturated 全 0(0 ppm 无持续 slew 需求)。
+- 离线三眼所选行(最慢锁定捕获行): idx=10, start phase=36,
+  CaptureBlock(仅上下文)=825, SNR settle=1028, lock=2507, freq-only lock=n/a
+  (本工况不走频率判据), stage-2=3913;
+  marker(snr/lock/final)=111.906/113.062/113.469 码, span=2/1/1,
+  startUi=65983/160639/958207, MarkerDeltaSettleToFinal=1.5625,
+  MarkerDeltaLockToFinal=0.40625, 三张眼图全部 valid。
+- 三个工况的锁定相位中心互不相同(0 ppm=113, -100 ppm=107, +100 ppm=121), 这是频偏下
+  MMPD 零点随补偿方向移动的已知现象, 不应解读为某一工况"跑偏"。
+
+--------------------------------------------------------------------------------
+十一、限制与遗留
+--------------------------------------------------------------------------------
+- INL 被整数寻址量化成 {-1,0,+1} 三级台阶, 亚 LSB INL 在本 harness 中无法表示。
+- 本工况第二级门控仍是 center-touch, 29/32 触发是它的真实能力; 若要 0 ppm 也 32/32
+  触发, 需要显式传 'FfeGateCriterion','freq-state'(本次未改默认, 以保持 0 ppm 与历史
+  产物的可比性)。
+- 上文第七节"本目录结果是旧门控产物"只适用于旧产物。
+
+--------------------------------------------------------------------------------
+十二、复现方法
+--------------------------------------------------------------------------------
+从套件目录:
+    setup_cdr_three_loop_wi_ppm_paths('all');
+    r = cdr_three_loop_ppm('FreqOffsetPpm', 0, 'StartPhaseStep', 4);
+    make_ppm_stage_eyes('ResultDirs', {'cdr_three_loop_ppm_p0'});
+恢复旧的理想 PI 行为(逐比特等价于本次改动之前):
+    cdr_three_loop_ppm('FreqOffsetPpm', 0, 'StartPhaseStep', 4, ...
+        'PiNonideal', 'ideal');
+快速 smoke:
+    cdr_three_loop_ppm('FreqOffsetPpm', 0, 'NumBlock', 4000, ...
+        'StartPhaseList', [0 64], 'SaveOutputs', false);
+注意 StartPhaseStep 默认 16(只 8 个相位), 本套件历史上的"全相位"指 32 相位, 必须显式
+传 4。重跑同一条命令可复现相同汇总数值(确定性)。
 ================================================================================

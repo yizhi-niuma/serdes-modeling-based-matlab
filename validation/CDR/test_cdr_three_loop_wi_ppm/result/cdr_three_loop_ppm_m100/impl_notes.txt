@@ -3,13 +3,15 @@ cdr_three_loop_ppm.m  实现说明 (-100 ppm 结果 / 冷启动 planB 采集失�
 ================================================================================
 生成日期: 2026-09-24
 对应结果: result/cdr_three_loop_ppm_m100/cdr_three_loop_ppm_result.mat
-被测脚本: validation/CDR/test_cdr_three_loop_wi_ppm/src/cdr_three_loop_ppm/cdr_three_loop_ppm.m
+被测脚本: validation/CDR/test_cdr_three_loop_wi_ppm/
+          src/cdr_three_loop_ppm/cdr_three_loop_ppm.m
 方案与判据与实现要点见 result/cdr_three_loop_ppm_p100/impl_notes.txt (同一脚本, 频偏取负)。
 
 --------------------------------------------------------------------------------
 本次运行配置
 --------------------------------------------------------------------------------
-FreqOffsetPpm = -100 , FfeInitMode = planB(冷启动 [0 0 1 0 0 0]) , FreqAcqPonly = false
+FreqOffsetPpm = -100 , FfeInitMode = planB(冷启动 [0 0 1 0 0 0])
+FreqAcqPonly = false
 其余与 +100 ppm 完全相同 (Kp8/Ki0.03/MaxDeltaCode1/dlev48-16/FfeStep0.004->0.0002,
 PRBS22, NumBlock=8000, 8 个起始相位 0:16:112)。理论期望频率态 = +0.8192 code/block。
 
@@ -53,15 +55,16 @@ PRBS22, NumBlock=8000, 8 个起始相位 0:16:112)。理论期望频率态 = +0.
 本次 -100 ppm 选中 start phase = 16 (freqMean=-3.41, 期望 +0.819, 偏离最大)。
 可查看以下 .fig 进行 debug:
   - cdr_phase_convergence.fig : start16 的 wrapped PI code (错向旋转锯齿)。
-  - cdr_loop_freq_state.fig   : start16 的 FrequencyState/LoopControl/CodeResidue,
-                                频率态单调负向发散至接近 -4 钳位, 与期望 +0.819 反号。
+  - cdr_loop_freq_state.fig   : start16 的 FrequencyState/LoopControl/
+                                CodeResidue，频率态单调负向发散至接近 -4 钳位，
+                                与期望 +0.819 反号。
   - cdr_pi_tracking_error.fig : 全部 8 相位残差(浅色)+start16(粗蓝), 需求4量,
                                 失败相位为发散斜坡(未跟踪)。
   - dlev_convergence.fig      : start16 的内外 dLev 轨迹。
   - cdr_ffe_convergence.fig   : start16 的各自由 FFE 抽头轨迹。
   - cdr_locked_phase_vs_start_phase.fig : 8 相位全为红叉(未锁), 附各自尾窗眼相位。
-逐相位数值汇总见 ppm_lock_summary.csv (含每相位 FreqStateMean/RotationPeriod/
-RotationCov/EyePhaseCode)。result.mat 内 FreqLockDiagnostics / RotationLockDiagnostics /
+逐相位数值汇总现见 ppm_lock_summary.txt（含原 CSV 的全部列及新增说明）。
+result.mat 内 FreqLockDiagnostics / RotationLockDiagnostics /
 LoopFrequencyStateTrace / PiTrackingErrorTrace / EyePhaseUnwrappedTrace 可做进一步分析。
 ================================================================================
 
@@ -172,4 +175,198 @@ checkcode 对 loop_monitor.m / cdr_top.m / cdr_three_loop_ppm.m 均 0 问题。
 回归到旧判据以复现本文件上半部分的失败:
     r = cdr_three_loop_ppm('FreqOffsetPpm', -100, 'SettleGate', 'dlev', ...
             'FfeStepSize', 0.004);
+================================================================================
+
+================================================================================
+2026-09-26 追加: 离线三阶段 FFE 眼图与第二级门控缺陷
+================================================================================
+本节记录基于既有 cdr_three_loop_ppm_result.mat 与 CTLE 缓存的离线重建；不重跑仿真。
+旧的两眼流程及其四个实现/测试文件已退役删除，现由三眼集合流程替代。
+
+--------------------------------------------------------------------------------
+七、三眼窗口、结果、限制与复现
+--------------------------------------------------------------------------------
+make_ppm_stage_eyes.m 先从保存的 SnrDbTrace 精确重放
+loop_monitor.updateSnrSettle 的 EWMA，再用与运行 pass/fail 完全相同的锁定检测器和容差
+逐个前缀 1:k 重放首次锁定。三个 2048-UI 窗口依次为：
+  1) 第一级 SNR mu 降档后：从 block 3864 开始；这是 block>=200 后 EWMA(alpha=1/128)
+     首次达到 15 dB 的位置。
+  2) 锁定判据首次满足后：从 block 6128 开始；本工况按
+     loop_monitor.detectFrequencyStateLock，并在 RotationCriterionApplicable 时同时要求
+     detectRotationPeriodLock。频率态单项判据也在 block 6128 首次满足。
+  3) final：运行最后 2048 UI。
+LockWindowBlocks=2000，忠实的滑窗判定在 block 2000 前没有完整窗口，因此第二行锚点
+下限为 2000；它表示“末尾 2000-block 窗口首次满足判据的块”，不是环路锁定的瞬时刻。
+CaptureBlock=3787 只保留作上下文，不再作为眼图锚点。
+
+helpers/build_ppm_eye_set.m 接受 N 个锚点并追加一个尾窗，按
+    absSample0(k) = (BaseUi + (k-1)*AdcBlockUi + UiSlipTrace(k)) * ...
+        SamplesPerUi + PhaseCodeTrace(k) + DriftSampleTrace(k)
+重建频偏地址，并逐块精确核对其 sub-UI code 与 EyePhaseUnwrappedTrace。每个锚点窗口
+使用该锚点块自己的 FFE 系数快照，final 使用末块快照；它们都是整窗固定抽头的离线视图，
+不是运行期逐块变化抽头的重放。ADC、固定抽头 FFE 和 2-UI 密度仍委托同级
+build_cdr_ffe_eye。helpers/plot_ppm_eye_set.m 输出三个独立图，并另画一个刻意设为
+1500x1500 的三行比较图。marker 由未包裹的 tracked-eye phase 先统计、再包裹到一 UI；
+span 因而可跨越 0/128 边界。相邻 2-UI 密度列彼此重叠，不能视为独立样本。
+
+本目录结果（8000 blocks，32 start phases，PRBS22，套件默认值）：
+  ppm=-100; result dir=cdr_three_loop_ppm_m100; phase idx=4; start phase=12
+  CaptureBlock(context only)=3787; SNR settle=3864; lock=6128
+  freq-only lock=6128
+  stage-2 fire=NaN
+  marker(SNR/lock/final)=100.625/104.34375/104.4375 code
+  span(SNR/lock/final)=1/3/2 code
+  startUi(SNR/lock/final)=247511/392407/510231
+  MarkerDeltaSettleToFinal=3.8125; MarkerDeltaLockToFinal=0.09375 code
+第二行必须标作“after the lock criterion is satisfied”，不能标作“after the second
+mu downshift”。三个工况中，从 lock block 到末尾的残余游标走位
+(0.09/0.375/0.59 code)均远小于从第一级 settle block 到末尾的走位
+(3.81/1.16/0.75 code)，所以到锁定判据满足时抽头已基本停止移动；该比较不说明适配
+时长、步长或机理，也不支持三个工况间的单调性结论。
+
+历史缺陷（本节记录旧产物）：第二级 mu 降档在有频偏时从未触发，
+本目录 -100 ppm 的 32 个起始相位为
+0/32。cdr_top.m:509-511 把原始未包裹 PI code
+(uiSlip*SamplesPerSymbol + codeWrapped)送给 loop_monitor.updateFfeGate；而
+loop_monitor.observeSearch 约第 572 行要求同一个精确 code 先重复
+FfeGateMinModeOccurrences=500 次才提名中心。±100 ppm 下 code 以 0.8192 code/block
+近似单调爬升，每个 code 约只访问一次；真实 monitor 重放全部相位所得最大
+ModeOccurrences 在 -100 ppm 仅 75（+100 ppm 为 46），门限为 500，EventCount 始终为 0。
+全套重放结果为 -100 ppm 0/32、+100 ppm 0/32、0 ppm 28/32（触发块
+3937..7653）；默认 0 ppm 行 phase idx 10/start phase 36 属于未触发的 4 个相位。
+因此 ±100 ppm 所谓“两级 mu 降档”实际只有第一级；已记录的 32/32 全相位捕获结果仅靠
+第一级取得。pass/fail 锁定判据已在 ppm 下改为频域，但“锁后”第二级门仍留在零频偏
+code-domain center-touch 检测器，两者从未连接。迁移频率态判据在本节记录时仍是
+开放问题；后续实现见第八节。
+
+从套件目录复现：
+    make_ppm_stage_eyes('ResultDirs', {'cdr_three_loop_ppm_m100'})
+产物：
+  - cdr_ffe_eye_at_snr_settle_2048ui.fig
+  - cdr_ffe_eye_at_lock_2048ui.fig
+  - cdr_ffe_eye_final_2048ui.fig
+  - cdr_ffe_eye_stage_comparison.fig
+  - ppm_stage_eye_summary.csv
+  - ppm_lock_summary.txt（32 相位可读锁定摘要，完整保留 CSV 字段）
+本工况全部 32 行的 Stage2Block 均为 n/a。
+新 driver 会自动删除已退役的两眼产物。test_build_ppm_eye_set 通过 9/9 检查。
+
+--------------------------------------------------------------------------------
+八、2026-09-26 第二级门控改线与 CSV 移除说明
+--------------------------------------------------------------------------------
+本目录已保存的结果是在旧 center-touch 门控下生成，未重跑、未重新生成。因而本目录
+ppm_lock_summary.txt 的 Stage2Block 仍全部为 n/a，这是旧产物的真实记录。
+
+新 runner 默认 FfeGateCriterion='auto'：0 ppm 仍选 center-touch，非零 ppm 改选
+freq-state。重新运行本 -100 ppm 工况时，第二级会触发；4 相位 A/B 中为 4/4，触发块
+4977..6070。此说明不表示本目录现有 MAT 或图已更新。
+
+ppm_lock_summary.csv 已移除；ppm_lock_summary.txt 现为唯一锁定摘要，并完整覆盖旧 CSV
+列。ppm_stage_eye_summary.csv 是另一份眼图摘要，仍由 make_ppm_stage_eyes.m 生成。
+================================================================================
+
+================================================================================
+2026-09-26 追加: 非理想 PI + 频率态第二级门控的全相位重跑 (32 相位, 15000 block)
+================================================================================
+本节对应的产物是**本次真正重跑并覆盖**的结果: 本目录下的 result.mat、8 张运行期
+.fig、3+1 张离线眼图、ppm_stage_eye_summary.csv 与 ppm_lock_summary.txt 全部由本次
+运行/重建生成。上文第七、八节中"本目录结果仍是旧 center-touch 门控产物、未重跑"的
+说明自本节起失效，仅作历史保留。
+
+--------------------------------------------------------------------------------
+九、本次改动: 采样地址改走 PI 相位表, 默认非理想 PI
+--------------------------------------------------------------------------------
+1. runner 新增 PiNonideal 选项('ideal'|'ab_constant'), 默认 'ab_constant', 并传给
+   cdr_top; 此前 runner 把 cfg.PiNonideal 硬写成 'ideal'。cdr_pi 的 a+b=1/atan2
+   相位表模型与 cdr_top 的 PiNonideal 校验都是既有代码, 本次未改。
+2. 只加选项是不够的: 原来块起始地址用的是原始 CodeWrapped, 它隐含"code 到相位完全
+   线性"的假设, 于是 cdr_pi 算出的非理想相位表会被算完即丢。现在在 UI 内的采样偏移
+   取自相位表本身:
+       sampleOffset = round(top.PhaseInterpolator.getLocalIndex())
+   在 PiNonideal='ideal' 下该表恰为恒等表, 所以此式等于 CodeWrapped, 改动是逐比特
+   no-op —— 保留 'ideal' 正是为了让旧行为仍可复现、可做 A/B。
+3. 定量(PiNumBit=7, 128 sample/UI, 1 LSB = 1 code = 1 个波形样点):
+   ab_constant 相位表 INL = ±1.445352 LSB, 即 2.890703 LSB pk-pk, RMS 1.037876 LSB。
+   缓存按整数样点寻址, 故偏移被 round, INL 被量化到 ±0.5 LSB。实际存活的扰动是
+   round(localIndex)-code ∈ {-1, 0, +1}, 分别覆盖 52/24/52 个 code, 也就是
+   **128 个 code 里有 104 个的采样点相对旧的理想 PI 地址移动了整整一个样点(1/128 UI)**。
+   同一个 round 会把 0.7 LSB pk-pk 以下的 INL 完全抹平: 这是本 harness 整数寻址的
+   限制, 不是 cdr_pi 的限制; 想研究更细的 INL 必须对缓存做分数插值, 本次没做。
+4. 已否决(用户确认): 不做 PiInlPkPkLsb 幅度缩放旋钮。原生 2.891 LSB pk-pk 就是物理
+   模型本身, 合成缩放因子只会诱使报告一个整数寻址其实表示不出来的 INL 水平。
+5. 五张收敛图(相位/dLev/FFE 抽头/环路频率态/PI 跟踪误差)新增两级降档标记:
+   stage-1 绿色(带 SNR 阈值), stage-2 紫色, 两者都 NaN-safe(没发生就不画)。stage-2
+   标签写的是**所armed的门控名**(gate: freq-state|center-touch), 不写成 "lock":
+   只有 freq-state 门才是锁定判据的一个分量, center-touch 是独立的码域判据。
+6. 新增 result 字段: PiNonideal / FfeGateCriterion / Stage1SettleBlock /
+   Stage2GateBlock / AdcBlockUi / CdrFfePreTapCount。前两个 block 字段取自 monitor
+   自己的闩锁, 不是离线反推, 所以不可能和当次真正armed的判据不一致。
+
+--------------------------------------------------------------------------------
+十、本次运行配置
+--------------------------------------------------------------------------------
+FreqOffsetPpm = -100 , PiNonideal = ab_constant , FfeGateCriterion = auto
+  -> 非零 ppm 解析为 freq-state
+NumBlock = 15000 (runner 默认) , StartPhaseStep = 4 => 32 个起始相位 0:4:127
+LockWindowBlocks = 2000 , LockMode = freq+rotation
+SnrSettleThresholdDb = 15 dB , alpha = 1/128 , SnrSettleMinBlock = 200
+其余全部为 runner 默认(Kp=8, Ki=0.03, MaxDeltaCode=1, FrequencyLimit=4,
+  dLev 0.5->0.1->0.02, FFE 0.001->2e-4, planB 冷启动, 缓存
+  channel_ctle_cosim_prbs22)。注意这里的 NumBlock 是 15000, 上文第四/五节是 8000,
+  两者不可直接逐块对比。
+
+--------------------------------------------------------------------------------
+十一、关键结果 (-100 ppm, 32 相位)
+--------------------------------------------------------------------------------
+- 32/32 起始相位锁定, AllPhaseLock=1, CommonLockPhase=107, 离散度 3 码。
+- FreqStateMean 0.819166..0.819308 (理论期望 0.819200, 最大偏差 ~1.1e-4)。
+- 旋转周期 156.091..156.182 block/UI (理论 156.25), 周期 CoV 0.0029..0.0088。
+- Stage1Block(SNR EWMA 到 15 dB) 2716..4216, 32/32 都触发。
+- LockBlock 4966..6458; Stage2Block 32/32 触发, 同为 4966..6458。
+- SlewSaturated 全 0; mean|DeltaCode| 0.819..0.820; mean|PendingCode| 0.1805..0.2720。
+- 离线三眼所选行(最慢锁定捕获行): idx=19, start phase=72,
+  CaptureBlock(仅上下文)=4104, SNR settle=4216, lock=6458, freq-only lock=6458,
+  stage-2=6458; marker(snr/lock/final)=101.906/104.156/105.562 码,
+  span=2/2/3, startUi=270082/413570/958274,
+  MarkerDeltaSettleToFinal=3.65625, MarkerDeltaLockToFinal=1.40625,
+  三张眼图全部 valid。
+
+PI 非理想的代价(受控 A/B, 除相位表外全部相同, 32 相位, SaveOutputs=false):
+  ideal      : 32/32 all=1 common=106 spread=3 freqMean 0.819123..0.819264
+               stage1 2693..4076 stage2 4942..6382 |Pending| 0.0855..0.1325
+  ab_constant: 32/32 all=1 common=107 spread=3 freqMean 0.819166..0.819308
+               stage1 2716..4216 stage2 4966..6458 |Pending| 0.1805..0.2720
+结论: 非理想 PI **不影响**本方向的全相位锁定与跟踪精度, 锁定相位中心移 1 码、离散度
+不变; 唯一实质变化是 slew 先兆 mean|PendingCode| 约 2.1 倍。注意有频偏时 pending
+均值非零是**结构性**的(需要的速率 0.8192 code/block 是分数, 而 PI 在 MaxDeltaCode=1
+下只能整码移动), 不能据此说环路未收敛; 判定依据是 SlewSatPendingTol=0.5 这个门限。
+
+--------------------------------------------------------------------------------
+十二、限制与遗留
+--------------------------------------------------------------------------------
+- INL 被整数寻址量化成 {-1,0,+1} 三级台阶, 亚 LSB INL 在本 harness 中无法表示。
+- 本次未在非理想 PI 下重新探负方向的 ppm 边界(只确认 -100 ppm 达标)。
+- 上文第七节写的 "本目录 Stage2Block 全为 n/a" 只适用于旧产物; 本次为 32/32 触发。
+- ppm_lock_summary.txt 原先称 freq-state 的 Stage2Block 与 LockBlock "by
+  construction" 相等, 这个说法过强: 非零 ppm 的判据是合取, 还要求
+  detectRotationPeriodLock, 因此正确的结构性结论只能是 Stage2Block <= LockBlock。
+  该文件现已改为这样表述, 并打印实测一致性(本工况 32/32 行精确相等, 0 行更早)。
+
+--------------------------------------------------------------------------------
+十三、复现方法
+--------------------------------------------------------------------------------
+从套件目录:
+    setup_cdr_three_loop_wi_ppm_paths('all');
+    r = cdr_three_loop_ppm('FreqOffsetPpm', -100, 'StartPhaseStep', 4);
+    make_ppm_stage_eyes('ResultDirs', {'cdr_three_loop_ppm_m100'});
+第一条即本节结果(其余全默认: NumBlock=15000, PiNonideal='ab_constant',
+FfeGateCriterion='auto'); 第二条离线重建三眼并刷新 ppm_lock_summary.txt。
+恢复旧的理想 PI 行为(逐比特等价于本次改动之前):
+    cdr_three_loop_ppm('FreqOffsetPpm', -100, 'StartPhaseStep', 4, ...
+        'PiNonideal', 'ideal');
+快速 smoke:
+    cdr_three_loop_ppm('FreqOffsetPpm', -100, 'NumBlock', 4000, ...
+        'StartPhaseList', [0 64], 'SaveOutputs', false);
+注意 StartPhaseStep 默认是 16(只有 8 个相位), 本套件历史上的"全相位"指 32 相位,
+必须显式传 4。重跑同一条命令可复现相同的汇总数值(确定性)。
 ================================================================================

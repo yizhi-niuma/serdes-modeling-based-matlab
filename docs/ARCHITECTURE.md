@@ -205,14 +205,16 @@ or the TI ADC connection. This describes the legacy component-injection path onl
 - Models one block of loop dead time caused by the FFE precursor look-ahead: `processBlock` returns `HasOutput = false` while the pipeline fills, and `flush` drains the final pending block with zero future samples.
 - Runs the v3 block order exactly: FFE -> slicer -> MMPD -> voter -> loop -> PI -> mu downshift -> dLev -> FFE gate -> FFE SS-LMS write.
 - The FFE gate supports `freeze` (stop writing, keep computing raw deltas) and `pvt-track` (keep writing at a collapsed step size). Both the gate and the mu-downshift decisions live in `loop_monitor`, which only reports events; `cdr_top` applies the actions.
-- The mu downshift is two-stage (2026-09-25). Stage 1 (`capture -> settle`) drops the dLev and FFE steps together and is gated by `SettleGate`: `'snr'` (default) uses the averaged decision-directed eye SNR through `loop_monitor.updateSnrSettle`, `'dlev'` selects the legacy outer-dLev displacement test. Stage 2 (`settle -> PVT tracking`) is the existing phase-band lock gate and now drops both loops, FFE to `FfeStepSizePvtTrack` and dLev to `DlevStepSizePvtTrack`. The per-block eye FOM is `cdr_top.blockSnrDb`, computed from the `decision`/`sliceError` pair `slicePam4` already returns, so no new data path exists.
+- The mu downshift has three step-size tiers and two events: `capture -> settle -> pvt-track`. In the ppm suite, dLev uses `0.5 -> 0.1 -> 0.02`, while the FFE uses `0.001 -> 2e-4 -> 2e-4`; at those defaults the second event changes only dLev. Stage 1 remains gated by `SettleGate`: `'snr'` (default) uses the averaged decision-directed eye SNR through `loop_monitor.updateSnrSettle`, while `'dlev'` selects the legacy outer-dLev displacement test. Stage 2 uses the selectable `FfeGateCriterion`: `'center-touch'` preserves the original unwrapped-PI-code modal test and is the `cdr_top.defaultConfig` value, while `'freq-state'` uses the online frequency-state lock criterion. The per-block eye FOM is `cdr_top.blockSnrDb`, computed from the `decision`/`sliceError` pair `slicePam4` already returns, so no new data path exists.
 - `Detector` accepts `bbpd`, `mmpd` and the `ssmmpd` alias; the alias normalizes to `mmpd` because `cdr_pd.mmpd` already requires symbolized inputs and there is no second numerical path.
 - Every loop parameter is injected explicitly; missing or invalid fields raise `cdr_top:Invalid<Field>`. `cdr_top.defaultConfig` returns the current v3 aligned starting point.
 - Each block output also exports the loop filter's pre-quantization continuous state (`LoopControl`, `LoopFrequencyState`, `LoopCodeResidue`, `LoopPendingCode`). The integer PI code hides sub-code motion, so these are what distinguish a genuine limit-cycle dither from a slow drift.
 
 `ffe_freeze_monitor.m` was renamed to `loop_monitor.m` and moved into `src/CDR`. Besides the FFE write gate it now also owns the causal dLev settle detector (a bounded ring buffer), so `cdr_top` no longer keeps its own `SettleDone` flag or an unbounded dLev history. The monitor only decides; `cdr_top` applies the mu downshift and the gate action.
 
-`loop_monitor` carries three independent causal detectors after 2026-09-25: the FFE write gate, the legacy dLev settle detector, and an eye-quality (SNR) settle detector. The third is a one-shot trigger on an EWMA of a per-block decision-directed SNR in dB, so its memory is a single scalar. It is enabled explicitly through `enableSnrSettle(thresholdDb, alpha, minBlock)` rather than through extra constructor arguments, which keeps the documented 4/6 constructor arity valid for every existing caller. It exists because the dLev detector is a displacement test over a fixed window, i.e. an implicit drift-rate threshold of `DlevSettleTol/DlevSettleWindow`, which a slowly ramping dLev satisfies while the eye is still closed. Averaging is part of the criterion, not decoration: per-block SNR readings of an unlocked loop whose PI is rotating sweep the eye centre periodically and reach open-eye values.
+`loop_monitor` now carries four independent causal detectors: the original FFE center-touch write gate, the legacy dLev settle detector, the eye-quality (SNR) settle detector, and the frequency-state lock gate. The SNR detector is a one-shot EWMA trigger with one scalar of memory; it exists because the dLev displacement test is an implicit drift-rate threshold that a slowly ramping dLev can satisfy while the eye is still closed. The frequency-state gate is enabled separately by `enableFreqStateGate(windowBlocks, expectedRate, meanHalfDiffTol, stdTol, rateTol, minBlock)`. It retains a bounded `windowBlocks` ring, orders the full window oldest-to-newest, and passes that window to the same static `detectFrequencyStateLock` used offline. Thus online and offline frequency-state verdicts are identical by construction for the same trailing window; there is no duplicate criterion. Non-finite samples are skipped and counted in `FreqGateSkippedCount`. Like `enableSnrSettle`, this separate enable call preserves the existing 4/6-argument constructor contract.
+
+`cdr_top` validates `FfeGateCriterion` (`'center-touch'` or `'freq-state'`) plus `FfeGateFreqWindowBlocks`, `FfeGateFreqExpectedRate`, `FfeGateFreqMeanHalfDiffTol`, `FfeGateFreqStdTol`, `FfeGateFreqRateTol`, and `FfeGateFreqMinBlock`. Its private `gateLatched()` selects `Monitor.Frozen` or `Monitor.FreqGateDone` according to the active criterion. Both `GateEngaged` and the `'freeze'`-mode FFE write inhibit use this helper; direct reads of `Monitor.Frozen` would be permanently false for a frequency-state gate.
 
 ## CDR/dlev/FFE validation runner layout
 
@@ -240,6 +242,91 @@ session-local runtime paths: the suite root, `helpers`, the current runner direc
 
 This reorganization changes paths and file placement only, not model algorithms.
 The suite `README.md` is the current invocation and optional-scope guide.
+
+## Ppm offline eye-set layering
+
+The frequency-offset validation suite at
+`validation/CDR/test_cdr_three_loop_wi_ppm` has a deliberately thin offline
+N-anchor-plus-tail eye path:
+
+```text
+make_ppm_stage_eyes.m
+  -> helpers/build_ppm_eye_set.m
+       -> ../test_cdr_dlev_cdrffe/helpers/build_cdr_ffe_eye.m
+  -> helpers/plot_ppm_eye_set.m
+  -> helpers/write_ppm_lock_summary_txt.m
+```
+
+- `make_ppm_stage_eyes.m` is the saved-result policy driver. It resolves one or
+  more result directories, loads `cdr_three_loop_ppm_result.mat` and its
+  CTLE cache segment, selects the saved start-phase row, replays
+  SNR settle and the pass/fail lock criterion, and supplies those anchors to the
+  builder. With `SaveOutputs = true`, it writes three standalone figures, one
+  1500x1500 three-row comparison, `ppm_stage_eye_summary.csv`, and the all-phase
+  `ppm_lock_summary.txt`; `CaptureBlock` remains context only.
+- `helpers/build_ppm_eye_set.m` owns ppm-specific address/window policy. It accepts
+  N anchors plus a trailing tail, reconstructs every block address including
+  `DriftSampleTrace`, checks its sub-UI code exactly against
+  `EyePhaseUnwrappedTrace`, selects all windows,
+  and chooses each anchor-block snapshot plus the final-block snapshot.
+- The sibling `build_cdr_ffe_eye.m` remains the single implementation of ADC
+  quantization, fixed-coefficient FFE application, and 2-UI density formation.
+  The ppm suite does not duplicate that numerical layer.
+- `helpers/plot_ppm_eye_set.m` is M-row aware and writes M standalone figures plus
+  one intentionally large 1500x1500 comparison. Each row carries its own tap
+  snapshot and marks tracked physical eye phase rather than the raw PI ramp.
+- `helpers/write_ppm_lock_summary_txt.m` writes the sole lock summary,
+  `ppm_lock_summary.txt`, as a plain-ASCII human-readable strict superset of the
+  former CSV columns: main and supplementary tables, definitions, aggregates,
+  and the stage-2 note. For current MATs it uses the recorded
+  `result.Stage2GateBlock`; it replays the center-touch gate only for older MATs
+  without that field. It owns reporting only and does not alter the simulation.
+  The distinct `ppm_stage_eye_summary.csv` is still written by
+  `make_ppm_stage_eyes.m`.
+
+The second anchor is a diagnostic replay of the verdict, not a live stage-2
+trigger. Since `LockWindowBlocks = 2000`, it means the first block at which the
+trailing 2000-block window satisfies the criterion and cannot be less than 2000.
+For nonzero ppm, verdict replay uses `detectFrequencyStateLock` and, when
+applicable, `detectRotationPeriodLock`; zero ppm uses
+`detect_pi_center_touch_lock`.
+
+This separation exposed the former control-path disconnect: pass/fail lock had
+moved to the frequency domain for ppm, but stage 2 still used only the raw-code
+center-touch gate. That center-touch path is enabled at `+/-100 ppm` yet cannot
+fire because the PI code ramps instead of dwelling on one code. The implemented
+runner now resolves `FfeGateCriterion = 'auto'` to `'center-touch'` at exactly
+0 ppm and `'freq-state'` otherwise, using the same frequency-state window and
+tolerances as the verdict. The pass/fail verdict itself remains separate: for
+ppm, `Locked` still requires both `detectFrequencyStateLock` and
+`detectRotationPeriodLock`, whereas stage 2 consumes only its selected gate.
+Consequently `LockBlock` and the recorded `Stage2GateBlock` are distinct
+milestones.
+
+The ppm harness owns the sampling address, and that address is now taken through
+the PI phase table: the in-UI offset is `round(PhaseInterpolator.getLocalIndex())`
+rather than the raw `CodeWrapped`, so `cdr_pi`'s nonideal table actually reaches
+the waveform instead of being computed and discarded. `cfg.PiNonideal` is a
+runner option (`'ideal'` | `'ab_constant'`, default `'ab_constant'`) forwarded
+unchanged to `cdr_top`; the `cdr_pi` table model and the `cdr_top` validation
+were already present. Because `'ideal'` is the identity table, that mode is
+bit-exact with the previous raw-code addressing, which keeps the two modes
+directly A/B-comparable. The `cdr_top` boundary is unaffected: the DSP core
+still sees only zero-centred ADC code in and sampling phase out, and knows
+nothing about either the cache or the ppm drift.
+
+Per-start convergence figures are annotated by a local `drawStageMarkers`, which
+draws the two mu-downshift milestones (`Stage1SettleBlock`, `Stage2GateBlock`)
+on any block-axis plot. Both inputs are NaN-safe, so a milestone that never
+fired is simply omitted rather than drawn at a fabricated position. The stage-2
+label names the armed gate rather than calling the event a lock, because only
+the `freq-state` gate is a component of the lock criterion.
+
+`setup_cdr_three_loop_wi_ppm_paths.m` exposes
+`paths.HelpersDir = fullfile(paths.Root, 'helpers')`, validates that directory,
+and adds it to the session-local runtime path. The setup also adds the sibling
+helper directory for shared eye construction and zero-ppm lock selection,
+without using `genpath`, changing `pwd`, or calling `savepath`.
 
 ## Missing top-level CDR blocks
 

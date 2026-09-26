@@ -1,0 +1,134 @@
+================================================================================
+CDR three-loop ppm lock summary : cdr_three_loop_ppm_p0
+================================================================================
+Runner           : cdr_three_loop_ppm
+FreqOffsetPpm    : +0
+NumBlocks        : 15000      StartPhases : 32
+LockMode         : center-touch     LockWindowBlocks : 2000
+ExpectedFreqState        : -0 code/block
+ExpectedRotationPeriod   : NaN block/UI   (applicable = 0)
+SnrSettleThresholdDb     : 15 dB   alpha = 0.0078125   minBlock = 200
+FfeGateCriterion : center-touch   (stage-2 mu downshift gate)
+PiNonideal       : ab_constant
+Generated        : 2026-09-26 15:24:35
+
+Column definitions
+  StartPhase      initial PI phase code, 0..SamplePerSymbol-1
+  Locked          pass/fail verdict of the lock criterion for this start phase
+  FreqStateMean   tail-window mean loop frequency state, code/block
+  RotationPeriod  tail-window mean PI rotation period, block per UI slip
+  LockPhase       tail-window eye-phase code, mod(round(mean(eyePhase)), SPS)
+  Stage1Block     first block whose SNR EWMA reaches the settle threshold
+                  (stage-1 mu downshift for the dLev and FFE loops)
+  Stage1Phase     eye-phase code at Stage1Block
+  LockBlock       first block at which the lock criterion above is satisfied,
+                  evaluated with the same detectors and tolerances as the
+                  verdict over a trailing LockWindowBlocks window. Because the
+                  window must be full, this value can never be below
+                  LockWindowBlocks.
+  LockPhaseAtBlk  eye-phase code at LockBlock
+  Stage2Block     block at which the stage-2 mu downshift actually fired, i.e.
+                  the settle -> PVT-track handover of the dLev and FFE loops.
+                  The armed gate is FfeGateCriterion above:
+                    freq-state    the lock criterion itself (frequencyState mean
+                                  within +/-tolerance), so Stage2Block equals
+                                  LockBlock by construction.
+                    center-touch  one raw unwrapped PI code recurring often
+                                  enough to nominate a centre. A locked phase
+                                  sitting off that centre can keep this gate
+                                  from ever latching, reported as n/a.
+  All phase codes are eye phase = unwrapped PI code + drift, wrapped to one UI.
+
+--------------------------------------------------------------------------------
+ idx  StartPhase  Locked  FreqStateMean  RotationPeriod  LockPhase  Stage1Block  Stage1Phase  LockBlock  LockPhaseAtBlk  Stage2Block
+--------------------------------------------------------------------------------
+   1           0       1            n/a             n/a        112          527          111       2000             111         3791
+   2           4       1            n/a             n/a        112          534          111       2000             111         3739
+   3           8       1            n/a             n/a        112          550          110       2000             111         8048
+   4          12       1            n/a             n/a        112          553          110       2000             111         5762
+   5          16       1            n/a             n/a        112          558          111       2000             111         5342
+   6          20       1            n/a             n/a        112          569          110       2000             111          n/a
+   7          24       1            n/a             n/a        112          559          111       2000             111         3706
+   8          28       1            n/a             n/a        112          560          111       2000             112         3873
+   9          32       1            n/a             n/a        112          573          110       2000             111         3802
+  10          36       1            n/a             n/a        113         1028          111       2507             113         3913
+  11          40       1            n/a             n/a        114          972          113       2080             113         3512
+  12          44       1            n/a             n/a        114          932          112       2055             113         3580
+  13          48       1            n/a             n/a        113          897          112       2305             113         4170
+  14          52       1            n/a             n/a        113          864          111       2519             112         5690
+  15          56       1            n/a             n/a        113          785          111       2031             112         4606
+  16          60       1            n/a             n/a        113          617          112       2063             112          n/a
+  17          64       1            n/a             n/a        113          566          112       2000             113         4089
+  18          68       1            n/a             n/a        113          546          112       2000             113         4026
+  19          72       1            n/a             n/a        113          540          112       2000             113         4193
+  20          76       1            n/a             n/a        113          537          112       2000             113         4369
+  21          80       1            n/a             n/a        113          538          112       2000             113         4543
+  22          84       1            n/a             n/a        113          543          112       2000             113         4991
+  23          88       1            n/a             n/a        113          549          112       2000             114         4543
+  24          92       1            n/a             n/a        113          550          112       2006             112         4955
+  25          96       1            n/a             n/a        113          560          112       2000             113         4081
+  26         100       1            n/a             n/a        113          549          112       2000             113         4354
+  27         104       1            n/a             n/a        113          538          112       2000             113         4335
+  28         108       1            n/a             n/a        113          532          111       2000             113         3845
+  29         112       1            n/a             n/a        113          519          110       2096             112          n/a
+  30         116       1            n/a             n/a        112          501          112       2000             112         4481
+  31         120       1            n/a             n/a        112          506          111       2000             111         4111
+  32         124       1            n/a             n/a        112          507          111       2000             111         3961
+--------------------------------------------------------------------------------
+
+Supplementary columns (everything else the CSV carried)
+--------------------------------------------------------------------------------
+ idx  StartPhase  FreqLock  RotationLock  SlewSaturated  AcquisitionBlock  RotationCov  DeltaCodeMeanAbs  PendingCodeMeanAbs
+--------------------------------------------------------------------------------
+   1           0         0             0              0                40          n/a               n/a                 n/a
+   2           4         0             0              0                48          n/a               n/a                 n/a
+   3           8         0             0              0                62          n/a               n/a                 n/a
+   4          12         0             0              0                72          n/a               n/a                 n/a
+   5          16         0             0              0                79          n/a               n/a                 n/a
+   6          20         0             0              0                86          n/a               n/a                 n/a
+   7          24         0             0              0               106          n/a               n/a                 n/a
+   8          28         0             0              0               129          n/a               n/a                 n/a
+   9          32         0             0              0               168          n/a               n/a                 n/a
+  10          36         0             0              0               825          n/a               n/a                 n/a
+  11          40         0             0              0               785          n/a               n/a                 n/a
+  12          44         0             0              0               735          n/a               n/a                 n/a
+  13          48         0             0              0               674          n/a               n/a                 n/a
+  14          52         0             0              0               620          n/a               n/a                 n/a
+  15          56         0             0              0               519          n/a               n/a                 n/a
+  16          60         0             0              0               288          n/a               n/a                 n/a
+  17          64         0             0              0               238          n/a               n/a                 n/a
+  18          68         0             0              0               215          n/a               n/a                 n/a
+  19          72         0             0              0               212          n/a               n/a                 n/a
+  20          76         0             0              0               209          n/a               n/a                 n/a
+  21          80         0             0              0               211          n/a               n/a                 n/a
+  22          84         0             0              0               221          n/a               n/a                 n/a
+  23          88         0             0              0               234          n/a               n/a                 n/a
+  24          92         0             0              0               238          n/a               n/a                 n/a
+  25          96         0             0              0               244          n/a               n/a                 n/a
+  26         100         0             0              0               220          n/a               n/a                 n/a
+  27         104         0             0              0               210          n/a               n/a                 n/a
+  28         108         0             0              0               185          n/a               n/a                 n/a
+  29         112         0             0              0               143          n/a               n/a                 n/a
+  30         116         0             0              0                 1          n/a               n/a                 n/a
+  31         120         0             0              0                 6          n/a               n/a                 n/a
+  32         124         0             0              0                23          n/a               n/a                 n/a
+--------------------------------------------------------------------------------
+
+Aggregate
+  Locked                : 32 / 32
+  AllPhaseLock          : 1       CommonLockPhase : 113   spread : 2
+  FreqStateMean         : min n/a  max n/a   (expected -0)
+  Stage1Block           : min 501  max 1028   (n/a count 0)
+  LockBlock             : min 2000  max 2519   (n/a count 0)
+  Stage2Block fired     : 29 / 32 start phases
+
+Note on the stage-2 mu downshift
+  The stage-2 gate fired for 29 of 32 start phases, from block 3512
+  through block 8048.
+  The armed gate is center-touch, which is independent of the lock
+  criterion: LockBlock is a lock milestone whereas Stage2Block is the
+  downshift event, so the two columns are not the same milestone and need
+  not agree.
+  3 start phase(s) never latched the gate (n/a above); those phases
+  ran to the end at the settle step size.
+================================================================================

@@ -40,14 +40,15 @@ paths.Root = rootDir;
 paths.CdrValidationDir = cdrValidationDir;
 paths.RepoRoot = repoRoot;
 paths.RunnerDir = fullfile(rootDir, 'src', 'cdr_three_loop_ppm');
+paths.HelpersDir = fullfile(rootDir, 'helpers');
 paths.SiblingSuiteDir = fullfile(cdrValidationDir, 'test_cdr_dlev_cdrffe');
 paths.SiblingHelpersDir = fullfile(paths.SiblingSuiteDir, 'helpers');
 paths.ResultDir = fullfile(rootDir, 'result');
 paths.AdcSourceDir = fullfile(repoRoot, 'src', 'ADC', 'TI_ADC');
 paths.CdrSourceDir = fullfile(repoRoot, 'src', 'CDR');
 
-runtimeDirs = {paths.Root, paths.RunnerDir, paths.SiblingHelpersDir, ...
-    paths.AdcSourceDir, paths.CdrSourceDir};
+runtimeDirs = {paths.Root, paths.RunnerDir, paths.HelpersDir, ...
+    paths.SiblingHelpersDir, paths.AdcSourceDir, paths.CdrSourceDir};
 for index = 1:numel(runtimeDirs)
     requireDirectory(runtimeDirs{index});
 end
@@ -56,6 +57,7 @@ end
 % sibling suite convention. The setup never changes pwd or calls savepath.
 addpath(paths.Root, '-begin');
 addpath(paths.RunnerDir, '-begin');
+addpath(paths.HelpersDir, '-begin');
 addpath(paths.SiblingHelpersDir, '-begin');
 addpath(paths.CdrSourceDir, '-begin');
 addpath(paths.AdcSourceDir, '-begin');

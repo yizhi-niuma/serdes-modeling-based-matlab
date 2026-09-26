@@ -353,6 +353,73 @@ This document is derived only from `src/TX+Channel`, `src/AFE`, `src/ADC`, and `
 - SS-LMS converges to the same Wiener solution as standard LMS in expectation, but the convergence path is noisier and the steady-state misadjustment is larger for a given effective update rate. The normalized post-cursor residual (`post1`) is typically 0.01–0.03 larger than the MMSE LMS result.
 - The `StepSize` for SS-LMS must be approximately 100–300× larger than for standard LMS to achieve comparable convergence speed, because the standard LMS gradient magnitude includes a factor of `O(error_rms * regressor_rms)` that SS-LMS removes.
 
+### Offline ppm three-eye assumptions and limitations (2026-09-26)
+
+- `validation/CDR/test_cdr_three_loop_wi_ppm/make_ppm_stage_eyes.m`
+  reconstructs an N-anchor-plus-tail eye set from saved waveform and per-block
+  state. It does not rerun the CDR or reproduce its coefficient-update
+  trajectory.
+- The current three rows are stage-1 SNR settle, first satisfied lock criterion,
+  and final tail. `CaptureBlock` is retrospective context only and is not an eye
+  anchor. SNR settle replays the live EWMA recurrence (`alpha = 1/128`, 15 dB,
+  minimum block 200); lock replays the verdict's own detectors and tolerances.
+- `LockWindowBlocks = 2000` means the second anchor cannot precede block 2000.
+  It is the first complete trailing window that satisfies the criterion, not the
+  physical instant at which the loop locked.
+- Each row uses exactly one fixed coefficient set across its complete data
+  window: each anchor row uses its anchor-block snapshot and the final row uses
+  the final-block snapshot. Although the taps were adapting during the original
+  run, neither row applies the historical block-by-block tap sequence. Each is
+  therefore an offline fixed-coefficient view of that window, not a faithful
+  replay of the time-varying equalizer.
+- Marker statistics use unwrapped tracked-eye phase (raw unwrapped PI code plus
+  drift) before one-UI wrapping. The eye-density matrix is assembled from
+  overlapping 2-UI traces. Adjacent density columns/windows reuse samples and
+  must not be interpreted as independent observations or used to inflate an
+  effective sample count.
+- Row 2 is not evidence that the live stage-2 gate fired for the runs that
+  produced it historically. Those saved MATs were made with the center-touch
+  gate; at `+/-100 ppm`, raw unwrapped PI code ramps at `0.8192 code/block`, so
+  that gate fired on 0/32 phases at either offset. Current runner default
+  `FfeGateCriterion = 'auto'` selects the frequency-state gate at nonzero ppm
+  and retains center-touch at exactly zero. As of the 2026-09-26 32-start
+  regeneration the three result directories **were** rerun under `auto`, so
+  their stage-2 fields now describe the selected gate (32/32 fired at
+  `+/-100 ppm`, 29/32 at 0 ppm); the row-2 label still means "after the lock
+  criterion is satisfied" and never "after the second downshift".
+
+### PI nonideality assumptions in the ppm suite
+
+- The suite's default is a nonideal phase interpolator: `PiNonideal =
+  'ab_constant'`, the `cdr_pi` `a+b=1`/`atan2` table. `'ideal'` remains
+  selectable and is bit-exact with the pre-2026-09-26 harness behaviour.
+- PI nonideality is only observable because the harness takes its in-UI
+  sampling offset from the phase table (`round(getLocalIndex())`) rather than
+  from the raw code. Any future sampler that re-derives the offset from
+  `CodeWrapped` silently reverts to an ideal PI regardless of the
+  configuration.
+- Quantified at `PiNumBit = 7` with 128 samples/UI, where 1 LSB = 1 code = 1
+  waveform sample: INL is `+/-1.445352 LSB` (2.890703 LSB pk-pk, 1.037876 LSB
+  RMS). The cache is addressed in integer samples, so the offset is rounded and
+  INL is quantized to `+/-0.5 LSB`. The surviving perturbation is
+  `round(localIndex) - code` in `{-1, 0, +1}` over 52/24/52 codes: 104 of 128
+  codes sample one sample away from the ideal-PI address, and 24 codes are
+  unperturbed.
+- Consequently this harness cannot represent INL below roughly 0.7 LSB pk-pk,
+  and it represents the 2.891 LSB pk-pk table only as a three-level staircase
+  rather than a smooth curve. Studying finer INL requires fractional
+  interpolation of the cached waveform, which is not implemented; this is the
+  same limitation already recorded as "no sub-sample interpolation in the TI
+  ADC sampling path".
+- A nonzero mean `|PendingCode|` under a frequency offset is structural and is
+  not by itself evidence of a slew-limited or unconverged loop. The required
+  rate at `+/-100 ppm` is `0.8192 code/block`, a fraction, while the PI moves
+  whole codes under `MaxDeltaCode = 1`, so a fractional backlog always exists.
+  Only the `SlewSatDeltaFrac`/`SlewSatPendingTol` guards distinguish that
+  structural backlog from genuine saturation. The 2026-09-23 statement that a
+  persistently nonzero pending code implies non-convergence applies to the
+  zero-offset case.
+
 ## Current validity limits
 
 - The digital CDR component chain and one validation-only Channel+CTLE+TI-ADC+fixed-FFE+MMPD loop are integrated at block rate. This validates deterministic initial-phase acquisition only; tracking bandwidth, jitter transfer, jitter tolerance, and BER remain unvalidated.
@@ -415,9 +482,13 @@ This document is derived only from `src/TX+Channel`, `src/AFE`, `src/ADC`, and `
   fires inside the closed-eye window and breaks `-100 ppm` acquisition (0/8),
   while `>= 12 dB` works. 15 dB sits ~1.9 dB above the observed closed-eye EWMA
   peak (13.02..13.12 dB) and ~6.6 dB below the open-eye level (21.6..24.4 dB).
-- Stage 2 (`settle -> PVT tracking`) assumes the existing phase-band lock gate
-  (`FfeGate*`, `updateFfeGate`) is a valid lock indicator; that assumption is
-  unchanged, only its action was extended to drop the dLev step as well.
+- The schedule has three tiers and two events. In the ppm suite dLev uses
+  `0.5 -> 0.1 -> 0.02`, while FFE uses `0.001 -> 2e-4 -> 2e-4`; therefore the
+  stage-2 (`settle -> PVT tracking`) event changes only dLev at the defaults.
+  Its criterion is selectable: center-touch is valid for the stationary
+  zero-ppm code path, while frequency-state lock is used by the runner at
+  nonzero ppm. This criterion switch does not change the pass/fail lock verdict,
+  which additionally requires rotation-period lock for ppm runs.
 - The capture-mu FFE step is assumed to be bounded by **cursor walk**, not by
   convergence speed alone: with `FfeAdaptEnableMask = [1 1 0 1 1 1]` the main tap
   is frozen, so the loop can only reshape the pulse through pre/post taps, which

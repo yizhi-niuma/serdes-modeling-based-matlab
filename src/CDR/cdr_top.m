@@ -326,6 +326,18 @@ classdef cdr_top < handle
             cfg.FfeGateMinEvents = 100;
             cfg.FfeGateBandHalfWidth = 3;
             cfg.FfeGateStartBlock = 1;
+            % 第二级降档的门控判据。'center-touch' 是码域众数检测，只在零频偏
+            % 下成立：有 ppm 时 PI code 持续爬升、不会停驻在单一码上，该门控
+            % 永远不会触发。'freq-state' 改用环路积分频率态的平坦性判据，它与
+            % 离线 loop_monitor.detectFrequencyStateLock 同源，在任意 ppm
+            % (含 0) 下都有意义。默认保持 'center-touch' 以维持既有行为。
+            cfg.FfeGateCriterion = 'center-touch';
+            cfg.FfeGateFreqWindowBlocks = 2000;
+            cfg.FfeGateFreqExpectedRate = NaN;
+            cfg.FfeGateFreqMeanHalfDiffTol = 1e-3;
+            cfg.FfeGateFreqStdTol = 5e-3;
+            cfg.FfeGateFreqRateTol = Inf;
+            cfg.FfeGateFreqMinBlock = 1;
         end
 
         function [decision, sliceError, dataSymbol, errorBit] = ...
@@ -367,6 +379,22 @@ classdef cdr_top < handle
     end
 
     methods (Access = private)
+        function latched = gateLatched(obj)
+            %GATELATCHED 第二级门控是否已闩锁(与所选判据一致)。
+            %
+            % center-touch 的闩锁是 loop_monitor.Frozen，freq-state 的闩锁是
+            % FreqGateDone。两者必须按当前判据分别读取：早期版本固定读
+            % Frozen，在 freq-state 下它永远为 false，会让 'freeze' 模式的
+            % FFE 写抑制和 GateEngaged 报告全部失效。
+            if ~obj.Config.FfeGateEnable
+                latched = false;
+            elseif strcmp(obj.Config.FfeGateCriterion, 'freq-state')
+                latched = obj.Monitor.FreqGateDone;
+            else
+                latched = obj.Monitor.Frozen;
+            end
+        end
+
         function constructConfigured(obj, config)
             cfg = obj.validateConfig(config);
             obj.Config = cfg;
@@ -392,6 +420,14 @@ classdef cdr_top < handle
             if strcmp(cfg.SettleGate, 'snr')
                 obj.Monitor.enableSnrSettle(cfg.SnrSettleThresholdDb, ...
                     cfg.SnrSettleAlpha, cfg.SnrSettleMinBlock);
+            end
+            if cfg.FfeGateEnable && strcmp(cfg.FfeGateCriterion, 'freq-state')
+                obj.Monitor.enableFreqStateGate( ...
+                    cfg.FfeGateFreqWindowBlocks, ...
+                    cfg.FfeGateFreqExpectedRate, ...
+                    cfg.FfeGateFreqMeanHalfDiffTol, ...
+                    cfg.FfeGateFreqStdTol, cfg.FfeGateFreqRateTol, ...
+                    cfg.FfeGateFreqMinBlock);
             end
             obj.resetState();
         end
@@ -506,8 +542,18 @@ classdef cdr_top < handle
 
             gateTriggered = false;
             if cfg.FfeGateEnable
-                unwrapped = uiSlip * cfg.SamplesPerSymbol + codeWrapped;
-                gateTriggered = obj.Monitor.updateFfeGate(unwrapped, blockIndex);
+                if strcmp(cfg.FfeGateCriterion, 'freq-state')
+                    % 环路滤波器已在本块更新过(见上方 LoopFilter.update)，
+                    % 因此这里读到的积分频率态与随后记录进 trace 的
+                    % LoopFrequencyState 是同一个值，在线判定与离线判据
+                    % 逐块对齐。
+                    gateTriggered = obj.Monitor.updateFreqStateGate( ...
+                        blockIndex, obj.LoopFilter.FrequencyState);
+                else
+                    unwrapped = uiSlip * cfg.SamplesPerSymbol + codeWrapped;
+                    gateTriggered = obj.Monitor.updateFfeGate(unwrapped, ...
+                        blockIndex);
+                end
                 if gateTriggered
                     obj.GatedCoefficients = obj.Ffe.Coefficients;
                     if strcmp(cfg.FfeGateMode, 'pvt-track')
@@ -531,7 +577,7 @@ classdef cdr_top < handle
                 rawDelta(obj.Ffe.MainTapIndex) = 0;
                 proposedCoefficients = obj.Ffe.Coefficients + rawDelta;
                 adaptationCalculated = true;
-                if ~obj.Monitor.Frozen || ~gateInhibitsWrite
+                if ~obj.gateLatched() || ~gateInhibitsWrite
                     obj.Ffe.applyCoefficientDelta(rawDelta);
                     appliedDelta = rawDelta;
                     writeApplied = true;
@@ -578,7 +624,7 @@ classdef cdr_top < handle
             output.FfeAdaptationCalculated = adaptationCalculated;
             output.FfeWriteApplied = writeApplied;
             output.GateTriggered = gateTriggered;
-            output.GateEngaged = cfg.FfeGateEnable && obj.Monitor.Frozen;
+            output.GateEngaged = obj.gateLatched();
             output.SettleDone = obj.SettleDone;
             output.SnrDb = snrDb;
             output.SnrEwmaDb = obj.Monitor.SnrEwmaDb;
@@ -621,7 +667,7 @@ classdef cdr_top < handle
             output.FfeAdaptationCalculated = false;
             output.FfeWriteApplied = false;
             output.GateTriggered = false;
-            output.GateEngaged = obj.Config.FfeGateEnable && obj.Monitor.Frozen;
+            output.GateEngaged = obj.gateLatched();
             output.SettleDone = obj.SettleDone;
             output.SnrDb = NaN;
             output.SnrEwmaDb = obj.Monitor.SnrEwmaDb;
@@ -746,6 +792,37 @@ classdef cdr_top < handle
                 'FfeGateBandHalfWidth');
             obj.requirePositiveInteger(cfg.FfeGateStartBlock, ...
                 'FfeGateStartBlock');
+            cfg.FfeGateCriterion = obj.requireTextChoice( ...
+                cfg.FfeGateCriterion, 'FfeGateCriterion', ...
+                {'center-touch', 'freq-state'});
+            obj.requirePositiveInteger(cfg.FfeGateFreqWindowBlocks, ...
+                'FfeGateFreqWindowBlocks');
+            if cfg.FfeGateFreqWindowBlocks < 2
+                % 判据要取前后半均值之差，窗口至少要有两个样本。
+                obj.invalidField('FfeGateFreqWindowBlocks');
+            end
+            % 期望漂移率允许为 NaN(只判平坦性，不比对速率)。
+            if ~(isnumeric(cfg.FfeGateFreqExpectedRate) && ...
+                    isreal(cfg.FfeGateFreqExpectedRate) && ...
+                    isscalar(cfg.FfeGateFreqExpectedRate) && ...
+                    (isfinite(cfg.FfeGateFreqExpectedRate) || ...
+                    isnan(cfg.FfeGateFreqExpectedRate)))
+                obj.invalidField('FfeGateFreqExpectedRate');
+            end
+            obj.requireNonnegativeScalar(cfg.FfeGateFreqMeanHalfDiffTol, ...
+                'FfeGateFreqMeanHalfDiffTol');
+            obj.requireNonnegativeScalar(cfg.FfeGateFreqStdTol, ...
+                'FfeGateFreqStdTol');
+            % 速率容差允许为 Inf，与 NaN 期望速率等效地跳过速率比对。
+            if ~(isnumeric(cfg.FfeGateFreqRateTol) && ...
+                    isreal(cfg.FfeGateFreqRateTol) && ...
+                    isscalar(cfg.FfeGateFreqRateTol) && ...
+                    ~isnan(cfg.FfeGateFreqRateTol) && ...
+                    cfg.FfeGateFreqRateTol >= 0)
+                obj.invalidField('FfeGateFreqRateTol');
+            end
+            obj.requirePositiveInteger(cfg.FfeGateFreqMinBlock, ...
+                'FfeGateFreqMinBlock');
             cfg.SettleGate = obj.requireTextChoice(cfg.SettleGate, ...
                 'SettleGate', {'dlev', 'snr'});
             obj.requirePositiveScalar(cfg.DlevStepSizePvtTrack, ...
@@ -768,7 +845,7 @@ classdef cdr_top < handle
             numericFields = setdiff(expected, {'Detector', 'VoterMode', ...
                 'VoterDenominator', 'PiNonideal', 'FfeInitCoefficients', ...
                 'FfeAdaptEnableMask', 'FfeGateMode', 'TransitionFilter', ...
-                'FfeGateEnable', 'SettleGate'});
+                'FfeGateEnable', 'SettleGate', 'FfeGateCriterion'});
             for index = 1:numel(numericFields)
                 field = numericFields{index};
                 cfg.(field) = double(cfg.(field));
