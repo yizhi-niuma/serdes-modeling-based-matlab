@@ -375,10 +375,17 @@ classdef loop_monitor < handle
             end
 
             triggered = false;
-            diag = struct('WindowLength', 0, 'MeanValue', NaN, ...
-                'MeanHalfDiff', NaN, 'TailStd', NaN, ...
-                'ExpectedRate', obj.FreqGateExpectedRate, ...
-                'RateError', NaN, 'FlatnessOk', false, 'RateOk', false);
+            % 诊断结构只在调用方真的要第二个输出时才构造。在线路径
+            % (cdr_top) 每块只取 triggered 一个输出，而这个 8 字段 struct()
+            % 过去在每一块都构造后立即丢弃——包括门控闩锁之后剩下的上万块，
+            % 那时函数在下一行就返回了。它是本函数自身时间的主要来源。
+            reportDiag = nargout > 1;
+            if reportDiag
+                diag = struct('WindowLength', 0, 'MeanValue', NaN, ...
+                    'MeanHalfDiff', NaN, 'TailStd', NaN, ...
+                    'ExpectedRate', obj.FreqGateExpectedRate, ...
+                    'RateError', NaN, 'FlatnessOk', false, 'RateOk', false);
+            end
             if obj.FreqGateDone
                 return;
             end
