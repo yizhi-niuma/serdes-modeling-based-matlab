@@ -18,9 +18,11 @@ testFreezeModeInhibitsWrite();
 testPvtTrackKeepsWritingAndDropsStep();
 testSnrSettleGateDownshift();
 testResetStateRestoresInitialState();
+testSaturatedIntegratorDoesNotLatchGate();
+testStageOneDoesNotRaiseStepAfterStageTwo();
 testInvalidConfigRejected();
 
-fprintf('test_cdr_top_configured passed 10 / 10 checks.\n');
+fprintf('test_cdr_top_configured passed 12 / 12 checks.\n');
 end
 
 % ---------------------------------------------------------------- fixtures
@@ -278,6 +280,80 @@ for k = engagedIndex + 1:numel(outputs)
     end
 end
 assert(sawWrite, 'pvt-track mode produced no post-engage write.');
+end
+
+function testSaturatedIntegratorDoesNotLatchGate()
+% 钳在 ±FrequencyLimit 上的积分频率态是"完美平坦"的(半差=0、std=0)，在库默认
+% 的纯平坦口径(FfeGateFreqExpectedRate=NaN / FfeGateFreqRateTol=Inf)下会被
+% detectFrequencyStateLock 判成锁定。那是 railed 而不是锁定：眼睛通常还没开、
+% 环路根本没在跟踪，若让它闩锁 stage-2 就会把 dLev/FFE 过早降到 PVT 档。
+cfg = gateConfig('pvt-track');
+cfg.Ki = 0.5;                 % 让积分器真的累积
+cfg.FrequencyLimit = 0.01;    % 一次单向脉冲就撞上限幅
+cfg.FfeGateFreqWindowBlocks = 6;
+top = cdr_top(cfg);
+
+% 先用一次单向脉冲(1 个 late 后接恒定 early)把积分器踢到限幅；此后
+% phaseError 恒为 0，积分器就停在钳位值上 => 尾窗"钳位且完全平坦"，
+% 正是会骗过纯平坦口径的形态。
+outputs = {};
+drive = [{lateBlock()}, repmat({earlyBlock()}, 1, 30)];
+for k = 1:numel(drive)
+    out = top.processBlock(drive{k});
+    if out.HasOutput
+        outputs{end + 1} = out; %#ok<AGROW>
+    end
+end
+
+state = top.getState();
+% 前提 1：积分器确实饱和了，否则本用例什么都没验证到。
+assert(abs(state.LoopFilter.FrequencyState) >= ...
+    cfg.FfeGateFreqSatFrac * cfg.FrequencyLimit, ...
+    'Test premise failed: the integrator did not saturate.');
+% 前提 2：尾窗确实完全平坦，且该判据本身会接受它——这才证明本用例真的能
+% 捕获"饱和被误判为锁定"，而不是因为别的原因没闩锁。
+tail = cellfun(@(o) o.LoopFrequencyState, outputs(end - 5:end));
+assert(std(tail) == 0, 'Test premise failed: the railed tail is not flat.');
+assert(loop_monitor.detectFrequencyStateLock(tail, numel(tail), ...
+    cfg.FfeGateFreqExpectedRate, cfg.FfeGateFreqMeanHalfDiffTol, ...
+    cfg.FfeGateFreqStdTol, cfg.FfeGateFreqRateTol), ...
+    'Test premise failed: the criterion should accept this railed tail.');
+% 断言：cdr_top 必须把这种块挡在门控窗口之外。
+assert(~state.Monitor.FreqGateDone, ...
+    'A railed (saturated) integrator must not latch the freq-state gate.');
+assert(isempty(findFirstGateEngaged(outputs)), ...
+    'No block may report a gate event while the integrator is railed.');
+assert(state.FfeLoop.StepSize ~= cfg.FfeStepSizePvtTrack, ...
+    'A railed integrator must not trigger the stage-2 mu downshift.');
+end
+
+function testStageOneDoesNotRaiseStepAfterStageTwo()
+% 两级降档都是一次性闩锁，且 stage-1 在 processConfiguredBlock 里先执行。若
+% stage-2 曾在更早的块先触发，后到的 stage-1 不得把已经降到 PVT 档的步长抬回
+% settle 档（0.02 -> 0.1 会让步长调度反向）。
+cfg = gateConfig('pvt-track');
+cfg.DlevStepSize = 0.5;
+cfg.DlevStepSizeSettle = 0.1;
+cfg.DlevStepSizePvtTrack = 0.02;
+% baseConfig 的 Ki=0 => 频率态恒 0，是合法的"平坦且未饱和"，门控在窗口填满后
+% 立刻闩锁；把 SNR 换挡的 minBlock 推后，强制 stage-2 先于 stage-1 触发。
+cfg.FfeGateFreqWindowBlocks = 4;
+cfg.SnrSettleThresholdDb = -100;   % 任何有限 SNR 都能过
+cfg.SnrSettleMinBlock = 20;
+top = cdr_top(cfg);
+
+outputs = driveAlternating(top, 40);
+assert(~isempty(outputs));
+state = top.getState();
+assert(state.Monitor.FreqGateDone, 'stage-2 should have latched.');
+assert(state.Monitor.SnrSettleDone, 'stage-1 should have fired later.');
+assert(state.Monitor.FreqGateBlock < state.Monitor.SnrSettleBlock, ...
+    'Test premise failed: stage-2 must latch before stage-1 fires.');
+% 关键断言：晚到的 stage-1 不得抬回步长。
+assert(state.Dlev.StepSize == cfg.DlevStepSizePvtTrack, ...
+    'A late stage-1 must not raise the dLev step back to the settle tier.');
+assert(state.FfeLoop.StepSize == cfg.FfeStepSizePvtTrack, ...
+    'A late stage-1 must not raise the FFE step back to the settle tier.');
 end
 
 function testSnrSettleGateDownshift()

@@ -196,6 +196,13 @@ classdef cdr_top < handle
             cfg.FfeGateFreqStdTol = 5e-3;
             cfg.FfeGateFreqRateTol = Inf;
             cfg.FfeGateFreqMinBlock = 1;
+            % 饱和守卫。撞在 ±FrequencyLimit 上的积分频率态是"完美平坦"的
+            % (半差=0、std=0)，而默认口径是纯平坦性(ExpectedRate=NaN /
+            % RateTol=Inf)，detectFrequencyStateLock 会把它判成锁定——但那是
+            % railed 而不是锁定，此时眼睛通常还没开、环路根本没在跟踪。门控
+            % 因此拒绝把 |FrequencyState| >= FfeGateFreqSatFrac*FrequencyLimit
+            % 的块喂进判决窗口。设 >1 可关闭；FrequencyLimit=Inf 时自动失效。
+            cfg.FfeGateFreqSatFrac = 0.9;
         end
 
         function [decision, sliceError, dataSymbol, errorBit] = ...
@@ -379,7 +386,12 @@ classdef cdr_top < handle
             % 越过 SnrSettleThresholdDb（眼睛张开才降 mu）。
             snrDb = cdr_top.blockSnrDb(decision, sliceError);
             eyeOpenedEvent = obj.Monitor.updateSnrSettle(blockIndex, snrDb);
-            if eyeOpenedEvent
+            if eyeOpenedEvent && ~obj.gateLatched()
+                % 只在第二级门控尚未闩锁时才降第一级。两级都是一次性闩锁且
+                % stage-1 在本函数里先执行，若 stage-2 曾在更早的块先触发，
+                % 这里再施加 settle 档会把已降到 PVT 档的步长抬回去(0.02 ->
+                % 0.1)，调度反向。同块内两者都触发时 stage-2 在后覆盖，仍是
+                % 正确的终态。
                 obj.Dlev.setStepSize(cfg.DlevStepSizeSettle);
                 obj.FfeLoop.setStepSize(cfg.FfeStepSizeSettle);
             end
@@ -394,8 +406,16 @@ classdef cdr_top < handle
                 % LoopFilter.update)，因此这里读到的积分频率态与随后记录进
                 % trace 的 LoopFrequencyState 是同一个值，在线判定与离线判据
                 % 逐块对齐。
-                loopLockedEvent = obj.Monitor.updateFreqStateGate( ...
-                    blockIndex, obj.LoopFilter.FrequencyState);
+                freqState = obj.LoopFilter.FrequencyState;
+                % 饱和守卫(定义见 defaultConfig 的 FfeGateFreqSatFrac)：钳在
+                % 积分限幅上的频率态是平坦的，但那是 railed 而非锁定。把这种
+                % 块排除出门控窗口，否则纯平坦口径会误闩锁，进而过早把
+                % dLev/FFE 降到 PVT 档且再也追不回来。与 updateFreqStateGate
+                % 跳过非有限样本是同一性质的输入过滤。
+                if abs(freqState) < cfg.FfeGateFreqSatFrac * cfg.FrequencyLimit
+                    loopLockedEvent = obj.Monitor.updateFreqStateGate( ...
+                        blockIndex, freqState);
+                end
                 if loopLockedEvent
                     obj.GatedCoefficients = obj.Ffe.Coefficients;
                     if strcmp(cfg.FfeGateMode, 'pvt-track')
@@ -659,6 +679,8 @@ classdef cdr_top < handle
             end
             obj.requirePositiveInteger(cfg.FfeGateFreqMinBlock, ...
                 'FfeGateFreqMinBlock');
+            obj.requirePositiveScalar(cfg.FfeGateFreqSatFrac, ...
+                'FfeGateFreqSatFrac');
             obj.requirePositiveScalar(cfg.DlevStepSizePvtTrack, ...
                 'DlevStepSizePvtTrack');
             if ~(isnumeric(cfg.SnrSettleThresholdDb) && ...

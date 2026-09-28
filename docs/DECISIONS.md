@@ -1,5 +1,40 @@
 ﻿# Decisions
 
+## 2026-09-28 (fixes): sink a saturation guard into the freq-state gate and enforce stage-1/stage-2 ordering
+
+- **Decision:** treat a railed loop integrator as *not* locked at the library
+  level, and make the two mu-downshift stages monotonic.
+- **Why the saturation guard belongs in `cdr_top`, not only in the runner:** the
+  freq-state criterion is flatness + optional rate match, and with the library
+  defaults (`FfeGateFreqExpectedRate = NaN`, `FfeGateFreqRateTol = Inf`) the rate
+  term is skipped entirely, so a constant-at-clamp sequence passes. The ppm
+  runner already rejected saturation offline via `SlewSatDeltaFrac`, but that
+  guard never reached the online gate, leaving every `cdr_top.defaultConfig()`
+  caller (the gate is enabled by default) able to latch stage-2 on a railed
+  integrator with the eye still shut.
+- **Chosen mechanism — input filtering, not a post-hoc veto:** `cdr_top` skips
+  feeding blocks with `|FrequencyState| >= FfeGateFreqSatFrac * FrequencyLimit`
+  to `updateFreqStateGate`. Vetoing *after* the call was rejected because
+  `updateFreqStateGate` latches `FreqGateDone` internally, which would leave
+  `gateLatched()` reporting an engaged gate that `cdr_top` had ignored. Skipping
+  matches the detector's existing non-finite-sample skip contract. Default
+  `FfeGateFreqSatFrac = 0.9`; `>1` disables it and `FrequencyLimit = Inf` makes
+  it inert. A real lock sits far below the threshold (`~0` at 0 ppm, `~0.82` at
+  `±100 ppm`, versus `3.6`), so no passing configuration changes.
+- **Rejected alternative:** defaulting `FfeGateFreqRateTol` to a finite value.
+  `cdr_top` is frequency-offset agnostic, so it cannot know a meaningful
+  `ExpectedRate`; a finite rate tolerance against `NaN` is meaningless and a
+  hard-coded `ExpectedRate = 0` would be wrong for every ppm caller.
+- **Stage ordering:** stage-1 is now conditioned on `~gateLatched()`. The two
+  stages are one-shot latches with stage-1 evaluated first, so a late stage-1
+  could otherwise raise a step that stage-2 had already collapsed
+  (`0.02 -> 0.1`). Same-block coincidence is unaffected: stage-2 is applied last
+  and still wins.
+- **Verified:** `test_cdr_top_configured` 12/12 (two new non-vacuous regression
+  tests), full `tests/CDR` 15/17 (only the pre-existing
+  `test_cdr_ffe`/`test_cdr_ffe_loop` pair fails), and the ppm/v4 smokes are
+  bit-for-bit unchanged in their gate/freeze blocks.
+
 ## 2026-09-28 (later): delete center-touch from `cdr_top` and make freq-state the only criterion + default; migrate v4
 
 - **Decision (user-approved):** remove `'center-touch'` as a valid
