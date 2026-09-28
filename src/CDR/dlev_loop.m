@@ -90,16 +90,22 @@ classdef dlev_loop < handle
         end
 
         function dLev = dlevLms(obj, d, e)
-            % dlevLms  全精度 dLev LMS:调用 Fast 变体更新,并记录调试轨迹。
+            % dlevLms  全精度 dLev LMS:更新并记录调试轨迹。
+            %
+            % 与 dlevLmsFast 的唯一区别是多记一条轨迹。这里直接调用
+            % applyUpdate 而不是转调 dlevLmsFast:后者会把 sliceErrors 再算
+            % 一遍(两次调用之间没有任何状态变化,结果必然相同),纯属重复计算。
             [innerErr, outerErr] = obj.sliceErrors(d, e);
-            dLev = obj.dlevLmsFast(d, e);
+            dLev = obj.applyUpdate(innerErr, outerErr);
             obj.recordTrace(innerErr, outerErr);
         end
 
         function dLev = dlevSsLms(obj, d, e)
-            % dlevSsLms  符号-符号 dLev LMS:调用 Fast 变体更新,并记录轨迹。
+            % dlevSsLms  符号-符号 dLev LMS:更新并记录轨迹。
+            %
+            % 同上,与 dlevSsLmsFast 只差一条轨迹,不再重复调用 sliceErrors。
             [innerErr, outerErr] = obj.sliceErrors(d, e);
-            dLev = obj.dlevSsLmsFast(d, e);
+            dLev = obj.applyUpdate(sign(innerErr), sign(outerErr));
             obj.recordTrace(innerErr, outerErr);
         end
 
