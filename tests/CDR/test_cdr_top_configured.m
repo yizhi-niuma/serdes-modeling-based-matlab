@@ -418,7 +418,7 @@ end
 function index = findFirstGateEngaged(outputs)
 index = [];
 for k = 1:numel(outputs)
-    if outputs{k}.GateTriggered
+    if outputs{k}.LoopLockedEvent
         index = k;
         return;
     end

@@ -380,8 +380,8 @@ classdef cdr_top < handle
             % 第一级降档(capture -> settle)：两个环路同时降，门控为 SNR EWMA
             % 越过 SnrSettleThresholdDb（眼睛张开才降 mu）。
             snrDb = cdr_top.blockSnrDb(decision, sliceError);
-            settleTriggered = obj.Monitor.updateSnrSettle(blockIndex, snrDb);
-            if settleTriggered
+            eyeOpenedEvent = obj.Monitor.updateSnrSettle(blockIndex, snrDb);
+            if eyeOpenedEvent
                 obj.Dlev.setStepSize(cfg.DlevStepSizeSettle);
                 obj.FfeLoop.setStepSize(cfg.FfeStepSizeSettle);
             end
@@ -390,21 +390,21 @@ classdef cdr_top < handle
                 obj.Dlev.dlevSsLms(decision, sliceError);
             end
 
-            gateTriggered = false;
+            loopLockedEvent = false;
             if cfg.FfeGateEnable
                 if strcmp(cfg.FfeGateCriterion, 'freq-state')
                     % 环路滤波器已在本块更新过(见上方 LoopFilter.update)，
                     % 因此这里读到的积分频率态与随后记录进 trace 的
                     % LoopFrequencyState 是同一个值，在线判定与离线判据
                     % 逐块对齐。
-                    gateTriggered = obj.Monitor.updateFreqStateGate( ...
+                    loopLockedEvent = obj.Monitor.updateFreqStateGate( ...
                         blockIndex, obj.LoopFilter.FrequencyState);
                 else
                     unwrapped = uiSlip * cfg.SamplesPerSymbol + codeWrapped;
-                    gateTriggered = obj.Monitor.updateFfeGate(unwrapped, ...
+                    loopLockedEvent = obj.Monitor.updateFfeGate(unwrapped, ...
                         blockIndex);
                 end
-                if gateTriggered
+                if loopLockedEvent
                     obj.GatedCoefficients = obj.Ffe.Coefficients;
                     if strcmp(cfg.FfeGateMode, 'pvt-track')
                         % 第二级降档(settle -> PVT tracking)：锁定确认后两个
@@ -472,7 +472,7 @@ classdef cdr_top < handle
             output.FfeProposedCoefficients = proposedCoefficients;
             output.FfeAdaptationCalculated = adaptationCalculated;
             output.FfeWriteApplied = writeApplied;
-            output.GateTriggered = gateTriggered;
+            output.LoopLockedEvent = loopLockedEvent;
             output.GateEngaged = obj.gateLatched();
             output.SnrDb = snrDb;
             output.SnrEwmaDb = obj.Monitor.SnrEwmaDb;
@@ -514,7 +514,7 @@ classdef cdr_top < handle
             output.FfeProposedCoefficients = nan(1, obj.Ffe.TapCount);
             output.FfeAdaptationCalculated = false;
             output.FfeWriteApplied = false;
-            output.GateTriggered = false;
+            output.LoopLockedEvent = false;
             output.GateEngaged = obj.gateLatched();
             output.SnrDb = NaN;
             output.SnrEwmaDb = obj.Monitor.SnrEwmaDb;

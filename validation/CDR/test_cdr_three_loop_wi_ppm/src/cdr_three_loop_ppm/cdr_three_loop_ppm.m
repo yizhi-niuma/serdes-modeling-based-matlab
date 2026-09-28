@@ -379,7 +379,7 @@ for startIndex = 1:numStartPhase
             deltaCodeTrace(startIndex, blockIndex) = out.DeltaCode;
             loopControlTrace(startIndex, blockIndex) = out.LoopControl;
             loopFrequencyTrace(startIndex, blockIndex) = out.LoopFrequencyState;
-            if out.GateTriggered && ~isfinite(stage2GateBlock(startIndex))
+            if out.LoopLockedEvent && ~isfinite(stage2GateBlock(startIndex))
                 % Record the ACTUAL stage-2 downshift block. Replaying the
                 % gate offline would have to assume a criterion, and would be
                 % wrong whenever FfeGateCriterion is not the one assumed.
