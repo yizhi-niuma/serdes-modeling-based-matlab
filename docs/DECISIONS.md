@@ -1,5 +1,32 @@
 ﻿# Decisions
 
+## 2026-09-26: remove the legacy five-argument `cdr_top` construction path
+
+- **Decision (user-made edit, verified here):** delete `cdr_top`'s legacy
+  five-argument component-injection constructor
+  (`cdr_top(pd, voter, loopFilter, phaseInterpolator, initialSymbol)`) and
+  everything that only served it: the BBPD `processBlock(data, edge)` and
+  `processBlockFast`, `resetState(initialSymbol)`, the `PreviousSymbol` and
+  `ConfigMode` fields, and the `buildPreviousBlock` / `validateBlockShape` /
+  `validateInitialSymbol` / `validateComponents` helpers. `cdr_top` is now
+  config-struct only; a non-struct or wrong arity raises `cdr_top:InvalidConfig`.
+- **Supersedes** the 2026-09-23 decision below that kept the legacy path "and
+  `test_cdr_top`'s 6 checks preserved unchanged". That preservation was worth
+  having while the two paths coexisted, but the legacy path had been dead code
+  since the config path took over every caller: the ppm runner, the v4 runner
+  and `test_cdr_top_configured` all construct `cdr_top(config)`, and no shipping
+  code used the five-argument form.
+- **Test consequences, applied together with the code change:**
+  `tests/CDR/test_cdr_top.m` (the six legacy checks) is deleted, and
+  `test_cdr_top_configured.m` drops the two checks that existed only to pin
+  legacy behaviour (`testLegacyModeRejectsConfiguredApi` and the config-mode
+  `resetState(1)` rejection), 12 -> 11. No file references the removed API; the
+  `processBlockFast` that remains in `cdr_ffe` is a different class.
+- **Verification:** `tests/CDR` 15/17 with `test_cdr_top_configured` 11/11; the
+  only failures are the pre-existing `test_cdr_ffe` / `test_cdr_ffe_loop` pair,
+  whose sources are byte-identical to HEAD. Both config-path runners smoke-pass
+  end to end (ppm and v4 each 2/2 locked, `AllPhaseLock = 1`).
+
 ## 2026-09-26: ppm suite samples through the PI phase table and defaults to the nonideal PI
 
 - **Decision:** the ppm three-loop suite runs with a physically nonideal phase

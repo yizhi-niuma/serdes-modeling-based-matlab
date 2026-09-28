@@ -164,19 +164,17 @@ This document is derived only from `src/TX+Channel`, `src/AFE`, `src/ADC`, and `
 
 ## CDR top-level assumptions
 
-- `cdr_top` accepts hard digital data-symbol and edge-bit decisions; equalization, sampling, and slicing remain upstream.
+- `cdr_top` accepts one block of chronological, zero-centred ADC codes; equalization (the CDR FFE) and slicing are now owned inside the class, while waveform sampling remains upstream. (Before 2026-09-26 a legacy path accepted pre-sliced data-symbol and edge-bit decisions; it has been removed.)
 - The future timing-recovery front end uses a dedicated CDR FFE and does not reuse the data-recovery FFE/DFE path.
 - No DFE is included in the CDR timing path.
 - A stateless slicer is currently treated as a threshold comparison rather than a stateful class. PAM4 data decisions require three thresholds, while the BBPD edge decision uses the center threshold only.
-- The previous symbol supplied at construction or reset is explicit initial history for the first block; no hidden default symbol is assumed.
 - One top-level call processes exactly one voter block. The phase entering that block is the sampling phase for that block.
 - The block's voter and loop-filter result updates the PI after the decisions are processed, so the updated local PI index applies to the following block.
-- `processBlockFast` assumes caller-validated digital vectors and intentionally does not update the top-level debug snapshot.
 
 ### Configured code-domain CDR core assumptions (2026-09-23)
 
 - The configured `cdr_top(config)` path models the receiver DSP in the **code domain only**. Its input is one block of chronological, zero-centred ADC codes; it never samples a waveform and never references `ti_adc_top`. Physical-lane-to-time reordering, absolute UI addressing and UI-slip-driven waveform indexing remain the caller's responsibility.
-- The configured path carries **one block of loop dead time**, and this is treated as physical rather than incidental: the CDR FFE needs `PreTapCount` precursor samples from the following block, so a block cannot be equalized until its successor has been sampled. Consequently `phase[k+1] == phase[k]` and `phase[k+2] == phase[k] + delta[k]`. The legacy component-injection path keeps its original zero-dead-time behaviour, so the two paths are not interchangeable for loop-stability statements.
+- The configured path carries **one block of loop dead time**, and this is treated as physical rather than incidental: the CDR FFE needs `PreTapCount` precursor samples from the following block, so a block cannot be equalized until its successor has been sampled. Consequently `phase[k+1] == phase[k]` and `phase[k+2] == phase[k] + delta[k]`. (The pre-2026-09-26 legacy component-injection path had zero dead time; it has been removed, so this one-block dead time is now the class's only timing behaviour.)
 - Boundary blocks are shorter than `BlockSize`: the first processed block loses its leading `PostTapCount` outputs (no past samples) and the `flush()` block loses its trailing `PreTapCount` outputs (no future samples). Invalid samples are discarded, never zero-padded. The phase loop still updates on short blocks, while dLev and FFE adaptation are skipped because both engines normalize by a fixed `BlockSize`.
 - The `'mean'` voter divides by the actual number of valid decisions by default, so boundary blocks use 61/62 rather than 64 with the production geometry. A fixed denominator is configurable but changes the boundary-block loop gain.
 - The MMPD input is inherently symbolized: `cdr_pd.mmpd` only accepts 0-3 PAM4 symbols and 0/1 error bits, and those come from hard-slicing the FFE output against the live dLev thresholds. There is therefore no separate "SS-MMPD" numerical path, and no amplitude information reaches the phase detector. Modelling a full-precision Mueller-Muller detector would require a new `cdr_pd` method.

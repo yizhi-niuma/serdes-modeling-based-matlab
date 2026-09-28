@@ -20,9 +20,8 @@ testSettleDownshiftFiresOnce();
 testSnrSettleGateDownshift();
 testResetStateRestoresInitialState();
 testInvalidConfigRejected();
-testLegacyModeRejectsConfiguredApi();
 
-fprintf('test_cdr_top_configured passed 12 / 12 checks.\n');
+fprintf('test_cdr_top_configured passed 11 / 11 checks.\n');
 end
 
 % ---------------------------------------------------------------- fixtures
@@ -436,23 +435,6 @@ assertThrowsId(@() top.processBlock(ones(1, cfg.BlockSize + 1)), ...
     'cdr_top:InvalidCenteredCode');
 assertThrowsId(@() top.processBlock(ones(cfg.BlockSize, 1)), ...
     'cdr_top:InvalidCenteredCode');
-assertThrowsId(@() top.resetState(1), 'cdr_top:InvalidResetInput');
-end
-
-function testLegacyModeRejectsConfiguredApi()
-% 旧组件注入路径必须保持原语义，且不暴露 config 模式专用接口。
-pd = cdr_pd('pam4', 1);
-voter = cdr_voter('linear', 4);
-loopFilter = cdr_loop(0.25, 0, -Inf, Inf, 1);
-phaseInterpolator = cdr_pi(7, 128);
-phaseInterpolator.resetNonideal();
-top = cdr_top(pd, voter, loopFilter, phaseInterpolator, 0);
-
-output = top.processBlock([3 0 3 0], [0 1 0 1]);
-assert(output.BlockIndex == 1 && output.PhaseError == 4);
-assertThrowsId(@() top.flush(), 'cdr_top:UnsupportedFlush');
-state = top.getState();
-assert(~isfield(state, 'Config') && ~isfield(state, 'Monitor'));
 end
 
 % ----------------------------------------------------------------- helpers

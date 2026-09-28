@@ -840,106 +840,70 @@ localPhase = atan2(b, a) / (pi / 2)
 nextIndex = piModel.updateFast(deltaCode);
 ```
 
-不要在 Fast update 后忽略返回值再调用 `getLocalIndex()`，因为对象的派生 `LocalIndexFloat` 可能仍是旧值。`cdr_top.processBlockFast` 正确地使用了返回值（`src/CDR/cdr_top.m:165-174`）。
+不要在 Fast update 后忽略返回值再调用 `getLocalIndex()`，因为对象的派生 `LocalIndexFloat` 可能仍是旧值。各 validation runner 在采样地址计算中正确地使用了 `updateFast`/`getLocalIndex` 的返回值。
 
 ---
 
-## 11. `cdr_top`：数字 BBPD CDR core
+## 11. `cdr_top`：code 域 CDR DSP core
+
+> 2026-09-26 更新：旧的五参数组件注入构造路径
+> (`cdr_top(pd, voter, loopFilter, phaseInterpolator, initialSymbol)`)、其
+> `processBlock(data, edge)` / `processBlockFast` / `resetState(initialSymbol)`
+> 语义以及 `PreviousSymbol`、`ConfigMode` 均已删除。`cdr_top` 现在只有单一的
+> config 结构体构造路径。下文描述现状。
 
 ### 11.1 构造和对象所有权
 
 ```matlab
-top = cdr_top(pd, voter, loopFilter, phaseInterpolator, initialSymbol)
+top = cdr_top(config)
 ```
 
-构造函数要求四个对象的类型分别为：
-
-- `cdr_pd`；
-- `cdr_voter`；
-- `cdr_loop`；
-- `cdr_pi`。
-
-顶层直接持有传入的 handle，不复制配置，并在构造末尾执行同步 reset（`src/CDR/cdr_top.m:64-87,277-287`）。因此调用方在构造前临时设置的 PI 动态 code 会被 reset；非理想 LUT 等配置保留。
+`config` 必须是单个结构体，否则抛 `cdr_top:InvalidConfig`。构造函数在
+`constructConfigured` 中例化并持有整条 code 域链：`cdr_pd`(MMPD)、`cdr_voter`、
+`cdr_loop`、`cdr_pi`、`cdr_ffe` 及其跨块窗口、静态 PAM4 slicer、`dlev_loop`、
+`cdr_ffe_loop` 与 `loop_monitor`，并在末尾同步 reset。每个配置项都必须显式提供，
+缺失或非法字段抛 `cdr_top:Invalid<Field>`；`cdr_top.defaultConfig` 返回与当前 v3
+对齐的起点。
 
 ### 11.2 顶层自有状态
 
-- `PreviousSymbol`：上一 block 最后一个 data symbol；
 - `BlockIndex`：已处理 block 数；
+- `SampleBlockCount`：已喂入的采样块数；
 - `CurrentLocalIndexFloat`：下一 block 使用的 wrapped local index；
-- `LastOutput`：最近一次 debug 路径快照。
-
-见 `src/CDR/cdr_top.m:44-60`。
+- `PreviousDataSymbol` / `PreviousErrorBit`：跨块 MMPD 历史；
+- pending 流水线状态（`PendingCentered`/`PendingPast`/`HavePending`/
+  `PendingCodeWrapped`/`PendingUiSlip`/`PendingBlockIndex`）；
+- `GatedCoefficients`、`LastOutput`。
 
 ### 11.3 `processBlock`
 
-Validated 路径执行：
+`processBlock(centeredCode)` 接收一个按时间顺序、零中心的 ADC code 块，转调
+`processConfiguredBlock` 并更新 `LastOutput`。非法输入抛
+`cdr_top:InvalidCenteredCode`。块内顺序严格照 v3：
+FFE → slicer → MMPD → voter → loop → PI → mu 降档 → dLev → FFE gate → FFE
+SS-LMS 写入。因 FFE 前置抽头的一块环路死区，流水线未填满时返回
+`HasOutput = false`。
 
-1. 检查 data/edge 是同形、长度为 `Voter.BlockSize` 的向量；
-2. 构造 `dataPrevBlock`；
-3. 保存本 block 使用的旧 index；
-4. 调用 `Pd.bbpd`；
-5. 调用 `Voter.vote`；
-6. 调用 `LoopFilter.update`；
-7. 调用 `PhaseInterpolator.update`；
-8. 保存下一 block index、last symbol、block count；
-9. 返回完整 debug struct 并更新 `LastOutput`。
+### 11.4 `flush`
 
-见 `src/CDR/cdr_top.m:89-143`。
-
-### 11.4 `processBlockFast`
-
-Fast 路径：
-
-- 跳过顶层输入检查；
-- 依次调用四个 Fast API；
-- 不构造 PD/顶层 debug struct；
-- 不更新顶层 `LastOutput`；
-- 仍完整推进影响后续闭环的 previous symbol、PI、loop 和 block count。
-
-见 `src/CDR/cdr_top.m:145-175`。
-
-注意 `cdr_pi.updateFast` 不刷新 PI 派生属性，因此 Fast 之后：
-
-- `top.CurrentLocalIndexFloat` 是最新值；
-- `top.PhaseInterpolator.CodeWrapped/UiSlip` 是最新值；
-- 但嵌套 PI 的 `LocalIndexFloat/Phase*` 可能仍旧。
-
-这是性能契约，而不是完整 debug snapshot。
+`flush()` 用零 future 处理最后一个 pending 块；无 pending 时返回空输出结构。它不再
+依赖任何模式判定（旧的 `cdr_top:UnsupportedFlush` 已随 config 模式判定一起删除）。
 
 ### 11.5 Reset
 
-`resetState(initialSymbol)`：
-
-- 检查 initial symbol 合法；
-- reset PD、loop filter、PI；
-- voter 无动态状态，不需要 reset；
-- 设置 previous symbol；
-- 清 block count 和顶层 debug snapshot；
-- 同步 `CurrentLocalIndexFloat`。
-
-见 `src/CDR/cdr_top.m:177-198`。
-
-复位不改变：
-
-- PD mode/polarity；
-- voter mode；
-- Kp/Ki、limits；
-- PI 位宽与非理想 LUT。
+`resetState()` 不接收参数（旧的 `resetState(initialSymbol)` 已删除）。它 reset
+PD、loop filter、PI，重配 PI 非理想表并置 `PiInitialCode`，reset 并重置 dLev、FFE、
+FFE loop 的步长，reset monitor，并清空所有 pending / 顶层状态。它不改变任何配置项
+(PD mode/polarity、voter mode、Kp/Ki/limits、PI 位宽与非理想 LUT)。
 
 ### 11.6 当前集成边界
 
-当前 `cdr_top` 固定调用 `bbpd/bbpdFast`，没有：
+`cdr_top` 仍然**不**拥有 sampler / TI ADC，也不做绝对 waveform UI 地址上的 slip
+调度或 frequency detector / FLL——这些归调用方（各 validation runner）所有。它现在
+**确实**在 code 域内拥有 CDR FFE 及其窗口、unified slicer、dLev 与 FFE SS-LMS 及
+FFE gate monitor。类头部（`src/CDR/cdr_top.m` 顶部注释）对此有说明；配置模式的完整
+行为见 `docs/ARCHITECTURE.md` 的 “`cdr_top` configured code-domain mode” 一节。
 
-- MMPD 的 `errorPrev/errorCurr` 输入和 `PreviousError` 状态；
-- sampler / TI ADC；
-- CDR FFE 或其窗口缓存；
-- unified slicer；
-- dLev；
-- FFE LMS/SS-LMS；
-- 绝对 waveform UI 地址上的 slip 调度；
-- frequency detector / FLL。
-
-这些限制在类头部已部分明确（`src/CDR/cdr_top.m:19-25`）。
 
 ---
 

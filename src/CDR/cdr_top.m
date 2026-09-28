@@ -1,19 +1,18 @@
 classdef cdr_top < handle
     % cdr_top  数字 CDR 顶层行为模型。
     %
-    % 本类保留原有五参数构造路径，同时提供单 config 结构体构造路径。旧路径只
-    % 串接 PD、voter、loop filter 与 PI；config 路径在 code 域内进一步拥有并
-    % 调度 CDR FFE、统一 PAM4 slicer、dlev 与 FFE SS-LMS 及 FFE gate monitor。
+    % 本类由单个 config 结构体构造：在 code 域内拥有并调度 CDR FFE、统一 PAM4
+    % slicer、dlev 与 FFE SS-LMS 及 FFE gate monitor，同时组合 PD、voter、
+    % loop filter 与 PI 构成相位环。
 
     properties (SetAccess = private)
-        % 原有四级 CDR 控制链（两种模式共用）。
+        % 四级 CDR 控制链。
         Pd
         Voter
         LoopFilter
         PhaseInterpolator
 
-        % 原有顶层状态；旧构造路径的语义保持不变。
-        PreviousSymbol
+        % 顶层状态。
         BlockIndex = 0
         CurrentLocalIndexFloat = 0
         LastOutput
@@ -48,115 +47,24 @@ classdef cdr_top < handle
         SettleDone
     end
 
-    properties (Access = private)
-        ConfigMode = false
-    end
-
     methods
-        function obj = cdr_top(varargin)
-            % cdr_top  构造旧式数字控制链或完整 code 域 DSP 核。
-            if nargin == 1 && isstruct(varargin{1})
-                obj.ConfigMode = true;
-                obj.constructConfigured(varargin{1});
-                return;
+        function obj = cdr_top(config)
+            % cdr_top  由单个 config 结构体构造完整 code 域 DSP 核。
+            if nargin ~= 1 || ~isstruct(config)
+                error('cdr_top:InvalidConfig', ...
+                    'cdr_top requires a single configuration struct.');
             end
-
-            if nargin < 5
-                error('cdr_top:MissingInput', ...
-                    ['pd, voter, loopFilter, phaseInterpolator, and ' ...
-                    'initialSymbol must be provided.']);
-            end
-            if nargin > 5
-                error('cdr_top:TooManyInputs', ...
-                    'The legacy constructor accepts exactly five inputs.');
-            end
-
-            pd = varargin{1};
-            voter = varargin{2};
-            loopFilter = varargin{3};
-            phaseInterpolator = varargin{4};
-            initialSymbol = varargin{5};
-            obj.validateComponents(pd, voter, loopFilter, phaseInterpolator);
-            obj.Pd = pd;
-            obj.Voter = voter;
-            obj.LoopFilter = loopFilter;
-            obj.PhaseInterpolator = phaseInterpolator;
-            obj.resetState(initialSymbol);
+            obj.constructConfigured(config);
         end
 
-        function output = processBlock(obj, varargin)
-            % processBlock  处理一个旧式数字判决块或一个时序 ADC code 块。
-            if obj.ConfigMode
-                if numel(varargin) ~= 1
-                    error('cdr_top:InvalidCenteredCode', ...
-                        'Configured mode expects one centeredCode input.');
-                end
-                output = obj.processConfiguredBlock(varargin{1});
-                obj.LastOutput = output;
-                return;
-            end
-
-            dataCurrBlock = varargin{1};
-            edgeBitBlock = varargin{2};
-            obj.validateBlockShape(dataCurrBlock, edgeBitBlock);
-            dataPrevBlock = obj.buildPreviousBlock(dataCurrBlock);
-            sampleIndexForBlock = obj.CurrentLocalIndexFloat;
-            previousSymbolIn = obj.PreviousSymbol;
-
-            [phaseDecision, valid, pdOutput] = obj.Pd.bbpd( ...
-                dataPrevBlock, edgeBitBlock, dataCurrBlock);
-            phaseError = obj.Voter.vote(phaseDecision);
-            deltaCode = obj.LoopFilter.update(phaseError);
-            obj.PhaseInterpolator.update(deltaCode);
-
-            obj.CurrentLocalIndexFloat = obj.PhaseInterpolator.getLocalIndex();
-            obj.PreviousSymbol = dataCurrBlock(end);
-            obj.BlockIndex = obj.BlockIndex + 1;
-
-            output = struct();
-            output.BlockIndex = obj.BlockIndex;
-            output.SampleIndexForBlock = sampleIndexForBlock;
-            output.PreviousSymbolIn = previousSymbolIn;
-            output.DataPrevBlock = dataPrevBlock;
-            output.DataCurrBlock = dataCurrBlock;
-            output.EdgeBitBlock = edgeBitBlock;
-            output.PhaseDecision = phaseDecision;
-            output.Valid = valid;
-            output.PhaseError = phaseError;
-            output.DeltaCode = deltaCode;
-            output.NextLocalIndexFloat = obj.CurrentLocalIndexFloat;
-            output.PiCodeWrapped = obj.PhaseInterpolator.CodeWrapped;
-            output.PiUiSlip = obj.PhaseInterpolator.UiSlip;
-            output.PdOutput = pdOutput;
+        function output = processBlock(obj, centeredCode)
+            % processBlock  处理一个时序 ADC code 块。
+            output = obj.processConfiguredBlock(centeredCode);
             obj.LastOutput = output;
         end
 
-        function [sampleIndexForBlock, nextLocalIndexFloat, phaseError, deltaCode] = ...
-                processBlockFast(obj, dataCurrBlock, edgeBitBlock)
-            % processBlockFast  保留旧构造路径的无检查快速接口。
-            if obj.ConfigMode
-                error('cdr_top:UnsupportedFastPath', ...
-                    'Configured mode uses processBlock(centeredCode).');
-            end
-            dataPrevBlock = obj.buildPreviousBlock(dataCurrBlock);
-            sampleIndexForBlock = obj.CurrentLocalIndexFloat;
-            [phaseDecision, ~] = obj.Pd.bbpdFast( ...
-                dataPrevBlock, edgeBitBlock, dataCurrBlock);
-            phaseError = obj.Voter.voteFast(phaseDecision);
-            deltaCode = obj.LoopFilter.updateFast(phaseError);
-            nextLocalIndexFloat = obj.PhaseInterpolator.updateFast(deltaCode);
-
-            obj.CurrentLocalIndexFloat = nextLocalIndexFloat;
-            obj.PreviousSymbol = dataCurrBlock(end);
-            obj.BlockIndex = obj.BlockIndex + 1;
-        end
-
         function output = flush(obj)
-            % flush  用零 future 处理 config 路径最后一个 pending 块。
-            if ~obj.ConfigMode
-                error('cdr_top:UnsupportedFlush', ...
-                    'flush is available only in configured mode.');
-            end
+            % flush  用零 future 处理最后一个 pending 块。
             if ~obj.HavePending
                 output = obj.emptyConfiguredOutput();
                 obj.LastOutput = output;
@@ -175,69 +83,39 @@ classdef cdr_top < handle
             uiSlip = obj.PhaseInterpolator.UiSlip;
         end
 
-        function resetState(obj, varargin)
+        function resetState(obj)
             % resetState  协同复位动态状态，不改变任何配置项。
-            if obj.ConfigMode
-                if ~isempty(varargin)
-                    error('cdr_top:InvalidResetInput', ...
-                        'Configured mode resetState accepts no input.');
-                end
-                obj.Pd.resetState();
-                obj.LoopFilter.resetState();
-                obj.PhaseInterpolator.resetState();
-                obj.configurePiNonideal();
-                obj.PhaseInterpolator.setCode(obj.Config.PiInitialCode);
-                obj.Dlev.resetState();
-                obj.Dlev.setStepSize(obj.Config.DlevStepSize);
-                obj.Ffe.resetState();
-                obj.FfeLoop.resetState();
-                obj.FfeLoop.setStepSize(obj.Config.FfeStepSize);
-                obj.Monitor.resetState();
-
-                obj.PreviousSymbol = [];
-                obj.PreviousDataSymbol = [];
-                obj.PreviousErrorBit = [];
-                obj.BlockIndex = 0;
-                obj.SampleBlockCount = 0;
-                obj.CurrentLocalIndexFloat = ...
-                    obj.PhaseInterpolator.getLocalIndex();
-                obj.PendingCentered = zeros(1, obj.Config.BlockSize);
-                obj.PendingPast = zeros(1, obj.Ffe.PostTapCount);
-                obj.PendingHasPast = false;
-                obj.HavePending = false;
-                obj.PendingCodeWrapped = 0;
-                obj.PendingUiSlip = 0;
-                obj.PendingBlockIndex = 0;
-                obj.GatedCoefficients = nan(1, obj.Ffe.TapCount);
-                obj.LastOutput = struct();
-                return;
-            end
-
-            initialSymbol = varargin{1};
-            obj.validateInitialSymbol(initialSymbol);
             obj.Pd.resetState();
             obj.LoopFilter.resetState();
             obj.PhaseInterpolator.resetState();
-            obj.PreviousSymbol = initialSymbol;
+            obj.configurePiNonideal();
+            obj.PhaseInterpolator.setCode(obj.Config.PiInitialCode);
+            obj.Dlev.resetState();
+            obj.Dlev.setStepSize(obj.Config.DlevStepSize);
+            obj.Ffe.resetState();
+            obj.FfeLoop.resetState();
+            obj.FfeLoop.setStepSize(obj.Config.FfeStepSize);
+            obj.Monitor.resetState();
+
+            obj.PreviousDataSymbol = [];
+            obj.PreviousErrorBit = [];
             obj.BlockIndex = 0;
-            obj.CurrentLocalIndexFloat = obj.PhaseInterpolator.getLocalIndex();
+            obj.SampleBlockCount = 0;
+            obj.CurrentLocalIndexFloat = ...
+                obj.PhaseInterpolator.getLocalIndex();
+            obj.PendingCentered = zeros(1, obj.Config.BlockSize);
+            obj.PendingPast = zeros(1, obj.Ffe.PostTapCount);
+            obj.PendingHasPast = false;
+            obj.HavePending = false;
+            obj.PendingCodeWrapped = 0;
+            obj.PendingUiSlip = 0;
+            obj.PendingBlockIndex = 0;
+            obj.GatedCoefficients = nan(1, obj.Ffe.TapCount);
             obj.LastOutput = struct();
         end
 
         function state = getState(obj)
-            % getState  返回当前模式的完整调试状态。
-            if ~obj.ConfigMode
-                state = struct();
-                state.BlockIndex = obj.BlockIndex;
-                state.PreviousSymbol = obj.PreviousSymbol;
-                state.CurrentLocalIndexFloat = obj.CurrentLocalIndexFloat;
-                state.LastOutput = obj.LastOutput;
-                state.Pd = obj.Pd.getState();
-                state.LoopFilter = obj.LoopFilter.getState();
-                state.PhaseInterpolator = obj.PhaseInterpolator.getState();
-                return;
-            end
-
+            % getState  返回完整调试状态。
             state = struct();
             state.Config = obj.Config;
             state.Detector = obj.Detector;
@@ -935,68 +813,6 @@ classdef cdr_top < handle
         function invalidField(~, field)
             error(['cdr_top:Invalid' field], ...
                 'config.%s has an invalid type or value.', field);
-        end
-
-        function dataPrevBlock = buildPreviousBlock(obj, dataCurrBlock)
-            if isrow(dataCurrBlock)
-                dataPrevBlock = [obj.PreviousSymbol, dataCurrBlock(1:end - 1)];
-            else
-                dataPrevBlock = [obj.PreviousSymbol; dataCurrBlock(1:end - 1)];
-            end
-        end
-
-        function validateBlockShape(obj, dataCurrBlock, edgeBitBlock)
-            isDataTypeValid = isnumeric(dataCurrBlock) || islogical(dataCurrBlock);
-            isDataShapeValid = isDataTypeValid && isreal(dataCurrBlock) && ...
-                isvector(dataCurrBlock);
-            isDataLengthValid = numel(dataCurrBlock) == obj.Voter.BlockSize;
-            if ~(isDataTypeValid && isDataShapeValid && isDataLengthValid)
-                error('cdr_top:InvalidDataBlock', ...
-                    ['dataCurrBlock must be a real vector with ' ...
-                    'Voter.BlockSize elements.']);
-            end
-
-            isEdgeTypeValid = isnumeric(edgeBitBlock) || islogical(edgeBitBlock);
-            isEdgeShapeValid = isEdgeTypeValid && isreal(edgeBitBlock) && ...
-                isvector(edgeBitBlock);
-            isEdgeSizeValid = isequal(size(edgeBitBlock), size(dataCurrBlock));
-            if ~(isEdgeTypeValid && isEdgeShapeValid && isEdgeSizeValid)
-                error('cdr_top:InvalidEdgeBlock', ...
-                    ['edgeBitBlock must be a real vector with the same size ' ...
-                    'and orientation as dataCurrBlock.']);
-            end
-        end
-
-        function validateInitialSymbol(obj, initialSymbol)
-            isNumericScalar = isnumeric(initialSymbol) && isreal(initialSymbol) && ...
-                isscalar(initialSymbol);
-            isFiniteInteger = isNumericScalar && isfinite(initialSymbol) && ...
-                initialSymbol == round(initialSymbol);
-            if ~(isNumericScalar && isFiniteInteger)
-                error('cdr_top:InvalidInitialSymbol', ...
-                    'initialSymbol must be a finite integer scalar.');
-            end
-            if strcmp(obj.Pd.Mode, 'nrz')
-                isValid = initialSymbol >= 0 && initialSymbol <= 1;
-            else
-                isValid = initialSymbol >= 0 && initialSymbol <= 3;
-            end
-            if ~isValid
-                error('cdr_top:InvalidInitialSymbol', ...
-                    'initialSymbol is invalid for the configured PD mode.');
-            end
-        end
-
-        function validateComponents(~, pd, voter, loopFilter, phaseInterpolator)
-            isPdValid = isa(pd, 'cdr_pd');
-            isVoterValid = isa(voter, 'cdr_voter');
-            isLoopValid = isa(loopFilter, 'cdr_loop');
-            isPiValid = isa(phaseInterpolator, 'cdr_pi');
-            if ~(isPdValid && isVoterValid && isLoopValid && isPiValid)
-                error('cdr_top:InvalidComponent', ...
-                    ['Components must be cdr_pd, cdr_voter, cdr_loop, ' ...
-                    'and cdr_pi objects.']);
-            end
         end
     end
 end

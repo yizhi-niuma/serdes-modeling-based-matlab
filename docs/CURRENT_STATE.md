@@ -2,6 +2,26 @@
 
 Updated: 2026-09-26
 
+## 2026-09-26: `cdr_top` reduced to the config-struct path only
+
+- The legacy five-argument component-injection constructor and its BBPD
+  `processBlock(data, edge)` / `processBlockFast` / `resetState(initialSymbol)`
+  semantics, plus `PreviousSymbol` and `ConfigMode`, were removed from
+  `src/CDR/cdr_top.m` (−223 lines). Construction is now `cdr_top(config)` only;
+  wrong type or arity raises `cdr_top:InvalidConfig`. `processBlock(centeredCode)`,
+  `flush()` and the no-argument `resetState()` no longer branch on a mode flag.
+- `tests/CDR/test_cdr_top.m` (six legacy checks) was deleted;
+  `test_cdr_top_configured.m` dropped its two legacy-only checks (12 → 11). No
+  file still references the removed API.
+- Verified: `tests/CDR` 15/17 (`test_cdr_top_configured` 11/11), the only
+  failures being the pre-existing `test_cdr_ffe` / `test_cdr_ffe_loop` pair
+  (sources byte-identical to HEAD). ppm and v4 runners both smoke-pass through
+  the config path (2/2 locked, `AllPhaseLock = 1`). Docs synced: `ARCHITECTURE.md`
+  `cdr_top` sections, `MODEL_ASSUMPTIONS.md` CDR top-level assumptions, and
+  `CDR_SUB_BLOCKS.md` §11 no longer describe the legacy path; the historical
+  2026-09-23 decision that introduced the dual path is retained in `DECISIONS.md`
+  with a superseding entry.
+
 ## 2026-09-26: measured trackable frequency-offset range of the ppm suite
 
 - New reusable probe `validation/CDR/test_cdr_three_loop_wi_ppm/ppm_tracking_range.m` (ladder + integer bisection + 32-start confirmation, always `SaveOutputs = false`). Full evidence in `docs/VALIDATION.md` and `result/ppm_tracking_range_notes.txt`.

@@ -183,22 +183,34 @@ Phase-interpolator behavioral model with:
 
 ### `cdr_top.m`
 
-Block-rate digital integration model with:
+Block-rate code-domain CDR DSP core, constructed from a single configuration
+struct (`cdr_top(config)`; a non-struct or wrong arity raises
+`cdr_top:InvalidConfig`). It provides:
 
-- Explicit composition of configured `cdr_pd`, `cdr_voter`, `cdr_loop`, and `cdr_pi` objects.
-- Cross-block previous-symbol state owned by the top level.
-- One PD/voter/loop/PI update per configured voter block.
-- The PI phase entering a block exposed separately from the updated phase used by the following block.
-- Validated/debug and reduced-overhead fast processing paths.
-- Coordinated reset of PD, loop-filter, PI, block index, and previous-symbol state.
+- Ownership and composition of `cdr_pd` (MMPD), `cdr_voter`, `cdr_loop`,
+  `cdr_pi`, `cdr_ffe` plus its cross-block window, a static PAM4 slicer,
+  `dlev_loop`, `cdr_ffe_loop` and `loop_monitor`.
+- One PD/voter/loop/PI update per configured voter block, driven by
+  `processBlock(centeredCode)`.
+- The PI phase entering a block exposed separately from the updated phase used
+  by the following block.
+- Coordinated reset of every owned sub-block and all pipeline/top-level state
+  through the no-argument `resetState()`.
 
-The current top-level input is already-sliced digital data-symbol and edge-bit
-blocks. It does not yet own waveform sampling, the dedicated CDR FFE, slicers,
-or the TI ADC connection. This describes the legacy component-injection path only; the configured mode below owns the CDR FFE and the slicer, but still never the ADC.
+The 2026-09-26 refactor removed the earlier five-argument component-injection
+constructor and its BBPD `processBlock(data, edge)` / `processBlockFast` /
+`resetState(initialSymbol)` semantics, together with the `PreviousSymbol` and
+`ConfigMode` fields; the class is now config-struct only. Its input is one block
+of chronological, zero-centred ADC codes and its output is the next sampling
+phase. It does not own waveform sampling, the TI ADC connection, or absolute UI
+addressing, but it does own the CDR FFE and the slicer.
 
-### `cdr_top` configured code-domain mode (2026-09-23)
+### `cdr_top` configured code-domain mode (2026-09-23; sole path since 2026-09-26)
 
-`cdr_top` now also accepts a single configuration struct. That second construction path turns the class into the reusable code-domain CDR DSP core while leaving the legacy five-argument BBPD path byte-for-byte unchanged.
+`cdr_top` is constructed from a single configuration struct. That construction
+path makes the class the reusable code-domain CDR DSP core. (Until 2026-09-26 a
+second, five-argument BBPD component-injection path also existed; it has since
+been removed, so the description below is now the only path.)
 
 - Owns `cdr_ffe` plus its cross-block window, a static PAM4 slicer (`cdr_top.slicePam4`), `cdr_pd` in MMPD mode, `cdr_voter` in mean mode, `cdr_loop`, `cdr_pi`, `dlev_loop`, `cdr_ffe_loop` and `loop_monitor`.
 - Input is one block of chronological, zero-centred ADC codes; output is the next sampling phase through `getSamplingPhase`. The class contains no reference to any ADC model, so the caller keeps waveform access, TI ADC instantiation, lane reordering and absolute UI addressing.
