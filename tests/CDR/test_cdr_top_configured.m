@@ -16,12 +16,11 @@ testSlicePam4Encoding();
 testDetectorAliasEquivalence();
 testFreezeModeInhibitsWrite();
 testPvtTrackKeepsWritingAndDropsStep();
-testSettleDownshiftFiresOnce();
 testSnrSettleGateDownshift();
 testResetStateRestoresInitialState();
 testInvalidConfigRejected();
 
-fprintf('test_cdr_top_configured passed 11 / 11 checks.\n');
+fprintf('test_cdr_top_configured passed 10 / 10 checks.\n');
 end
 
 % ---------------------------------------------------------------- fixtures
@@ -42,8 +41,6 @@ cfg.DlevInnerInit = 1;
 cfg.DlevOuterInit = 3;
 cfg.DlevStepSize = 1e-12;
 cfg.DlevStepSizeSettle = 1e-12;
-cfg.DlevSettleWindow = 4;
-cfg.DlevSettleTol = 0.5;
 cfg.FfeStepSize = 0;
 cfg.FfeStepSizeSettle = 0;
 cfg.FfeStepSizePvtTrack = 0;
@@ -99,7 +96,7 @@ top = cdr_top(baseConfig());
 assert(code == 10 && slip == 0);
 state = top.getState();
 assert(state.BlockIndex == 0 && state.SampleBlockCount == 0);
-assert(~state.HavePending && ~state.SettleDone);
+assert(~state.HavePending);
 % config 模式下 getState 必须暴露全部有状态子模块。
 for name = {'Dlev', 'Ffe', 'FfeLoop', 'Monitor'}
     assert(isfield(state, name{1}));
@@ -283,40 +280,11 @@ end
 assert(sawWrite, 'pvt-track mode produced no post-engage write.');
 end
 
-function testSettleDownshiftFiresOnce()
-cfg = baseConfig();
-% 本检查针对旧 dLev 位移判据的契约，必须显式选回该门控：cdr_top 的默认
-% SettleGate 已改为 'snr'(眼质量)，否则 dLev 判据根本不会被消费。
-cfg.SettleGate = 'dlev';
-cfg.FfeStepSize = 0.01;
-cfg.FfeStepSizeSettle = 0.001;
-cfg.DlevStepSize = 1e-9;
-cfg.DlevStepSizeSettle = 1e-10;
-cfg.DlevSettleWindow = 4;
-top = cdr_top(cfg);
-outputs = driveAlternating(top, 14);
-
-settleFlags = cellfun(@(out) out.SettleDone, outputs);
-blockIndex = cellfun(@(out) out.BlockIndex, outputs);
-firstSettle = find(settleFlags, 1);
-assert(~isempty(firstSettle), 'The mu downshift never fired.');
-% dlev 几乎不动 => 满足 SettleWindow 条件的第一个块就换挡。
-assert(blockIndex(firstSettle) == cfg.DlevSettleWindow + 1);
-assert(all(settleFlags(firstSettle:end)), ...
-    'SettleDone must latch and never clear.');
-assert(~any(settleFlags(1:firstSettle - 1)));
-
-state = top.getState();
-assert(state.FfeLoop.StepSize == cfg.FfeStepSizeSettle);
-assert(state.Dlev.StepSize == cfg.DlevStepSizeSettle);
-end
-
 function testSnrSettleGateDownshift()
 % 眼质量门控换挡在 cdr_top 侧的接线与动作施加。
 % 判据本身(平滑、一次性、闭眼瞬态不误触、minBlock 压制)在 test_loop_monitor
 % 覆盖；这里只验证 cdr_top 会算 FOM、会消费触发、并把两个环路的步长都降下来。
 cfg = baseConfig();
-cfg.SettleGate = 'snr';
 % 阈值取极低 + alpha=1 让触发在本夹具上确定化，不依赖具体 SNR 数值。
 cfg.SnrSettleThresholdDb = -100;
 cfg.SnrSettleAlpha = 1;
@@ -346,10 +314,6 @@ assert(dlevMu(firstDone) == cfg.DlevStepSizeSettle, ...
     'Stage 1 must drop the dLev step, not only the FFE step.');
 assert(ffeMu(firstDone) == cfg.FfeStepSizeSettle);
 
-% snr 模式下旧 dLev 判据不得被消费。
-assert(~any(cellfun(@(out) out.SettleDone, outputs)), ...
-    'The legacy dLev settle detector must stay untouched in snr mode.');
-
 state = top.getState();
 assert(state.Monitor.SnrSettleEnabled);
 assert(state.Monitor.SnrSettleBlock == blockIndex(firstDone));
@@ -367,12 +331,11 @@ assert(dirty.Monitor.Frozen && dirty.BlockIndex > 0);
 top.resetState();
 clean = top.getState();
 assert(clean.BlockIndex == 0 && clean.SampleBlockCount == 0);
-assert(~clean.HavePending && ~clean.PendingHasPast && ~clean.SettleDone);
+assert(~clean.HavePending && ~clean.PendingHasPast);
 assert(isempty(clean.PreviousDataSymbol) && isempty(clean.PreviousErrorBit));
-% 换挡与门控的判决状态都归 loop_monitor 所有，cdr_top 不再自留副本。
-assert(~clean.Monitor.SettleDone && isnan(clean.Monitor.SettleBlock));
-assert(clean.Monitor.DlevSettleEnabled);
-assert(clean.Monitor.DlevHistoryLength == cfg.DlevSettleWindow + 1);
+% 门控与换挡的判决状态都归 loop_monitor 所有，cdr_top 不再自留副本。
+assert(~clean.Monitor.SnrSettleDone && isnan(clean.Monitor.SnrSettleBlock));
+assert(clean.Monitor.SnrSettleEnabled);
 assert(all(isnan(clean.GatedCoefficients)));
 assert(~clean.Monitor.Frozen && clean.Monitor.EventCount == 0);
 assert(isequal(clean.Ffe.Coefficients, cfg.FfeInitCoefficients));

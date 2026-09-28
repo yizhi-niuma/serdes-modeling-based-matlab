@@ -17,8 +17,6 @@ testPermanentFreeze();
 testCausalityAndIndependentInstances();
 testUnwrappedCodesRemainDistinct();
 testInvalidInputs();
-testDlevSettleOneShotAndRingBuffer();
-testDlevSettleDisabledAndInvalidInputs();
 testSnrSettleRejectsClosedEyeTransients();
 testSnrSettleDisabledAndInvalidInputs();
 testFrequencyStateLockStatic();
@@ -222,102 +220,6 @@ for index = 1:numel(codes)
 end
 end
 
-function testDlevSettleOneShotAndRingBuffer()
-% dLev 换挡判据：与窗口前的记录值比较，一次性触发且永不清除；
-% 历史用长度 Window+1 的环形缓冲，内存不随块数增长。
-window = 4;
-tol = 0.5;
-monitor = loop_monitor(1000, 1000, 3, 1, window, tol);
-state = monitor.getState();
-assert(state.DlevSettleEnabled && state.DlevSettleWindow == window);
-assert(state.DlevSettleTol == tol && ~state.SettleDone);
-assert(isnan(state.SettleBlock));
-
-% 前 window 个块只记录，不判定。
-level = 100;
-for block = 1:window
-    assert(~monitor.updateDlevSettle(block, level));
-    level = level - 10;   % 快速漂移
-    monitor.recordDlevOuter(block, level);
-end
-assert(~monitor.SettleDone);
-
-% block 5 与 block 1 的记录相差 30 > tol，不触发。
-assert(~monitor.updateDlevSettle(window + 1, level));
-monitor.recordDlevOuter(window + 1, level);
-assert(~monitor.SettleDone);
-
-% 之后保持不动，窗口滑过来后必须触发一次。
-triggerBlock = NaN;
-for block = window + 2:window + 12
-    triggered = monitor.updateDlevSettle(block, level);
-    if triggered
-        assert(isnan(triggerBlock), 'The settle detector fired more than once.');
-        triggerBlock = block;
-    end
-    monitor.recordDlevOuter(block, level);
-end
-assert(~isnan(triggerBlock), 'The settle detector never fired.');
-assert(monitor.SettleDone && monitor.SettleBlock == triggerBlock);
-assert(triggerBlock == 2 * window, ...
-    'Expected the first flat comparison to fire at block %d.', 2 * window);
-
-% 触发后即使再次满足条件也不重复触发。
-for block = window + 13:window + 20
-    assert(~monitor.updateDlevSettle(block, level));
-    monitor.recordDlevOuter(block, level);
-end
-assert(monitor.SettleBlock == triggerBlock);
-
-% 环形缓冲长度有界：跑 5000 块后历史长度仍是 Window+1。
-lengthBefore = monitor.getState().DlevHistoryLength;
-assert(lengthBefore == window + 1);
-for block = window + 21:window + 5000
-    monitor.updateDlevSettle(block, level);
-    monitor.recordDlevOuter(block, level);
-end
-assert(monitor.getState().DlevHistoryLength == lengthBefore, ...
-    'The dLev settle history must not grow with the block count.');
-
-% resetState 清回未触发，并清空历史。
-monitor.resetState();
-assert(~monitor.SettleDone && isnan(monitor.SettleBlock));
-assertThrowsId(@() monitor.updateDlevSettle(window + 1, level), ...
-    'loop_monitor:MissingDlevHistory');
-end
-
-function testDlevSettleDisabledAndInvalidInputs()
-% 4 参数构造只启用 FFE 门控，dLev 检测器必须显式拒绝调用。
-gateOnly = loop_monitor(3, 2, 1, 1);
-assert(~gateOnly.getState().DlevSettleEnabled);
-assertThrowsId(@() gateOnly.updateDlevSettle(1, 10), ...
-    'loop_monitor:DlevSettleDisabled');
-assertThrowsId(@() gateOnly.recordDlevOuter(1, 10), ...
-    'loop_monitor:DlevSettleDisabled');
-
-assertThrowsId(@() loop_monitor(3, 2, 1, 1, 0, 0.5), ...
-    'loop_monitor:InvalidDlevSettleWindow');
-assertThrowsId(@() loop_monitor(3, 2, 1, 1, 4, -1), ...
-    'loop_monitor:InvalidDlevSettleTol');
-assertThrowsId(@() loop_monitor(3, 2, 1, 1, 4, Inf), ...
-    'loop_monitor:InvalidDlevSettleTol');
-assertThrowsId(@() loop_monitor(3, 2, 1, 1, 4), ...
-    'loop_monitor:InvalidConstructor');
-
-monitor = loop_monitor(3, 2, 1, 1, 4, 0.5);
-assertThrowsId(@() monitor.updateDlevSettle(0, 10), 'loop_monitor:InvalidBlock');
-assertThrowsId(@() monitor.updateDlevSettle(1, NaN), ...
-    'loop_monitor:InvalidDlevOuter');
-assertThrowsId(@() monitor.recordDlevOuter(1, Inf), ...
-    'loop_monitor:InvalidDlevOuter');
-
-% 两个检测器互不干扰：门控推进不影响换挡状态，反之亦然。
-assert(~monitor.updateFfeGate(7, 1));
-assert(~monitor.SettleDone);
-monitor.recordDlevOuter(1, 10);
-assert(monitor.LastBlock == 1);
-end
-
 function testSnrSettleRejectsClosedEyeTransients()
 % 眼质量换挡判据必须拒绝"闭眼但瞬时读数很好"的序列。
 %
@@ -340,7 +242,7 @@ closedEye(spikePeriod:spikePeriod:closedEyeBlocks) = closedEyeSpike;
 assert(max(closedEye) >= thresholdDb, ...
     'The fixture must contain single-block readings above the threshold.');
 
-monitor = loop_monitor(3, 2, 1, 1, 4, 0.5);
+monitor = loop_monitor(3, 2, 1, 1);
 assert(~monitor.getState().SnrSettleEnabled);
 monitor.enableSnrSettle(thresholdDb, alpha, minBlock);
 state = monitor.getState();
@@ -382,7 +284,7 @@ end
 assert(monitor.SnrSettleBlock == triggerBlock);
 
 % minBlock 必须压住早期触发,即使读数一直在阈值之上。
-early = loop_monitor(3, 2, 1, 1, 4, 0.5);
+early = loop_monitor(3, 2, 1, 1);
 early.enableSnrSettle(thresholdDb, 1, 50);
 for block = 1:49
     assert(~early.updateSnrSettle(block, openEyeDb));
@@ -394,7 +296,7 @@ end
 
 function testSnrSettleDisabledAndInvalidInputs()
 % 未显式 enableSnrSettle 前必须拒绝调用；构造参数校验与既有检测器风格一致。
-monitor = loop_monitor(3, 2, 1, 1, 4, 0.5);
+monitor = loop_monitor(3, 2, 1, 1);
 assertThrowsId(@() monitor.updateSnrSettle(1, 10), ...
     'loop_monitor:SnrSettleDisabled');
 
@@ -414,13 +316,12 @@ assertThrowsId(@() monitor.updateSnrSettle(0, 10), 'loop_monitor:InvalidBlock');
 assertThrowsId(@() monitor.updateSnrSettle(1, 'x'), 'loop_monitor:InvalidSnr');
 assertThrowsId(@() monitor.updateSnrSettle(1, [1 2]), 'loop_monitor:InvalidSnr');
 
-% 三个检测器互不干扰。
+% 两个检测器互不干扰。
 assert(~monitor.updateFfeGate(7, 1));
-assert(~monitor.SnrSettleDone && ~monitor.SettleDone);
-monitor.recordDlevOuter(1, 10);
+assert(~monitor.SnrSettleDone);
 assert(monitor.LastBlock == 1);
 assert(~monitor.updateSnrSettle(1, 10));
-assert(monitor.LastBlock == 1 && ~monitor.SettleDone);
+assert(monitor.LastBlock == 1 && ~monitor.SnrSettleDone);
 end
 
 function testFrequencyStateLockStatic()

@@ -230,8 +230,8 @@ loopFrequencyTrace = zeros(numStartPhase, numBlocks);
 % Block at which the stage-2 (settle -> PVT-track) gate actually fired for
 % each start phase; NaN if it never fired over the run.
 stage2GateBlock = nan(1, numStartPhase);
-% Block at which the stage-1 (capture -> settle) SNR downshift fired. NaN
-% when SettleGate is not 'snr', in which case no SNR block exists.
+% Block at which the stage-1 (capture -> settle) SNR downshift fired, or NaN
+% if the eye SNR never crossed the threshold over the run.
 stage1SettleBlock = nan(1, numStartPhase);
 loopCodeResidueTrace = zeros(numStartPhase, numBlocks);
 loopPendingCodeTrace = zeros(numStartPhase, numBlocks);
@@ -255,8 +255,6 @@ freqDiagList = cell(1, numStartPhase);
 rotationDiagList = cell(1, numStartPhase);
 piCenterDiagnostics = cell(1, numStartPhase);
 phaseSettleStd = nan(1, numStartPhase);
-settleDoneFlag = false(1, numStartPhase);
-freqAcqEnableBlock = nan(1, numStartPhase);
 slewSaturatedFlag = false(1, numStartPhase);
 slewDeltaMeanAbs = nan(1, numStartPhase);
 slewPendingMeanAbs = nan(1, numStartPhase);
@@ -294,13 +292,7 @@ for startIndex = 1:numStartPhase
     cfg.VoterMode = 'mean';
     cfg.VoterDenominator = 'auto';
     cfg.Kp = options.Kp;
-    if options.FreqAcqPonly && ~isZeroPpm
-        % Proportional-only acquisition; the integral gain is enabled below
-        % once the eye is open (dLev settle).
-        cfg.Ki = 0;
-    else
-        cfg.Ki = options.Ki;
-    end
+    cfg.Ki = options.Ki;
     cfg.FrequencyLimit = options.FrequencyLimit;
     cfg.MaxDeltaCode = options.MaxDeltaCode;
     cfg.PiNumBit = 7;
@@ -311,10 +303,7 @@ for startIndex = 1:numStartPhase
     cfg.DlevPolarity = options.DlevPolarity;
     cfg.DlevStepSize = options.StepSize;
     cfg.DlevStepSizeSettle = options.StepSizeSettle;
-    cfg.DlevSettleWindow = options.DlevSettleWindow;
-    cfg.DlevSettleTol = options.DlevSettleTol;
     cfg.DlevStepSizePvtTrack = options.DlevStepSizePvtTrack;
-    cfg.SettleGate = options.SettleGate;
     cfg.SnrSettleThresholdDb = options.SnrSettleThresholdDb;
     cfg.SnrSettleAlpha = options.SnrSettleAlpha;
     cfg.SnrSettleMinBlock = options.SnrSettleMinBlock;
@@ -347,11 +336,6 @@ for startIndex = 1:numStartPhase
     cfg.FfeGateFreqRateTol = options.FreqRateTol;
     cfg.FfeGateFreqMinBlock = 1;
     top = cdr_top(cfg);
-    % Frequency-acquisition schedule: enable the integral gain once the eye is
-    % open. Uses cdr_loop.setGains on the (public-read) loop-filter handle, so
-    % no src/CDR module is modified and cdr_top's dLev-settle mu-downshift is
-    % left intact.
-    kiEnablePending = options.FreqAcqPonly && ~isZeroPpm;
 
     adcModel = ti_adc_top(adcLaneCount, -adcFullRange, adcFullRange, ...
         adcResolutionBits, adcSarPerTah, samplePerSymbol);
@@ -430,18 +414,8 @@ for startIndex = 1:numStartPhase
                 histogramOutputHistory = ...
                     [histogramOutputHistory, out.FfeOutput]; %#ok<AGROW>
             end
-            % Enable the integral gain once the eye is open (dLev settle),
-            % completing the proportional-only frequency-acquisition schedule.
-            if kiEnablePending && out.SettleDone
-                top.LoopFilter.setGains(options.Kp, options.Ki);
-                kiEnablePending = false;
-                freqAcqEnableBlock(startIndex) = blockIndex;
-            end
         end
     end
-
-    topState = top.getState();
-    settleDoneFlag(startIndex) = topState.SettleDone;
 
     settleWindow = unwrappedPhaseTrace(startIndex, end - settleBlocks + 1:end);
     phaseSettleStd(startIndex) = std(settleWindow);
@@ -1020,7 +994,6 @@ result.FfeInitMode = lower(char(options.FfeInitMode));
 result.FfeInitCoefficients = ffeInitCoefficients;
 result.FfeStepSize = options.FfeStepSize;
 result.FfeStepSizeSettle = options.FfeStepSizeSettle;
-result.SettleGate = options.SettleGate;
 result.SnrSettleThresholdDb = options.SnrSettleThresholdDb;
 result.SnrSettleAlpha = options.SnrSettleAlpha;
 result.SnrSettleMinBlock = options.SnrSettleMinBlock;
@@ -1062,7 +1035,6 @@ result.DlevInnerTrace = dlevInnerTrace;
 result.DlevOuterTrace = dlevOuterTrace;
 result.DlevThresholdTrace = dlevThresholdTrace;
 result.FfeCoeffTrace = ffeCoeffTrace;
-result.SettleDoneFlag = settleDoneFlag;
 result.SettleBlocks = settleBlocks;
 result.LockWindowBlocks = piLockWindowBlocks;
 result.LockMinEvents = piLockMinEvents;
@@ -1170,16 +1142,6 @@ defaults.Kp = 8.0;
 defaults.Ki = 0.03;
 defaults.MaxDeltaCode = 1;
 defaults.FrequencyLimit = 4;
-% Frequency-acquisition aid (runner-side schedule only; no src/CDR change).
-% With a cold planB FFE the eye is closed while the ppm offset already drifts
-% the sampling point, so from the far initial phases the loop latches the wrong
-% S-curve slope and runs the integrator to the frequency clamp. Running the
-% integral path off (proportional-only, a type-1 loop) during acquisition makes
-% the loop follow the drift with a small static phase error while staying on the
-% correct slope; once the eye is open (dLev settle) the integral gain is enabled
-% and the integrator builds the correct steady frequency. The dLev-settle
-% mu-downshift inside cdr_top is untouched; this only schedules Ki.
-defaults.FreqAcqPonly = false;
 defaults.Polarity = 1;
 % MMPD transition qualification. true keeps only the symmetric -3<->+3 and
 % -1<->+1 transitions (fewer, cleaner PD samples, lower ISI-induced bias);
@@ -1190,18 +1152,15 @@ defaults.Polarity = 1;
 defaults.TransitionFilter = true;
 defaults.StepSize = 0.5;
 defaults.StepSizeSettle = 0.1;
-defaults.DlevSettleWindow = 16;
-defaults.DlevSettleTol = 0.5;
 % Two-stage mu downshift.
 %   Stage 1 (capture -> settle) is gated on eye quality: the averaged
-%   decision-directed SNR crossing SnrSettleThresholdDb. The legacy 'dlev'
-%   gate fires on an outer-dLev displacement test that a slowly ramping dLev
-%   satisfies while the eye is still closed; measured at -100 ppm it fired at
+%   decision-directed SNR crossing SnrSettleThresholdDb. A legacy outer-dLev
+%   displacement gate was removed from cdr_top on 2026-09-26; it fired on a
+%   drift-rate the eye had not yet earned (measured at -100 ppm it fired at
 %   block 84 with 59% of the dLev trajectory still ahead, cut the FFE step 20x
-%   and left the eye closed, so no start phase could acquire.
+%   and left the eye closed, so no start phase could acquire).
 %   Stage 2 (settle -> PVT track) reuses the existing phase-band lock gate
 %   (FfeGate*) and drops both loops again to tracking-only step sizes.
-defaults.SettleGate = 'snr';
 defaults.SnrSettleThresholdDb = 15;
 defaults.SnrSettleAlpha = 1 / 128;
 defaults.SnrSettleMinBlock = 200;

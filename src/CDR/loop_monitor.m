@@ -19,27 +19,22 @@ classdef loop_monitor < handle
     %    permanently. updateFfeGate returns true only on that transition.
     %    No sample trace is retained, only sparse SEARCH counts.
     %
-    % 2) dLev settle detector. A one-shot comparison of the current outer dLev
-    %    against the value recorded DlevSettleWindow blocks earlier. The
-    %    history is a ring buffer of DlevSettleWindow+1 entries, so memory is
-    %    bounded regardless of the simulation length. Callers must record the
-    %    post-update outer level once per block with recordDlevOuter.
-    %
-    % 3) Eye-quality (SNR) settle detector. A one-shot trigger on an
+    % 2) Eye-quality (SNR) settle detector. A one-shot trigger on an
     %    exponentially weighted average of a per-block decision-directed SNR
-    %    in dB. Memory is one scalar, so it is bounded by construction. It
-    %    exists because the dLev settle detector above is a displacement test
-    %    over a fixed window, i.e. an implicit drift-rate threshold of
-    %    DlevSettleTol/DlevSettleWindow: a dLev level that is still ramping
-    %    slowly satisfies it and reports settle while the eye is still closed.
-    %    The SNR detector instead observes the quantity that actually matters
-    %    for a mu downshift, namely whether the eye is open. Per-block SNR is
+    %    in dB. Memory is one scalar, so it is bounded by construction. It is
+    %    the sole stage-1 (capture -> settle) mu-downshift gate: it observes
+    %    whether the eye is open, the quantity that actually matters for a mu
+    %    downshift. (A dLev settle detector, a displacement test over a fixed
+    %    window, previously served this role; being an implicit drift-rate
+    %    threshold it reported settle while a slowly ramping dLev kept the eye
+    %    closed, so it was removed on 2026-09-26 in favour of this gate.)
+    %    Per-block SNR is
     %    far too noisy to threshold directly (a drifting unlocked loop sweeps
     %    through the eye centre and produces good single-block readings), so
     %    the average is mandatory rather than cosmetic. Enable it explicitly
     %    with enableSnrSettle; the constructor arity is unchanged.
     %
-    % 4) Loop-frequency-state lock gate. A one-shot ONLINE form of the
+    % 3) Loop-frequency-state lock gate. A one-shot ONLINE form of the
     %    detectFrequencyStateLock criterion defined below. It keeps a ring
     %    buffer of the last windowBlocks loop frequency-state samples and,
     %    once that buffer is full, hands the ordered window to that very same
@@ -74,11 +69,6 @@ classdef loop_monitor < handle
         EventCount = 0
         ResetCount = 0
         LastBlock = NaN
-        DlevSettleEnabled = false
-        DlevSettleWindow = NaN
-        DlevSettleTol = NaN
-        SettleDone = false
-        SettleBlock = NaN
         SnrSettleEnabled = false
         SnrSettleThresholdDb = NaN
         SnrSettleAlpha = NaN
@@ -104,27 +94,23 @@ classdef loop_monitor < handle
         SearchCounts = zeros(1, 0)
         HavePrevious = false
         PreviousCode = NaN
-        DlevRingValue = zeros(1, 0)
-        DlevRingBlock = zeros(1, 0)
         FreqRingValue = zeros(1, 0)
     end
 
     methods
         function obj = loop_monitor(minModeOccurrences, minEvents, ...
-                bandHalfWidth, startBlock, dlevSettleWindow, dlevSettleTol)
+                bandHalfWidth, startBlock)
             %LOOP_MONITOR Construct with explicit thresholds.
             %
             %   loop_monitor(minModeOccurrences, minEvents, bandHalfWidth, ...
             %       startBlock)
-            %       enables the FFE write gate only.
-            %
-            %   loop_monitor(..., dlevSettleWindow, dlevSettleTol)
-            %       additionally enables the dLev settle detector.
-            if nargin ~= 4 && nargin ~= 6
+            %       enables the FFE write gate. The eye-quality (SNR) settle
+            %       detector and the frequency-state lock gate are enabled
+            %       separately with enableSnrSettle / enableFreqStateGate.
+            if nargin ~= 4
                 error('loop_monitor:InvalidConstructor', ...
                     ['Expected minModeOccurrences, minEvents, ', ...
-                    'bandHalfWidth, and startBlock, optionally followed by ', ...
-                    'dlevSettleWindow and dlevSettleTol.']);
+                    'bandHalfWidth, and startBlock.']);
             end
             obj.validateInteger(minModeOccurrences, 1, ...
                 'InvalidMinModeOccurrences', 'minModeOccurrences');
@@ -138,15 +124,6 @@ classdef loop_monitor < handle
             obj.MinEvents = double(minEvents);
             obj.BandHalfWidth = double(bandHalfWidth);
             obj.StartBlock = double(startBlock);
-
-            if nargin == 6
-                obj.validateInteger(dlevSettleWindow, 1, ...
-                    'InvalidDlevSettleWindow', 'dlevSettleWindow');
-                obj.validateTolerance(dlevSettleTol);
-                obj.DlevSettleEnabled = true;
-                obj.DlevSettleWindow = double(dlevSettleWindow);
-                obj.DlevSettleTol = double(dlevSettleTol);
-            end
 
             obj.resetState();
         end
@@ -165,16 +142,6 @@ classdef loop_monitor < handle
             obj.SearchCounts = zeros(1, 0);
             obj.HavePrevious = false;
             obj.PreviousCode = NaN;
-            obj.SettleDone = false;
-            obj.SettleBlock = NaN;
-            if obj.DlevSettleEnabled
-                ringLength = obj.DlevSettleWindow + 1;
-                obj.DlevRingValue = nan(1, ringLength);
-                obj.DlevRingBlock = nan(1, ringLength);
-            else
-                obj.DlevRingValue = zeros(1, 0);
-                obj.DlevRingBlock = zeros(1, 0);
-            end
             obj.FreqGateDone = false;
             obj.FreqGateBlock = NaN;
             obj.FreqGateSampleCount = 0;
@@ -251,48 +218,6 @@ classdef loop_monitor < handle
             end
         end
 
-        function triggered = updateDlevSettle(obj, blockIndex, dlevOuter)
-            %UPDATEDLEVSETTLE Report the one-shot dLev settle transition.
-            %
-            % dlevOuter is the outer level observed before this block's dLev
-            % update, matching the reference block order. The comparison uses
-            % the value recorded DlevSettleWindow blocks earlier.
-            obj.requireDlevSettleEnabled('updateDlevSettle');
-            obj.validateInteger(blockIndex, 1, 'InvalidBlock', 'blockIndex');
-            obj.validateLevel(dlevOuter, 'dlevOuter');
-            blockIndex = double(blockIndex);
-
-            triggered = false;
-            if obj.SettleDone || blockIndex <= obj.DlevSettleWindow
-                return;
-            end
-
-            targetBlock = blockIndex - obj.DlevSettleWindow;
-            slot = obj.ringSlot(targetBlock);
-            if obj.DlevRingBlock(slot) ~= targetBlock
-                error('loop_monitor:MissingDlevHistory', ...
-                    ['No recorded outer dLev for block %d; call ', ...
-                    'recordDlevOuter once per block.'], targetBlock);
-            end
-
-            if abs(double(dlevOuter) - obj.DlevRingValue(slot)) <= obj.DlevSettleTol
-                obj.SettleDone = true;
-                obj.SettleBlock = blockIndex;
-                triggered = true;
-            end
-        end
-
-        function recordDlevOuter(obj, blockIndex, dlevOuter)
-            %RECORDDLEVOUTER Store this block's post-update outer dLev level.
-            obj.requireDlevSettleEnabled('recordDlevOuter');
-            obj.validateInteger(blockIndex, 1, 'InvalidBlock', 'blockIndex');
-            obj.validateLevel(dlevOuter, 'dlevOuter');
-            blockIndex = double(blockIndex);
-            slot = obj.ringSlot(blockIndex);
-            obj.DlevRingValue(slot) = double(dlevOuter);
-            obj.DlevRingBlock(slot) = blockIndex;
-        end
-
         function enableSnrSettle(obj, thresholdDb, alpha, minBlock)
             %ENABLESNRSETTLE Turn on the eye-quality settle detector.
             %
@@ -302,8 +227,8 @@ classdef loop_monitor < handle
             %   suppresses the trigger while the average is still warming up.
             %
             %   This is a separate configuration call rather than extra
-            %   constructor arguments so the documented 4/6 constructor arity
-            %   stays valid for every existing caller.
+            %   constructor arguments so the documented 4-argument constructor
+            %   arity stays valid for every existing caller.
             if nargin ~= 4
                 error('loop_monitor:InvalidSnrSettleConfig', ...
                     'Expected thresholdDb, alpha, and minBlock.');
@@ -394,8 +319,8 @@ classdef loop_monitor < handle
             %   window is rejected by the criterion itself.
             %
             %   This is a separate configuration call rather than extra
-            %   constructor arguments so the documented 4/6 constructor arity
-            %   stays valid for every existing caller.
+            %   constructor arguments so the documented 4-argument constructor
+            %   arity stays valid for every existing caller.
             if nargin ~= 7
                 error('loop_monitor:InvalidFreqGateConfig', ...
                     ['Expected windowBlocks, expectedRate, ', ...
@@ -513,12 +438,6 @@ classdef loop_monitor < handle
                 state.SearchModeUnwrapped = min( ...
                     obj.SearchCodes(obj.SearchCounts == largestCount));
             end
-            state.DlevSettleEnabled = obj.DlevSettleEnabled;
-            state.DlevSettleWindow = obj.DlevSettleWindow;
-            state.DlevSettleTol = obj.DlevSettleTol;
-            state.DlevHistoryLength = numel(obj.DlevRingValue);
-            state.SettleDone = obj.SettleDone;
-            state.SettleBlock = obj.SettleBlock;
             state.SnrSettleEnabled = obj.SnrSettleEnabled;
             state.SnrSettleThresholdDb = obj.SnrSettleThresholdDb;
             state.SnrSettleAlpha = obj.SnrSettleAlpha;
@@ -760,18 +679,6 @@ classdef loop_monitor < handle
             obj.PreviousCode = NaN;
         end
 
-        function slot = ringSlot(obj, blockIndex)
-            slot = mod(blockIndex - 1, obj.DlevSettleWindow + 1) + 1;
-        end
-
-        function requireDlevSettleEnabled(obj, methodName)
-            if ~obj.DlevSettleEnabled
-                error('loop_monitor:DlevSettleDisabled', ...
-                    ['%s requires the dLev settle detector; construct with ', ...
-                    'dlevSettleWindow and dlevSettleTol.'], methodName);
-            end
-        end
-
         function requireSnrSettleEnabled(obj, methodName)
             if ~obj.SnrSettleEnabled
                 error('loop_monitor:SnrSettleDisabled', ...
@@ -795,15 +702,6 @@ classdef loop_monitor < handle
                 error(['loop_monitor:' idSuffix], ...
                     '%s must be a finite integer scalar in its valid range.', ...
                     argumentName);
-            end
-        end
-
-        function validateTolerance(~, value)
-            isValid = isnumeric(value) && isreal(value) && isscalar(value) && ...
-                isfinite(value) && value >= 0;
-            if ~isValid
-                error('loop_monitor:InvalidDlevSettleTol', ...
-                    'dlevSettleTol must be a finite nonnegative real scalar.');
             end
         end
 

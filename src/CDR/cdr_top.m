@@ -42,11 +42,6 @@ classdef cdr_top < handle
         GatedCoefficients
     end
 
-    properties (Dependent, SetAccess = private)
-        % 只读代理：一次性换挡状态由 loop_monitor 持有，本类不再复制一份。
-        SettleDone
-    end
-
     methods
         function obj = cdr_top(config)
             % cdr_top  由单个 config 结构体构造完整 code 域 DSP 核。
@@ -131,7 +126,6 @@ classdef cdr_top < handle
             state.PendingCodeWrapped = obj.PendingCodeWrapped;
             state.PendingUiSlip = obj.PendingUiSlip;
             state.PendingBlockIndex = obj.PendingBlockIndex;
-            state.SettleDone = obj.SettleDone;
             state.GatedCoefficients = obj.GatedCoefficients;
             state.LastOutput = obj.LastOutput;
             state.Pd = obj.Pd.getState();
@@ -141,15 +135,6 @@ classdef cdr_top < handle
             state.Ffe = obj.Ffe.getState();
             state.FfeLoop = obj.FfeLoop.getState();
             state.Monitor = obj.Monitor.getState();
-        end
-
-        function value = get.SettleDone(obj)
-            % get.SettleDone  一次性换挡状态的只读代理，真值在 loop_monitor。
-            if isempty(obj.Monitor)
-                value = false;
-                return;
-            end
-            value = obj.Monitor.SettleDone;
         end
     end
 
@@ -177,18 +162,12 @@ classdef cdr_top < handle
             cfg.DlevStepSize = 0.5;
             cfg.DlevStepSizeSettle = 0.1;
             cfg.DlevStepSizePvtTrack = 0.02;
-            cfg.DlevSettleWindow = 16;
-            cfg.DlevSettleTol = 0.5;
-            % Stage-2 (capture -> settle) mu-downshift gate.
-            %   'snr'  : averaged decision-directed eye SNR crosses
-            %            SnrSettleThresholdDb. Default, because the eye being
-            %            open is the actual precondition for slowing the FFE.
-            %   'dlev' : legacy outer-dLev displacement test. Kept selectable
-            %            for the loop_monitor/cdr_top unit contracts, but it is
-            %            an implicit drift-rate threshold of
-            %            DlevSettleTol/DlevSettleWindow and a slowly ramping
-            %            dLev satisfies it while the eye is still closed.
-            cfg.SettleGate = 'snr';
+            % Stage-1 (capture -> settle) mu-downshift gate: the averaged
+            % decision-directed eye SNR crossing SnrSettleThresholdDb. The eye
+            % being open is the actual precondition for slowing the FFE. (A
+            % legacy outer-dLev displacement gate was removed on 2026-09-26; it
+            % was an implicit drift-rate threshold that a slowly ramping dLev
+            % satisfied while the eye was still closed.)
             cfg.SnrSettleThresholdDb = 15;
             cfg.SnrSettleAlpha = 1 / 128;
             cfg.SnrSettleMinBlock = 200;
@@ -293,12 +272,9 @@ classdef cdr_top < handle
                 obj.Ffe.MainTapIndex, cfg.BlockSize, cfg.FfeAdaptEnableMask);
             obj.Monitor = loop_monitor( ...
                 cfg.FfeGateMinModeOccurrences, cfg.FfeGateMinEvents, ...
-                cfg.FfeGateBandHalfWidth, cfg.FfeGateStartBlock, ...
-                cfg.DlevSettleWindow, cfg.DlevSettleTol);
-            if strcmp(cfg.SettleGate, 'snr')
-                obj.Monitor.enableSnrSettle(cfg.SnrSettleThresholdDb, ...
-                    cfg.SnrSettleAlpha, cfg.SnrSettleMinBlock);
-            end
+                cfg.FfeGateBandHalfWidth, cfg.FfeGateStartBlock);
+            obj.Monitor.enableSnrSettle(cfg.SnrSettleThresholdDb, ...
+                cfg.SnrSettleAlpha, cfg.SnrSettleMinBlock);
             if cfg.FfeGateEnable && strcmp(cfg.FfeGateCriterion, 'freq-state')
                 obj.Monitor.enableFreqStateGate( ...
                     cfg.FfeGateFreqWindowBlocks, ...
@@ -401,14 +377,10 @@ classdef cdr_top < handle
             obj.PhaseInterpolator.update(deltaCode);
 
             % 策略判决全部委托给 loop_monitor：它只判决，由本类施加动作。
-            % 第一级降档(capture -> settle)：两个环路同时降，门控见 SettleGate。
+            % 第一级降档(capture -> settle)：两个环路同时降，门控为 SNR EWMA
+            % 越过 SnrSettleThresholdDb（眼睛张开才降 mu）。
             snrDb = cdr_top.blockSnrDb(decision, sliceError);
-            if strcmp(cfg.SettleGate, 'snr')
-                settleTriggered = obj.Monitor.updateSnrSettle(blockIndex, snrDb);
-            else
-                settleTriggered = obj.Monitor.updateDlevSettle(blockIndex, ...
-                    obj.Dlev.DLevOuter);
-            end
+            settleTriggered = obj.Monitor.updateSnrSettle(blockIndex, snrDb);
             if settleTriggered
                 obj.Dlev.setStepSize(cfg.DlevStepSizeSettle);
                 obj.FfeLoop.setStepSize(cfg.FfeStepSizeSettle);
@@ -462,7 +434,6 @@ classdef cdr_top < handle
                 end
             end
 
-            obj.Monitor.recordDlevOuter(blockIndex, obj.Dlev.DLevOuter);
             obj.BlockIndex = blockIndex;
             obj.CurrentLocalIndexFloat = ...
                 obj.PhaseInterpolator.getLocalIndex();
@@ -503,7 +474,6 @@ classdef cdr_top < handle
             output.FfeWriteApplied = writeApplied;
             output.GateTriggered = gateTriggered;
             output.GateEngaged = obj.gateLatched();
-            output.SettleDone = obj.SettleDone;
             output.SnrDb = snrDb;
             output.SnrEwmaDb = obj.Monitor.SnrEwmaDb;
             output.SnrSettleDone = obj.Monitor.SnrSettleDone;
@@ -546,7 +516,6 @@ classdef cdr_top < handle
             output.FfeWriteApplied = false;
             output.GateTriggered = false;
             output.GateEngaged = obj.gateLatched();
-            output.SettleDone = obj.SettleDone;
             output.SnrDb = NaN;
             output.SnrEwmaDb = obj.Monitor.SnrEwmaDb;
             output.SnrSettleDone = obj.Monitor.SnrSettleDone;
@@ -622,9 +591,6 @@ classdef cdr_top < handle
             obj.requirePositiveScalar(cfg.DlevStepSize, 'DlevStepSize');
             obj.requirePositiveScalar(cfg.DlevStepSizeSettle, ...
                 'DlevStepSizeSettle');
-            obj.requirePositiveInteger(cfg.DlevSettleWindow, ...
-                'DlevSettleWindow');
-            obj.requireNonnegativeScalar(cfg.DlevSettleTol, 'DlevSettleTol');
 
             if ~(isnumeric(cfg.FfeInitCoefficients) && ...
                     isreal(cfg.FfeInitCoefficients) && ...
@@ -701,8 +667,6 @@ classdef cdr_top < handle
             end
             obj.requirePositiveInteger(cfg.FfeGateFreqMinBlock, ...
                 'FfeGateFreqMinBlock');
-            cfg.SettleGate = obj.requireTextChoice(cfg.SettleGate, ...
-                'SettleGate', {'dlev', 'snr'});
             obj.requirePositiveScalar(cfg.DlevStepSizePvtTrack, ...
                 'DlevStepSizePvtTrack');
             if ~(isnumeric(cfg.SnrSettleThresholdDb) && ...
@@ -723,7 +687,7 @@ classdef cdr_top < handle
             numericFields = setdiff(expected, {'Detector', 'VoterMode', ...
                 'VoterDenominator', 'PiNonideal', 'FfeInitCoefficients', ...
                 'FfeAdaptEnableMask', 'FfeGateMode', 'TransitionFilter', ...
-                'FfeGateEnable', 'SettleGate', 'FfeGateCriterion'});
+                'FfeGateEnable', 'FfeGateCriterion'});
             for index = 1:numel(numericFields)
                 field = numericFields{index};
                 cfg.(field) = double(cfg.(field));

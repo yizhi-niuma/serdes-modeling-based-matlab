@@ -370,11 +370,11 @@ end
 
 function settleBlock = replaySnrSettle(result, rowIndex)
 settleBlock = NaN;
-requiredFields = {'SettleGate', 'SnrDbTrace', 'SnrSettleAlpha', ...
+% SNR EWMA is the sole stage-1 gate since 2026-09-26 (the legacy dLev/SettleGate
+% path was removed), so no gate-selection field is checked here.
+requiredFields = {'SnrDbTrace', 'SnrSettleAlpha', ...
     'SnrSettleThresholdDb', 'SnrSettleMinBlock'};
-if ~all(isfield(result, requiredFields)) || ...
-        ~isTextScalar(result.SettleGate) || ...
-        ~strcmpi(strtrim(char(result.SettleGate)), 'snr')
+if ~all(isfield(result, requiredFields))
     return;
 end
 alpha = result.SnrSettleAlpha;
@@ -591,13 +591,6 @@ function tf = isIntegerScalarAtLeast(value, minimumValue)
 tf = isnumeric(value) && isreal(value) && isscalar(value) && ...
     isfinite(value) && double(value) == fix(double(value)) && ...
     double(value) >= minimumValue;
-end
-
-function tf = isTextScalar(value)
-tf = ischar(value) && isrow(value);
-if ~tf && isstring(value)
-    tf = isscalar(value) && ~ismissing(value);
-end
 end
 
 function tf = isCellArrayOfCharacterVectors(value)

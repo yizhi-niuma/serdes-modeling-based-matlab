@@ -1,5 +1,53 @@
 ﻿# Decisions
 
+## 2026-09-26: remove the legacy dLev settle detector and the runner P-only schedule
+
+- **Decision (user-approved):** delete the dLev settle detector from
+  `loop_monitor` and `cdr_top` entirely, and delete the `FreqAcqPonly`
+  proportional-only acquisition schedule from the ppm runner. The eye-quality
+  (SNR) settle detector is now the sole stage-1 (capture -> settle)
+  mu-downshift gate. This supersedes the 2026-09-25 decision that kept the dLev
+  detector selectable via `SettleGate` (`'snr'` default, `'dlev'` legacy).
+- **Why the dLev detector goes rather than staying as a dead option:** it was
+  already documented (2026-09-25) as the root cause of the `-100 ppm` capture
+  failure — a two-point displacement test encoding an implicit drift-rate
+  threshold `DlevSettleTol/DlevSettleWindow = 0.031 code/block` that a
+  `~0.012 code/block` cold-start dLev satisfied at block 84 with 59% of the
+  trajectory still ahead. Keeping it selectable left a known foot-gun. The SNR
+  gate observes whether the eye is actually open, the real precondition for
+  slowing the FFE.
+- **Why `FreqAcqPonly` goes with it:** its only stage-1 consumer was
+  `out.SettleDone` (the runner Ki re-enable). Since the 2026-09-25 SNR-gate
+  commit made `SettleDone` structurally always false under the default gate,
+  `FreqAcqPonly = true` had silently become *permanent* P-only (integral gain
+  pinned at zero, never restored), which cannot track any offset by
+  construction. It defaulted to false, so no default run was affected, but the
+  path was a latent trap and any archived `FreqAcqPonly` result no longer
+  characterises the current code. Removed rather than repaired.
+- **Removed surface.** `loop_monitor`: `updateDlevSettle` / `recordDlevOuter`,
+  the `SettleDone` / `SettleBlock` properties, the `DlevSettleEnabled` /
+  `DlevSettleWindow` / `DlevSettleTol` config and ring buffer, and the now-unused
+  `ringSlot` / `requireDlevSettleEnabled` / `validateTolerance` helpers; the
+  constructor is 4-argument only (the 6-argument dLev form is gone). `cdr_top`:
+  the `SettleGate` / `DlevSettleWindow` / `DlevSettleTol` config and validation,
+  the `SettleDone` dependent proxy, the settle-branch `if/else` (now always
+  `updateSnrSettle`), the per-block `recordDlevOuter` call, and `SettleDone`
+  from every output/state struct. ppm runner: `FreqAcqPonly`, the `cfg.Ki = 0`
+  acquisition branch, the `kiEnablePending` / `out.SettleDone` Ki re-enable,
+  the `SettleGate` / `DlevSettleWindow` / `DlevSettleTol` options, and
+  `result.SettleGate` / `result.SettleDoneFlag`. v4 runner: the same config,
+  consumer and result fields (its independent `DlevSettleStdTolerance`
+  convergence metric is unrelated and was kept). The standalone
+  (non-`cdr_top`) validation runners each own an inline dLev-settle statistic
+  that never touched `loop_monitor` and were left as-is.
+- **Verification.** `checkcode` clean on `loop_monitor`, `cdr_top` and the ppm
+  runner. `tests/CDR` 15/17 with `test_cdr_top_configured` 10/10 (legacy
+  `testSettleDownshiftFiresOnce` deleted) and `test_loop_monitor` 15/15 (its two
+  dLev-settle tests deleted); the only failures are the pre-existing
+  `test_cdr_ffe` / `test_cdr_ffe_loop` pair, byte-identical to HEAD. Both
+  config-path runners smoke-pass (2/2 locked, `AllPhaseLock = 1`), with
+  `result.SettleGate` and `result.SettleDoneFlag` confirmed absent.
+
 ## 2026-09-26: remove the legacy five-argument `cdr_top` construction path
 
 - **Decision (user-made edit, verified here):** delete `cdr_top`'s legacy

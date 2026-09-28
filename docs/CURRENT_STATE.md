@@ -2,6 +2,13 @@
 
 Updated: 2026-09-26
 
+## 2026-09-26: dLev settle detector and runner P-only schedule removed; SNR is the sole stage-1 gate
+
+- The dLev settle detector was deleted from `loop_monitor` and `cdr_top`, and the `FreqAcqPonly` proportional-only acquisition schedule from the ppm runner. The eye-quality (SNR) EWMA gate (`updateSnrSettle`, threshold 15 dB, alpha 1/128, minBlock 200) is now the only stage-1 capture->settle mu-downshift gate; there is no gate selector left to choose.
+- Motivation: the dLev test was already on record (2026-09-25) as the `-100 ppm` capture root cause (a `0.031 code/block` implicit rate threshold firing at block 84 with 59% of the dLev trajectory unspent). `FreqAcqPonly`'s only stage-1 consumer was `SettleDone`, which the SNR-gate default had made structurally always-false, so `FreqAcqPonly=true` had degenerated into *permanent* P-only (Ki pinned at 0). Both were removed rather than left as latent traps; both defaulted off/unused so no default run changed behaviour.
+- Removed API: `loop_monitor.updateDlevSettle`/`recordDlevOuter`, `SettleDone`/`SettleBlock`, the `DlevSettle*` config + ring buffer, and the 6-argument constructor form (now 4-argument only); `cdr_top`'s `SettleGate`/`DlevSettleWindow`/`DlevSettleTol` config, `SettleDone` proxy and outputs; the ppm/v4 runner `SettleGate`/`DlevSettle*`/`SettleDone`/`FreqAcqPonly` options and `result.SettleGate`/`result.SettleDoneFlag`. Standalone runners' own inline dLev-settle statistics were untouched.
+- Verified: checkcode clean; `tests/CDR` 15/17 (`test_cdr_top_configured` 10/10, `test_loop_monitor` 15/15; only the pre-existing `test_cdr_ffe`/`test_cdr_ffe_loop` pair fail); ppm and v4 config-path runners smoke-pass 2/2 with the removed result fields confirmed absent. Docs synced (`ARCHITECTURE.md` loop_monitor section now lists three detectors; `DECISIONS.md` superseding entry; historical dated entries retained).
+
 ## 2026-09-26: `cdr_top` reduced to the config-struct path only
 
 - The legacy five-argument component-injection constructor and its BBPD
