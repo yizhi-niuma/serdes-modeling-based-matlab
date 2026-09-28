@@ -1,5 +1,33 @@
 ﻿# Decisions
 
+## 2026-09-28 (later): delete center-touch from `cdr_top` and make freq-state the only criterion + default; migrate v4
+
+- **Decision (user-approved):** remove `'center-touch'` as a valid
+  `cdr_top` `FfeGateCriterion`, flip the default from `'center-touch'` to
+  `'freq-state'`, and migrate the one remaining internal consumer
+  (`cdr_dlev_cdrffe_sslms_v4`) to the freq-state freeze gate. This extends the
+  ppm-suite retirement below to `cdr_top` itself: no caller can select
+  center-touch anymore.
+- **Why:** the ppm suite already used freq-state exclusively, and v4 was the
+  only path still riding `cdr_top`'s bare center-touch default (via
+  `Monitor.Frozen`). At 0 ppm freq-state matches center-touch 32/32, so nothing
+  unique was lost; keeping a dead, unselectable criterion in `cdr_top` was a
+  latent trap.
+- **Scope kept alive:** `loop_monitor.updateFfeGate` and
+  `detect_pi_center_touch_lock` are retained (dormant inside the monitor / used
+  by the ppm legacy-MAT replay and by v3, and by v4's *lock verdict* which is a
+  separate mechanism from the freeze gate). Only the `cdr_top` *gate criterion*
+  is deleted.
+- **v4 consequence accepted:** migrating v4's freeze to freq-state moves the
+  freeze block later (`[2000, 2218]` vs the historical center-touch `~1214–1465`)
+  because the freq-state gate needs a 2000-block flat window. The center-touch
+  freeze counters (`ModeOccurrences`/`EventCount`/`ResetCount`) are retired to
+  `NaN`. v4 was regenerated (8/8 locked, 8/8 frozen).
+- **Verified:** checkcode clean; `tests/CDR` 15/17 (only the pre-existing
+  `test_cdr_ffe`/`test_cdr_ffe_loop` pair fails); `test_cdr_top_configured` 10/10
+  with the freq-state-driven gate tests; default config reports
+  `FfeGateCriterion='freq-state'` and `'center-touch'` is rejected.
+
 ## 2026-09-28: retire center-touch from the ppm suite; frequency-state is the sole lock criterion and stage-2 gate at every offset
 
 - **Decision (user-approved):** delete the `FfeGateCriterion` option and its

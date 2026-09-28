@@ -128,9 +128,9 @@ ffeFrozenTrace = false(numStartPhase, numBlocks);
 ffeFreezeBlock = nan(1, numStartPhase);
 ffeFreezeCenterUnwrapped = nan(1, numStartPhase);
 ffeFreezeCenterWrapped = nan(1, numStartPhase);
-ffeFreezeModeOccurrences = zeros(1, numStartPhase);
-ffeFreezeEventCount = zeros(1, numStartPhase);
-ffeFreezeResetCount = zeros(1, numStartPhase);
+ffeFreezeModeOccurrences = nan(1, numStartPhase);
+ffeFreezeEventCount = nan(1, numStartPhase);
+ffeFreezeResetCount = nan(1, numStartPhase);
 ffeFrozenCoefficients = nan(numStartPhase, cdrFfeTapCount);
 ffeFreezeState = cell(1, numStartPhase);
 lockedPhaseCode = nan(1, numStartPhase);
@@ -182,6 +182,16 @@ for startIndex = 1:numStartPhase
     cfg.FfeGateMinEvents = options.FfeFreezeMinEvents;
     cfg.FfeGateBandHalfWidth = options.FfeFreezeBandHalfWidth;
     cfg.FfeGateStartBlock = 1;
+    % 门控判据现在只有 freq-state(center-touch 已于 2026-09-28 从 cdr_top
+    % 删除)。v4 是 0 ppm，期望环路频率态为 0；沿用 ppm 套件 0-ppm 情形相同
+    % 的窗口/容差。上面的 FfeGateMin* 只用于构造 loop_monitor 里保留但休眠
+    % 的 center-touch 机制(供旧 MAT 离线回放)，不再参与 v4 的冻结判定。
+    cfg.FfeGateFreqWindowBlocks = min(options.FfeFreezeWindowBlocks, numBlocks);
+    cfg.FfeGateFreqExpectedRate = 0;
+    cfg.FfeGateFreqMeanHalfDiffTol = options.FreqMeanHalfDiffTol;
+    cfg.FfeGateFreqStdTol = options.FreqStdTol;
+    cfg.FfeGateFreqRateTol = options.FreqRateTol;
+    cfg.FfeGateFreqMinBlock = 1;
     top = cdr_top(cfg);
 
     adcModel = ti_adc_top(adcLaneCount, -adcFullRange, adcFullRange, ...
@@ -243,14 +253,16 @@ for startIndex = 1:numStartPhase
     topState = top.getState();
     freezeState = topState.Monitor;
     ffeFreezeState{startIndex} = freezeState;
-    ffeFreezeResetCount(startIndex) = freezeState.ResetCount;
-    if freezeState.Frozen
-        ffeFreezeBlock(startIndex) = freezeState.FreezeBlock;
-        ffeFreezeCenterUnwrapped(startIndex) = freezeState.CenterUnwrapped;
+    if freezeState.FreqGateDone
+        ffeFreezeBlock(startIndex) = freezeState.FreqGateBlock;
+        % freq-state 门控没有"模式中心"，用冻结当块的 tracked eye 相位作为
+        % 记录中心(供眼图标注)。ModeOccurrences/EventCount/ResetCount 是
+        % center-touch 专有计数，freq-state 下退役为 NaN。
+        centerUnwrapped = unwrappedPhaseTrace(startIndex, ...
+            freezeState.FreqGateBlock);
+        ffeFreezeCenterUnwrapped(startIndex) = centerUnwrapped;
         ffeFreezeCenterWrapped(startIndex) = ...
-            mod(freezeState.CenterUnwrapped, samplePerSymbol);
-        ffeFreezeModeOccurrences(startIndex) = freezeState.ModeOccurrences;
-        ffeFreezeEventCount(startIndex) = freezeState.EventCount;
+            mod(centerUnwrapped, samplePerSymbol);
         ffeFrozenCoefficients(startIndex, :) = topState.GatedCoefficients;
     end
 
@@ -891,6 +903,13 @@ defaults.FfeFreezeMinEvents = 100;
 defaults.FfeFreezeBandHalfWidth = 3;
 defaults.FfeFreezeMode = 'pvt-track';
 defaults.FfeStepSizePvtTrack = 0.0002;
+% freq-state 冻结门控(0 ppm 期望速率 0)的窗口与平坦性容差，取值与 ppm 套件
+% 0-ppm 情形一致。FfeFreezeMin*/BandHalfWidth 只是 loop_monitor 里休眠的
+% center-touch 机制的构造参数，不再决定 v4 的冻结。
+defaults.FfeFreezeWindowBlocks = 2000;
+defaults.FreqMeanHalfDiffTol = 0.03;
+defaults.FreqStdTol = 0.08;
+defaults.FreqRateTol = 0.12;
 defaults.EyeDiagramEnable = true;
 defaults.EyeDiagramUiCount = 2048;
 defaults.SaveOutputs = true;

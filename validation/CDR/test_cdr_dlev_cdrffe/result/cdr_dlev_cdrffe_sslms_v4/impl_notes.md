@@ -283,3 +283,40 @@ test_cdr_validation_paths
 | `cdr_ffe_eye_freeze_vs_final.fig` | 两张眼图并排对比 |
 | `first_capture_summary.csv` | 各相位锁定标志/众数/首次捕获块/末窗事件数 |
 | `ffe_freeze_summary.csv` | 各相位门控触发块/中心/事件数/复位数 |
+
+--------------------------------------------------------------------------------
+## 2026-09-28 追加：FFE 写门控从 center-touch 迁移到 freq-state
+
+**背景**：`cdr_top` 于 2026-09-28 删除了 `FfeGateCriterion='center-touch'` 判据，
+唯一判据改为 `'freq-state'`（默认值也从 `'center-touch'` 翻成 `'freq-state'`）。
+v4 此前依赖 cdr_top 内部的 center-touch 门控来冻结 FFE：读 `Monitor.Frozen`
+及 `FreezeBlock/CenterUnwrapped/ModeOccurrences/EventCount/ResetCount`。删判据后
+这些恒空，v4 冻结上报会失效，故本次把 v4 的**冻结门控**迁移到 freq-state。
+
+**改动（`cdr_dlev_cdrffe_sslms_v4.m`）**：
+- 新增 cfg 配置：`FfeGateFreqWindowBlocks=min(FfeFreezeWindowBlocks,numBlocks)`、
+  `FfeGateFreqExpectedRate=0`（v4 是 0 ppm）、容差
+  `FreqMeanHalfDiffTol=0.03 / FreqStdTol=0.08 / FreqRateTol=0.12`、`MinBlock=1`。
+  取值与 ppm 套件 0-ppm 情形一致。新增同名 options 默认（窗口默认 2000）。
+- 冻结检测由读 `Monitor.Frozen`/`FreezeBlock` 改为读 `Monitor.FreqGateDone`/
+  `FreqGateBlock`。`FfeFrozenCoefficients` 仍取 `GatedCoefficients`。
+- `FfeFreezeCenterUnwrapped/Wrapped` 改记冻结当块的 tracked eye 相位（freq-state
+  门控无"模式中心"概念），供眼图标注。
+- `FfeFreezeModeOccurrences / FfeFreezeEventCount / FfeFreezeResetCount` 是
+  center-touch 专有计数，freq-state 下**退役为 NaN**（result 字段与
+  `ffe_freeze_summary.csv` 的 CenterOccurrences/FreezeEvents/SearchResets 列保留但恒 NaN）。
+- 上面仍设的 `FfeGateMin*/BandHalfWidth` 只用于构造 loop_monitor 里保留但休眠的
+  center-touch 机制（供旧 MAT 离线回放），不再决定 v4 冻结。
+- **锁定 verdict 不变**：仍用 `detect_pi_center_touch_lock`（独立 helper，机制与
+  cdr_top 门控无关），v3/v4 共用。
+
+**结论变化（重跑，默认 8 相位 / StartPhaseStep=16 / NumBlock=15000）**：
+- 8/8 相位 locked（锁定 verdict 不变），8/8 FFE 经 freq-state 门控冻结。
+- 冻结块整体**变晚**：`FreezeBlock` 落在 `[2000, 2218]`（freq-state 需 2000-block
+  平坦窗口），而历史 center-touch 冻结约在 block 1214–1465。冻结中心
+  `FreezeCenter ∈ [109, 123]`。这是判据切换的预期结果，非环路变差。
+- 全部 result 图/CSV 已随之重生成（含 `cdr_ffe_eye_at_freeze_2048ui.fig` 与
+  `cdr_ffe_eye_freeze_vs_final.fig`，冻结窗口起点改用 freq-state 触发块）。
+
+**复现**：无参默认 `cdr_dlev_cdrffe_sslms_v4()`；快速冒烟
+`cdr_dlev_cdrffe_sslms_v4('NumBlock',4000,'StartPhaseList',[16 64],'SaveOutputs',false,'EyeDiagramEnable',false)`。
