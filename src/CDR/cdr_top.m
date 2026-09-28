@@ -179,6 +179,14 @@ classdef cdr_top < handle
             cfg.FfeGateEnable = true;
             cfg.FfeGateMode = 'pvt-track';
             cfg.FfeStepSizePvtTrack = 2e-4;
+            % 以下三项只配置 loop_monitor 内部那台 center-touch 检测器,而
+            % cdr_top 自 2026-09-28 起再也不调 updateFfeGate,所以它们对本类
+            % 的行为没有任何影响。保留而不是删除的原因有二:loop_monitor 的
+            % 构造器要求这三个位置参数;v4 runner、ppm runner 与
+            % test_cdr_top_configured 目前都还在写这三个字段,删掉会同时改到
+            % 三处调用方的选项面。注意离线回放(make_ppm_stage_eyes /
+            % write_ppm_lock_summary_txt)另建自己的 loop_monitor,用的是
+            % result.RunOptions.FfeFreeze*,而不是这里的值。
             cfg.FfeGateMinModeOccurrences = 500;
             cfg.FfeGateMinEvents = 100;
             cfg.FfeGateBandHalfWidth = 3;
@@ -280,6 +288,10 @@ classdef cdr_top < handle
                 cfg.FfeGateBandHalfWidth, cfg.FfeGateStartBlock);
             obj.Monitor.enableSnrSettle(cfg.SnrSettleThresholdDb, ...
                 cfg.SnrSettleAlpha, cfg.SnrSettleMinBlock);
+            % FfeGateCriterion 目前只接受 'freq-state' 这一个值(见
+            % validateConfig 的 requireTextChoice)，所以这里的 strcmp 恒真。
+            % 刻意保留而不是简化成 if cfg.FfeGateEnable:它是判据的显式接入
+            % 点，将来再加一种判据时只需在这里分支，不必重新推导语义。
             if cfg.FfeGateEnable && strcmp(cfg.FfeGateCriterion, 'freq-state')
                 obj.Monitor.enableFreqStateGate( ...
                     cfg.FfeGateFreqWindowBlocks, ...
@@ -338,6 +350,13 @@ classdef cdr_top < handle
             inputWindow = [obj.PendingPast, obj.PendingCentered, futureSamples];
             [blockOutput, blockRegressor] = obj.Ffe.processBlock(inputWindow);
 
+            % ValidMask 与数据数组的长度契约(容易读错,这里写死):
+            % blockValid 始终是 BlockSize 长的整块掩码,标出这一块里哪些槽位
+            % 产生了有效输出;而 ffeOutput 以及由它派生的 Decision /
+            % SliceError / DataSymbol / ErrorBit 等**已经按该掩码筛过**,因此
+            % 在流水线未填满的块上比掩码短(6 抽头 FFE 的首块是 64 -> 61)。
+            % 也就是说 Decision 与 ValidMask 是"已筛数据 + 槽位说明",不要再
+            % 做 Decision(ValidMask) 这种二次索引。稳态块两者等长。
             blockValid = true(1, cfg.BlockSize);
             if ~obj.PendingHasPast && obj.Ffe.PostTapCount > 0
                 blockValid(1:obj.Ffe.PostTapCount) = false;

@@ -211,6 +211,16 @@ traces were also unbounded growth over a long run and duplicated
 caller-supplied `centeredCode` reaches the library, so it is the one input
 check that is not redundant.
 
+`ValidMask` and the data arrays follow a contract that is easy to misread.
+`ValidMask` is always `BlockSize` long and marks which slots of the block
+produced output. `FfeOutput` and everything derived from it (`Decision`,
+`SliceError`, `DataSymbol`, `ErrorBit`) are **already filtered by that mask**,
+so on a block where the pipeline is not yet full they are shorter than the mask
+— 64 versus 61 on the first block of a 6-tap FFE, where `nnz(ValidMask)` is
+exactly 61. They are a filtered payload plus a slot legend, not a payload to be
+indexed again: `Decision(ValidMask)` is wrong. Steady-state blocks have equal
+lengths, which is why the mismatch only ever shows up on the first block.
+
 The 2026-09-26 refactor removed the earlier five-argument component-injection
 constructor and its BBPD `processBlock(data, edge)` / `processBlockFast` /
 `resetState(initialSymbol)` semantics, together with the `PreviousSymbol` and
