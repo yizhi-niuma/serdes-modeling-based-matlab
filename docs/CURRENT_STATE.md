@@ -2,6 +2,87 @@
 
 Updated: 2026-09-28
 
+## 2026-09-28 (review sweep): main-tap policy unified, four hot paths sped up, three contracts written down
+
+A second review pass was worked through item by item. Each item was judged
+before being touched, each accepted fix is its own commit, and every behavioural
+claim below is measured, not asserted. A reusable golden fingerprint was built
+for this work: 38 `cdr_top` output fields x 600 blocks plus the final FFE,
+FFE-loop, dLev, loop-filter and monitor states, compared with `isequaln`.
+
+**Accepted and fixed**
+
+- **B2 — the four main-tap layers now agree, and `tests/CDR` is 17/17 for the
+  first time in a long while.** `cdr_top` force-zeroed the main-tap delta,
+  `cdr_ffe_loop`'s guard was commented out ("v3 uses gain normalisation, all
+  taps may adapt"), the `scaleCoefficients` that claim depended on had zero
+  callers, and both tests still asserted the guards throw. Resolved towards the
+  frozen main tap: that is what every runner actually configures
+  (`FfeAdaptEnableMask = [1 1 0 1 1 1]`), and `cdr_ffe` already hard-rejects a
+  construction with `initialCoefficients(MainTapIndex) ~= 1`. Both guards
+  restored, `scaleCoefficients` deleted, the `cdr_top` zeroing kept as a
+  documented backstop. Bit-exact: the ppm smoke is character-for-character
+  identical to the pre-change log.
+- **P5 — the freq-state gate built a discarded diagnostics struct every block.**
+  `updateFreqStateGate` is `[triggered, diag]` but the online caller takes one
+  output; the 8-field struct was built and dropped on all ~15k blocks,
+  including the ~12k after the gate latches and returns immediately. Guarded on
+  `nargout > 1`: **6.467 -> 0.248 us/call, a 96.2% cut** (the 2-output timing
+  reproduces the 6.11 us/call in the report).
+- **P2 — `cdr_top` now uses the `…Fast` sub-block variants for data it produced
+  itself** (`voteFast`, `updateSsLmsFast`, `dlevSsLmsFast`, joining the
+  `mmpdFast`/`bbpdFast` it already used). **176.0 -> 142.6 us/block, -18.9%.**
+  Two deliberate, documented consequences: `FfeLoop.getState()` stops advancing
+  `LastGradient`/`LastDelta`/`UpdateCount` and `Dlev.getState()` returns empty
+  traces. Nothing reads either through `cdr_top`. `Ffe.processBlock` stays
+  validated on purpose — its window is the only place caller-supplied data
+  enters the library.
+- **P3 — `dlev_loop` computed `sliceErrors` twice per block** (once directly,
+  once inside the Fast variant it delegated to, with no state change between).
+  **3.400 -> 2.463 us/call, -27.6%**, measured interleaved with equal trace
+  growth; a naive back-to-back measurement is useless here because `recordTrace`
+  allocation swamps it.
+- **P1 — one `struct(...)` call instead of 38 incremental field assignments,
+  plus cached sub-block handles.** Real but small: the construction itself is
+  **20.2 -> 15.9 us, -21%**, which is ~4 us of a ~137 us block, i.e. ~3% end to
+  end and inside the harness noise. The report's "34.1% self time" is all of
+  `processPending`'s own code, not the field assignments, so it was never going
+  to convert into a 34% win. Field names *and order* are unchanged, verified
+  against `emptyConfiguredOutput` and by concatenating both output forms.
+- **AGROW — the ppm histogram buffer grew to ~960k elements** (~7.7 MB, with a
+  reallocation per block) although only the last 2048 samples are ever read.
+  Now trimmed back whenever it exceeds twice the target, which leaves the tail
+  slice provably unchanged; `result.HistogramSamples` is `isequaln` identical in
+  an A/B run.
+
+**Judged and deliberately not changed**
+
+- **N5 — the O(n^2) center-touch replay is not on any live path.** Both
+  `make_ppm_stage_eyes` and `write_ppm_lock_summary_txt` guard it behind
+  `isfield(result, 'Stage2GateBlock')`, so only legacy MATs predating that field
+  reach it. Optimising it would add risk to a fallback current runs never enter.
+- **N3 — `FfeGateMinModeOccurrences`/`MinEvents`/`BandHalfWidth` really are
+  inert for `cdr_top`**, but `loop_monitor`'s constructor takes them
+  positionally and the v4 runner, the ppm runner and `test_cdr_top_configured`
+  all still write them, so deleting them is a three-caller option-surface change
+  rather than a cleanup. Documented instead.
+- **N4 — the `FfeGateCriterion` strcmp is a tautology** (one legal value) and is
+  kept as the explicit hook for a second criterion, now commented as such.
+- **B3 — the `ValidMask` length mismatch is a contract, not a bug.** `ValidMask`
+  is `BlockSize` long and the data arrays are *already filtered by it*, so they
+  are shorter until the pipeline fills: measured 64 vs 61 on block 1 of a 6-tap
+  FFE, with `nnz(ValidMask)` exactly 61. Written down at the mask construction
+  and in `ARCHITECTURE.md`; reshaping either side would break consumers.
+
+**Verified after the whole series:** `checkcode` on `src/CDR` clean,
+`tests/CDR` **17/17**, the golden fingerprint identical on all 38 per-block
+fields (only the two intentionally dropped diagnostics groups differ), the
+0/-100/+100 ppm smoke unchanged, and v4 still freezing at `[2082 2270]`.
+
+Note for future edits: the working tree stores several `src/CDR` files as CRLF
+while the index is LF, which silently breaks exact-match editing tools. Any
+`git stash`/`checkout` re-applies CRLF.
+
 ## 2026-09-28 (fixes): the freq-state gate no longer latches on a railed integrator, and stage-1 can no longer undo stage-2
 
 Two latent defects in the stage-1/stage-2 mu-downshift path were found by review and fixed.
