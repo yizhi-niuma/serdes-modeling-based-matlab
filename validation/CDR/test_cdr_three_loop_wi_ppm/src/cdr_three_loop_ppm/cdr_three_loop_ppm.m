@@ -407,6 +407,16 @@ for startIndex = 1:numStartPhase
             if startIndex == histogramPhaseIndex && out.FfeAdaptationCalculated
                 histogramOutputHistory = ...
                     [histogramOutputHistory, out.FfeOutput]; %#ok<AGROW>
+                % 只有末 histogramTargetSamples 个样本会被用到(见下方直方图
+                % 取样)，所以缓冲区超过两倍目标长度时就裁掉前面的部分。不裁
+                % 的话 15000 块 x 64 样本会累积到约 96 万个元素并反复重分配,
+                % 而其中 99.8% 从头到尾没人读。裁剪后缓冲区恒定含有"至少最后
+                % histogramTargetSamples 个样本",因此末尾取样的结果与不裁剪
+                % 时逐位相同;总样本数不足目标时从不触发裁剪，也保持原语义。
+                if numel(histogramOutputHistory) > 2 * histogramTargetSamples
+                    histogramOutputHistory = histogramOutputHistory( ...
+                        end - histogramTargetSamples + 1:end);
+                end
             end
         end
     end
