@@ -249,7 +249,7 @@ assert(sawCalculation, ...
     'Freeze mode must keep computing raw SS-LMS deltas after freezing.');
 
 state = top.getState();
-assert(state.Monitor.Frozen);
+assert(state.Monitor.FreqGateDone);
 assert(isequal(state.GatedCoefficients, gatedCoefficients));
 % freeze 模式不得改动 FFE 步长。
 assert(state.FfeLoop.StepSize == cfg.FfeStepSize);
@@ -263,7 +263,7 @@ outputs = driveAlternating(top, 40);
 engagedIndex = findFirstGateEngaged(outputs);
 assert(~isempty(engagedIndex), 'The FFE gate never engaged in pvt-track mode.');
 state = top.getState();
-assert(state.Monitor.Frozen);
+assert(state.Monitor.FreqGateDone);
 % pvt-track 不停写，只把带宽收窄到 FfeStepSizePvtTrack。
 assert(state.FfeLoop.StepSize == cfg.FfeStepSizePvtTrack);
 
@@ -326,7 +326,7 @@ cfg = gateConfig('pvt-track');
 top = cdr_top(cfg);
 driveAlternating(top, 40);
 dirty = top.getState();
-assert(dirty.Monitor.Frozen && dirty.BlockIndex > 0);
+assert(dirty.Monitor.FreqGateDone && dirty.BlockIndex > 0);
 
 top.resetState();
 clean = top.getState();
@@ -337,7 +337,8 @@ assert(isempty(clean.PreviousDataSymbol) && isempty(clean.PreviousErrorBit));
 assert(~clean.Monitor.SnrSettleDone && isnan(clean.Monitor.SnrSettleBlock));
 assert(clean.Monitor.SnrSettleEnabled);
 assert(all(isnan(clean.GatedCoefficients)));
-assert(~clean.Monitor.Frozen && clean.Monitor.EventCount == 0);
+assert(~clean.Monitor.FreqGateDone && ~clean.Monitor.Frozen && ...
+    clean.Monitor.EventCount == 0);
 assert(isequal(clean.Ffe.Coefficients, cfg.FfeInitCoefficients));
 assert(clean.Dlev.DLevInner == cfg.DlevInnerInit);
 assert(clean.Dlev.DLevOuter == cfg.DlevOuterInit);
@@ -413,6 +414,16 @@ cfg.FfeGateMinModeOccurrences = 3;
 cfg.FfeGateMinEvents = 2;
 cfg.FfeGateBandHalfWidth = 3;
 cfg.FfeGateStartBlock = 1;
+% cdr_top 的唯一门控判据是 freq-state。这里只验证 freeze/pvt-track 机制
+% (门控闩锁后的写抑制与步长动作)，不验证判据的辨别力(那是
+% test_freq_state_gate / test_loop_monitor 的职责)，所以用一个小窗口、
+% 极松容差、仅判平坦性(期望速率 NaN)的门控，保证在这段短驱动内触发。
+cfg.FfeGateFreqWindowBlocks = 6;
+cfg.FfeGateFreqExpectedRate = NaN;
+cfg.FfeGateFreqMeanHalfDiffTol = 100;
+cfg.FfeGateFreqStdTol = 100;
+cfg.FfeGateFreqRateTol = Inf;
+cfg.FfeGateFreqMinBlock = 1;
 end
 
 function index = findFirstGateEngaged(outputs)

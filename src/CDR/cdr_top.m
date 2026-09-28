@@ -183,12 +183,13 @@ classdef cdr_top < handle
             cfg.FfeGateMinEvents = 100;
             cfg.FfeGateBandHalfWidth = 3;
             cfg.FfeGateStartBlock = 1;
-            % 第二级降档的门控判据。'center-touch' 是码域众数检测，只在零频偏
-            % 下成立：有 ppm 时 PI code 持续爬升、不会停驻在单一码上，该门控
-            % 永远不会触发。'freq-state' 改用环路积分频率态的平坦性判据，它与
-            % 离线 loop_monitor.detectFrequencyStateLock 同源，在任意 ppm
-            % (含 0) 下都有意义。默认保持 'center-touch' 以维持既有行为。
-            cfg.FfeGateCriterion = 'center-touch';
+            % 第二级降档的门控判据。唯一判据为 'freq-state'：用环路积分频率态的
+            % 平坦性判据，与离线 loop_monitor.detectFrequencyStateLock 同源，在
+            % 任意 ppm(含 0)下都成立。历史上的码域众数 'center-touch' 判据已于
+            % 2026-09-28 从 cdr_top 删除：0 ppm 下 freq-state 与它 32/32 一致，
+            % 有 ppm 时 center-touch 因 PI code 持续爬升永不触发。loop_monitor
+            % 仍保留 updateFfeGate 供旧 MAT 的离线回放，cdr_top 不再选用它。
+            cfg.FfeGateCriterion = 'freq-state';
             cfg.FfeGateFreqWindowBlocks = 2000;
             cfg.FfeGateFreqExpectedRate = NaN;
             cfg.FfeGateFreqMeanHalfDiffTol = 1e-3;
@@ -237,18 +238,15 @@ classdef cdr_top < handle
 
     methods (Access = private)
         function latched = gateLatched(obj)
-            %GATELATCHED 第二级门控是否已闩锁(与所选判据一致)。
+            %GATELATCHED 第二级门控(freq-state)是否已闩锁。
             %
-            % center-touch 的闩锁是 loop_monitor.Frozen，freq-state 的闩锁是
-            % FreqGateDone。两者必须按当前判据分别读取：早期版本固定读
-            % Frozen，在 freq-state 下它永远为 false，会让 'freeze' 模式的
-            % FFE 写抑制和 GateEngaged 报告全部失效。
-            if ~obj.Config.FfeGateEnable
-                latched = false;
-            elseif strcmp(obj.Config.FfeGateCriterion, 'freq-state')
+            % freq-state 的闩锁是 FreqGateDone。'freeze' 模式的 FFE 写抑制和
+            % GateEngaged 报告都依赖它。(历史上 center-touch 判据闩锁读的是
+            % Monitor.Frozen，该判据已从 cdr_top 删除。)
+            if obj.Config.FfeGateEnable
                 latched = obj.Monitor.FreqGateDone;
             else
-                latched = obj.Monitor.Frozen;
+                latched = false;
             end
         end
 
@@ -392,18 +390,12 @@ classdef cdr_top < handle
 
             loopLockedEvent = false;
             if cfg.FfeGateEnable
-                if strcmp(cfg.FfeGateCriterion, 'freq-state')
-                    % 环路滤波器已在本块更新过(见上方 LoopFilter.update)，
-                    % 因此这里读到的积分频率态与随后记录进 trace 的
-                    % LoopFrequencyState 是同一个值，在线判定与离线判据
-                    % 逐块对齐。
-                    loopLockedEvent = obj.Monitor.updateFreqStateGate( ...
-                        blockIndex, obj.LoopFilter.FrequencyState);
-                else
-                    unwrapped = uiSlip * cfg.SamplesPerSymbol + codeWrapped;
-                    loopLockedEvent = obj.Monitor.updateFfeGate(unwrapped, ...
-                        blockIndex);
-                end
+                % 门控判据只有 freq-state。环路滤波器已在本块更新过(见上方
+                % LoopFilter.update)，因此这里读到的积分频率态与随后记录进
+                % trace 的 LoopFrequencyState 是同一个值，在线判定与离线判据
+                % 逐块对齐。
+                loopLockedEvent = obj.Monitor.updateFreqStateGate( ...
+                    blockIndex, obj.LoopFilter.FrequencyState);
                 if loopLockedEvent
                     obj.GatedCoefficients = obj.Ffe.Coefficients;
                     if strcmp(cfg.FfeGateMode, 'pvt-track')
@@ -638,7 +630,7 @@ classdef cdr_top < handle
                 'FfeGateStartBlock');
             cfg.FfeGateCriterion = obj.requireTextChoice( ...
                 cfg.FfeGateCriterion, 'FfeGateCriterion', ...
-                {'center-touch', 'freq-state'});
+                {'freq-state'});
             obj.requirePositiveInteger(cfg.FfeGateFreqWindowBlocks, ...
                 'FfeGateFreqWindowBlocks');
             if cfg.FfeGateFreqWindowBlocks < 2
