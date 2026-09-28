@@ -1,5 +1,39 @@
 ﻿# Decisions
 
+## 2026-09-28 (B2): the fixed main tap is the single main-tap policy; align all four layers
+
+- **Decision:** the FFE main tap is a fixed unit-gain anchor. It is never
+  adapted, and every layer now says so.
+- **The contradiction:** four layers disagreed. `cdr_top` force-zeroed the
+  main-tap delta; `cdr_ffe_loop`'s constructor guard was commented out with the
+  note "v3 uses gain normalisation to anchor total gain, all taps may adapt";
+  `cdr_ffe.scaleCoefficients` — the gain normalisation that note depends on —
+  had zero callers; and `test_cdr_ffe` / `test_cdr_ffe_loop` still asserted the
+  guards throw, so both had been red for a long time and were being tolerated
+  as "pre-existing failures".
+- **Why "freeze" and not "adapt":** the *adapt* direction was never actually
+  implemented. `scaleCoefficients` was dead, `cdr_top` still zeroed the delta,
+  and v3's own runner — like every other runner — defaults to
+  `FfeAdaptEnableMask = [1 1 0 1 1 1]`. Every validated result in this repo was
+  produced with the main tap frozen. Decisively, `cdr_ffe` already *hard
+  rejects* a construction whose `initialCoefficients(MainTapIndex) ~= 1`
+  (`cdr_ffe:InvalidMainTap`), so "main tap == 1" was already an enforced
+  contract; the restored guards just extend it over the object lifetime instead
+  of only at construction.
+- **Why the missing guard was not harmless redundancy:** without it the knob
+  lies. A caller could pass `mask(MainTapIndex) = 1`, have it accepted, and then
+  have the enabled adaptation silently cancelled one layer up by `cdr_top`.
+- **Rejected alternative (direction b, allow adaptation):** it would mean
+  deleting the `cdr_top` zeroing and wiring `scaleCoefficients` as a real gain
+  normaliser. That is a research change: it invalidates every validated lock
+  result and needs a full 32-phase re-validation. It is not a cleanup and was
+  not done as one.
+- **Verified:** `tests/CDR` went 15/17 -> **17/17**; the two red tests pass
+  unmodified. The change is bit-exact by construction (the guards only add
+  error paths, and neither can fire on any existing configuration) and
+  empirically: the 0/-100/+100 ppm smoke is character-for-character identical to
+  the pre-change log, down to the eye phase codes and `freqMean` digits.
+
 ## 2026-09-28 (fixes): sink a saturation guard into the freq-state gate and enforce stage-1/stage-2 ordering
 
 - **Decision:** treat a railed loop integrator as *not* locked at the library

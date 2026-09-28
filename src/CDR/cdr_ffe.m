@@ -64,6 +64,15 @@ classdef cdr_ffe < handle
             end
 
             deltaCoefficients = reshape(double(deltaCoefficients), 1, []);
+            % 主抽头是固定的单位增益锚点。构造时已经硬性校验
+            % initialCoefficients(MainTapIndex) == 1(见 validateConfiguration
+            % 的 cdr_ffe:InvalidMainTap)，这条守卫把同一个不变量从"构造那一
+            % 刻"延伸到对象的整个生命周期。自适应侧本就产生不了非零的主抽头
+            % 增量：cdr_ffe_loop 的 AdaptEnableMask 会把它清零，cdr_top 之后
+            % 还会再显式置零。所以这里只会拦住绕过那两层直接写系数的调用方。
+            if deltaCoefficients(obj.MainTapIndex) ~= 0
+                error('cdr_ffe:MainTapUpdate', 'The fixed main tap must not be updated.');
+            end
             obj.Coefficients = obj.Coefficients + deltaCoefficients;
         end
 
@@ -81,16 +90,6 @@ classdef cdr_ffe < handle
             state.PreTapCount = obj.PreTapCount;
             state.MainTapIndex = obj.MainTapIndex;
             state.PostTapCount = obj.PostTapCount;
-        end
-        
-        function scaleCoefficients(obj, factor)
-            % scaleCoefficients  按比例缩放所有FFE系数，用于增益归一化
-            % factor: 缩放因子，所有系数乘以该值
-            isValid = isnumeric(factor) && isscalar(factor) && isreal(factor) && isfinite(factor);
-            if ~isValid
-                error('cdr_ffe:InvalidScaleFactor', 'Scale factor must be a finite real scalar.');
-            end
-            obj.Coefficients = obj.Coefficients * factor;
         end
     end
 

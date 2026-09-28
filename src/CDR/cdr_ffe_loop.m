@@ -134,10 +134,18 @@ classdef cdr_ffe_loop < handle
             if ~maskValid
                 error('cdr_ffe_loop:InvalidAdaptEnableMask', 'adaptEnableMask must contain one logical value per tap.');
             end
-% 移除主抽头必须冻结的限制，v3采用增益归一化锚定总增益，允许所有抽头自适应
-            % if logical(adaptEnableMask(mainTapIndex))
-            %     error('cdr_ffe_loop:MainTapAdaptEnabled', 'The fixed main tap must be disabled in adaptEnableMask.');
-            % end
+            % 主抽头是固定的增益锚点，必须在 adaptEnableMask 里被禁用。
+            % 这条守卫曾被注释掉，理由写的是"v3 采用增益归一化锚定总增益，
+            % 允许所有抽头自适应"。那条路径从未接线：它依赖的
+            % cdr_ffe.scaleCoefficients 没有任何调用方(现已删除)，cdr_top
+            % 始终显式把主抽头增量置零，而 v3 自己的 runner 连同全部其他
+            % runner 的默认 mask 都是 [1 1 0 1 1 1]。守卫缺席的实际后果是
+            % 这个旋钮会撒谎：调用方传 mask(mainTapIndex)=1 会被接受，然后
+            % 被上层静默抵消。恢复它让四层(本类 / cdr_ffe / cdr_top / 测试)
+            % 对同一条不变量取得一致。
+            if logical(adaptEnableMask(mainTapIndex))
+                error('cdr_ffe_loop:MainTapAdaptEnabled', 'The fixed main tap must be disabled in adaptEnableMask.');
+            end
         end
 
         function validateUpdateInput(obj, dataRegressor, errorBlock)

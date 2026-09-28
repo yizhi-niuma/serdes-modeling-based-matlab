@@ -436,6 +436,11 @@ classdef cdr_top < handle
             if numel(ffeOutput) == cfg.BlockSize
                 errorBlock = decision - ffeOutput;
                 rawDelta = obj.FfeLoop.updateSsLms(blockRegressor, errorBlock);
+                % 主抽头保持固定的单位增益锚点。FfeAdaptEnableMask 默认
+                % [1 1 0 1 1 1]，updateSsLms 已按 mask 把这一项清零，所以这
+                % 一行在默认配置下是冗余的；保留它是因为 mask 由配置提供，
+                % 而 cdr_ffe.applyCoefficientDelta 会拒绝非零的主抽头增量
+                % (cdr_ffe:MainTapUpdate)。它是本层对该不变量的兜底。
                 rawDelta(obj.Ffe.MainTapIndex) = 0;
                 proposedCoefficients = obj.Ffe.Coefficients + rawDelta;
                 adaptationCalculated = true;
