@@ -377,7 +377,11 @@ classdef cdr_top < handle
                 obj.PreviousDataSymbol = dataSymbol(end);
             end
 
-            phaseError = obj.Voter.vote(phaseDecision);
+            % 这里及下面几处一律走 Fast 变体：输入全部由本类自己刚生成
+            % (phaseDecision 来自上面的 mmpdFast/bbpdFast，只可能是 -1/0/+1)，
+            % 非 Fast 版本唯一多做的就是再校验一遍这些数据。顶层对 PD 早已
+            % 采用同样的约定。
+            phaseError = obj.Voter.voteFast(phaseDecision);
             deltaCode = obj.LoopFilter.update(phaseError);
             obj.PhaseInterpolator.update(deltaCode);
 
@@ -397,7 +401,11 @@ classdef cdr_top < handle
             end
 
             if numel(ffeOutput) == cfg.BlockSize
-                obj.Dlev.dlevSsLms(decision, sliceError);
+                % Fast 变体：非 Fast 版本只多记 4 条调试轨迹(每块 4 次
+                % end+1 的数组增长)，而本类从不读它们，且其中的 dLev 两条
+                % 与下面 output.DlevInner/DlevOuter 完全重复。长跑时那是
+                % 无界增长。需要轨迹的调用方直接驱动 dlev_loop 即可。
+                obj.Dlev.dlevSsLmsFast(decision, sliceError);
             end
 
             loopLockedEvent = false;
@@ -435,7 +443,13 @@ classdef cdr_top < handle
             gateInhibitsWrite = strcmp(cfg.FfeGateMode, 'freeze');
             if numel(ffeOutput) == cfg.BlockSize
                 errorBlock = decision - ffeOutput;
-                rawDelta = obj.FfeLoop.updateSsLms(blockRegressor, errorBlock);
+                % Fast 变体：blockRegressor 是 Ffe 刚返回的 BlockSize x
+                % TapCount double 矩阵，errorBlock 是等长 double 行向量
+                % (进入本分支的前提就是 numel(ffeOutput)==BlockSize，即这一
+                % 块没有任何样本被 blockValid 滤掉)，Fast 版所要求的形状前提
+                % 在此处恒成立。非 Fast 版另外维护的 LastGradient/LastDelta/
+                % UpdateCount 只是诊断量，本类与任何 runner 都不读。
+                rawDelta = obj.FfeLoop.updateSsLmsFast(blockRegressor, errorBlock);
                 % 主抽头保持固定的单位增益锚点。FfeAdaptEnableMask 默认
                 % [1 1 0 1 1 1]，updateSsLms 已按 mask 把这一项清零，所以这
                 % 一行在默认配置下是冗余的；保留它是因为 mask 由配置提供，

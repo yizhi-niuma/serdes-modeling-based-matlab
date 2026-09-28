@@ -197,6 +197,20 @@ struct (`cdr_top(config)`; a non-struct or wrong arity raises
 - Coordinated reset of every owned sub-block and all pipeline/top-level state
   through the no-argument `resetState()`.
 
+Inside the block loop `cdr_top` calls the `…Fast` variant of every sub-block
+whose input it has just produced itself — `mmpdFast`/`bbpdFast`, `voteFast`,
+`updateSsLmsFast`, `dlevSsLmsFast`. The validated variants differ only by
+re-checking data this class just generated, plus diagnostics no caller reads
+through the top level. Two consequences are deliberate and observable:
+`FfeLoop.getState()` no longer advances `LastGradient`/`LastDelta`/
+`UpdateCount`, and `Dlev.getState()` returns empty trace vectors. The dLev
+traces were also unbounded growth over a long run and duplicated
+`output.DlevInner`/`DlevOuter`, which carry the same per-block values. Drive
+`dlev_loop` or `cdr_ffe_loop` directly if those diagnostics are needed.
+`Ffe.processBlock` stays on the validated path: its window is the only place a
+caller-supplied `centeredCode` reaches the library, so it is the one input
+check that is not redundant.
+
 The 2026-09-26 refactor removed the earlier five-argument component-injection
 constructor and its BBPD `processBlock(data, edge)` / `processBlockFast` /
 `resetState(initialSymbol)` semantics, together with the `PreviousSymbol` and
