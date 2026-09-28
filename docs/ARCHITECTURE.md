@@ -217,7 +217,7 @@ been removed, so the description below is now the only path.)
 - Models one block of loop dead time caused by the FFE precursor look-ahead: `processBlock` returns `HasOutput = false` while the pipeline fills, and `flush` drains the final pending block with zero future samples.
 - Runs the v3 block order exactly: FFE -> slicer -> MMPD -> voter -> loop -> PI -> mu downshift -> dLev -> FFE gate -> FFE SS-LMS write.
 - The FFE gate supports `freeze` (stop writing, keep computing raw deltas) and `pvt-track` (keep writing at a collapsed step size). Both the gate and the mu-downshift decisions live in `loop_monitor`, which only reports events; `cdr_top` applies the actions.
-- The mu downshift has three step-size tiers and two events: `capture -> settle -> pvt-track`. In the ppm suite, dLev uses `0.5 -> 0.1 -> 0.02`, while the FFE uses `0.001 -> 2e-4 -> 2e-4`; at those defaults the second event changes only dLev. Stage 1 is gated by the averaged decision-directed eye SNR through `loop_monitor.updateSnrSettle` (the legacy `SettleGate`/`'dlev'` displacement test was removed on 2026-09-26). Stage 2 uses the selectable `FfeGateCriterion`: `'center-touch'` preserves the original unwrapped-PI-code modal test and is the `cdr_top.defaultConfig` value, while `'freq-state'` uses the online frequency-state lock criterion. The per-block eye FOM is `cdr_top.blockSnrDb`, computed from the `decision`/`sliceError` pair `slicePam4` already returns, so no new data path exists.
+- The mu downshift has three step-size tiers and two events: `capture -> settle -> pvt-track`. In the ppm suite, dLev uses `0.5 -> 0.1 -> 0.02`, while the FFE uses `0.001 -> 2e-4 -> 2e-4`; at those defaults the second event changes only dLev. Stage 1 is gated by the averaged decision-directed eye SNR through `loop_monitor.updateSnrSettle` (the legacy `SettleGate`/`'dlev'` displacement test was removed on 2026-09-26). Stage 2 uses `cdr_top`'s `FfeGateCriterion`: `'center-touch'` preserves the original unwrapped-PI-code modal test and is the `cdr_top.defaultConfig` value, while `'freq-state'` uses the online frequency-state lock criterion. The ppm runner no longer exposes this option (retired 2026-09-28) and always passes `'freq-state'`; `'center-touch'` remains for the v3/v4 FFE-freeze path. The per-block eye FOM is `cdr_top.blockSnrDb`, computed from the `decision`/`sliceError` pair `slicePam4` already returns, so no new data path exists.
 - `Detector` accepts `bbpd`, `mmpd` and the `ssmmpd` alias; the alias normalizes to `mmpd` because `cdr_pd.mmpd` already requires symbolized inputs and there is no second numerical path.
 - Every loop parameter is injected explicitly; missing or invalid fields raise `cdr_top:Invalid<Field>`. `cdr_top.defaultConfig` returns the current v3 aligned starting point.
 - Each block output also exports the loop filter's pre-quantization continuous state (`LoopControl`, `LoopFrequencyState`, `LoopCodeResidue`, `LoopPendingCode`). The integer PI code hides sub-code motion, so these are what distinguish a genuine limit-cycle dither from a slow drift.
@@ -299,21 +299,25 @@ make_ppm_stage_eyes.m
 The second anchor is a diagnostic replay of the verdict, not a live stage-2
 trigger. Since `LockWindowBlocks = 2000`, it means the first block at which the
 trailing 2000-block window satisfies the criterion and cannot be less than 2000.
-For nonzero ppm, verdict replay uses `detectFrequencyStateLock` and, when
-applicable, `detectRotationPeriodLock`; zero ppm uses
-`detect_pi_center_touch_lock`.
+For every offset, verdict replay uses `detectFrequencyStateLock` and, when the
+PI rotation period fits the lock window, `detectRotationPeriodLock`. Zero ppm has
+no rotation, so only the frequency-state term applies there.
 
-This separation exposed the former control-path disconnect: pass/fail lock had
-moved to the frequency domain for ppm, but stage 2 still used only the raw-code
-center-touch gate. That center-touch path is enabled at `+/-100 ppm` yet cannot
-fire because the PI code ramps instead of dwelling on one code. The implemented
-runner now resolves `FfeGateCriterion = 'auto'` to `'center-touch'` at exactly
-0 ppm and `'freq-state'` otherwise, using the same frequency-state window and
-tolerances as the verdict. The pass/fail verdict itself remains separate: for
-ppm, `Locked` still requires both `detectFrequencyStateLock` and
-`detectRotationPeriodLock`, whereas stage 2 consumes only its selected gate.
-Consequently `LockBlock` and the recorded `Stage2GateBlock` are distinct
-milestones.
+The former control-path disconnect (pass/fail lock in the frequency domain but a
+raw-code center-touch stage-2 gate that could not fire while the PI ramps) was
+first patched on 2026-09-26 with an `FfeGateCriterion = 'auto'` that split
+center-touch at 0 ppm from freq-state elsewhere. On 2026-09-28 that split was
+retired: the ppm runner has no `FfeGateCriterion` option and the stage-2 gate is
+the frequency-state gate at every offset, 0 ppm included, using the same
+frequency-state window and tolerances as the verdict. The 0 ppm pass/fail
+verdict itself is now `detectFrequencyStateLock` (expected rate 0, slew-guarded)
+rather than `detect_pi_center_touch_lock`. The verdict and the stage-2 gate
+therefore share the frequency-state term; at nonzero ppm the verdict adds the
+rotation term the gate does not, so `LockBlock` and the recorded
+`Stage2GateBlock` remain distinct milestones (`Stage2GateBlock <= LockBlock`).
+`detect_pi_center_touch_lock` stays in the tree for the v3/v4 FFE-freeze gate and
+as `cdr_top`'s library default, and the summary/eye helpers replay it only for
+pre-2026-09-28 MATs.
 
 The ppm harness owns the sampling address, and that address is now taken through
 the PI phase table: the in-UI offset is `round(PhaseInterpolator.getLocalIndex())`

@@ -684,6 +684,47 @@ superset of the old CSV columns. Current result MATs supply the authoritative
 without that field. `ppm_stage_eye_summary.csv` is a different output from
 `make_ppm_stage_eyes.m` and remains in use.
 
+### CDR: center-touch retired from the ppm suite (2026-09-28)
+
+The switchable `FfeGateCriterion` (2026-09-26) was removed from the ppm runner.
+The stage-2 downshift is now the frequency-state gate at every offset, and the
+0 ppm pass/fail verdict moved from `detect_pi_center_touch_lock` to
+`loop_monitor.detectFrequencyStateLock` (expected rate 0, slew-guarded). The
+retirement was justified by a no-source-change experiment (32 phases,
+`FfeGateCriterion='freq-state'`, `SaveOutputs=false`): the freq-state verdict
+matched the center-touch verdict **32/32** at 0 ppm, and the freq-state stage-2
+gate fired **32/32** where center-touch fired only **29/32**. Tail freq-state
+`|mean| <= 8.9e-5`, `std ~2.5e-3`, far inside `FreqMeanHalfDiffTol`/`FreqStdTol`.
+
+Full regeneration (`StartPhaseStep = 4` -> 32 phases, `NumBlock = 15000`,
+`PiNonideal = 'ab_constant'`, freq-state gate). All three directories rewritten
+and their three-eye sets rebuilt offline:
+
+| ppm | `LockMode` | locked | all-phase | common / spread | stage-2 fired / blocks | `FreqStateMean` (exp) | eyes |
+|---:|---|---:|---:|---|---|---|---|
+| -100 | `freq+rotation` | 32/32 | 1 | 107 / 3 | 32/32, 4966..6458 | 0.819166..0.819308 (0.8192) | 1/1/1 |
+| 0 | `freq-state` | 32/32 | 1 | 113 / 3 | 32/32, 2000..2782 | -8.86e-5..8.85e-5 (0) | 1/1/1 |
+| +100 | `freq+rotation` | 32/32 | 1 | 121 / 3 | 32/32, 2445..2798 | -0.819406..-0.819146 (-0.8192) | 1/1/1 |
+
+Versus 2026-09-26 the only material deltas are at 0 ppm: `LockMode`
+`center-touch -> freq-state`, stage-2 fired `29/32 -> 32/32`, locked-phase spread
+`2 -> 3`. -100/+100 ppm are unchanged.
+
+Automated results:
+
+- `checkcode` clean on `cdr_three_loop_ppm.m`.
+- `test_detect_pi_center_touch_lock`: **9/9** (helper retained for v3/v4).
+- `test_freq_state_gate`: all-pass; `test_loop_monitor`: **15/15**;
+  `test_cdr_top_configured`: **10/10**.
+- Full `tests/CDR`: **15 passed / 2 failed**. The two failures are the
+  pre-existing `test_cdr_ffe` (`cdr_ffe:MainTapUpdate`) and `test_cdr_ffe_loop`
+  (`cdr_ffe_loop:MainTapAdaptEnabled`), identical on a clean HEAD worktree; not
+  touched by this work.
+
+Removed file: `validation/CDR/test_cdr_three_loop_wi_ppm/ab_stage2_gate.m` (the
+center-touch-vs-freq-state A/B harness), obsolete once the runner has no
+selectable criterion.
+
 ### CDR: offline ppm three-eye set and historical stage-2 diagnosis (2026-09-26)
 
 `tests/CDR/test_build_ppm_eye_set.m` passed **9/9** checks using synthetic

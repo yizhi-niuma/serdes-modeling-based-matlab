@@ -24,16 +24,19 @@ function result = cdr_three_loop_ppm(varargin)
 %       taken 128 apart (block-internal drift <= |delta|*128*64 <= 0.82 sample
 %       is not modelled); see docs/MODEL_ASSUMPTIONS.md.
 %
-%   Lock criteria (requirement: switchable, do not delete the zero-offset one):
-%     - FreqOffsetPpm == 0: the modal center-touch criterion
-%       (detect_pi_center_touch_lock) as in v4 -- the PI code dithers around
-%       one fixed code.
-%     - FreqOffsetPpm ~= 0: two frequency-domain criteria in loop_monitor:
-%       (1) loop_monitor.detectFrequencyStateLock -- the loop integrator
-%           frequency state has a constant tail-window mean matching the
-%           expected drift rate; (2) loop_monitor.detectRotationPeriodLock --
-%           the PI code rotation period (blocks per UI slip) is constant.
-%       Both must hold for a start phase to be declared locked.
+%   Lock criterion (frequency-state based for every offset):
+%     - loop_monitor.detectFrequencyStateLock -- the loop integrator frequency
+%       state has a constant tail-window mean matching the expected drift rate
+%       (0 at 0 ppm). This alone decides the verdict, gated by slew saturation.
+%     - FreqOffsetPpm ~= 0 additionally requires
+%       loop_monitor.detectRotationPeriodLock -- the PI code rotation period
+%       (blocks per UI slip) is constant -- when the rotation period fits the
+%       lock window (RotationCriterionApplicable). At 0 ppm there is no rotation
+%       so only the frequency-state criterion applies.
+%     The modal center-touch criterion (detect_pi_center_touch_lock) that this
+%     suite previously used at 0 ppm was retired on 2026-09-26: the
+%     frequency-state verdict was shown to match it 32/32 at 0 ppm. The helper
+%     itself is retained for the v3/v4 suites, which still use it.
 %
 %   Requirement diagnostic (not part of the pass/fail): the "PI actual code
 %   minus PI ideal offset-compensated code" trace. The ideal compensating PI
@@ -174,23 +177,14 @@ if ~ismember(piNonideal, {'ideal', 'ab_constant'})
         piNonideal);
 end
 % Resolve the second-stage gate criterion before it reaches cdr_top, which
-% only accepts a concrete name. 'auto' follows the same zero/nonzero split
-% the offline lock verdict uses.
-ffeGateCriterion = lower(char(options.FfeGateCriterion));
-switch ffeGateCriterion
-    case 'auto'
-        if isZeroPpm
-            ffeGateCriterion = 'center-touch';
-        else
-            ffeGateCriterion = 'freq-state';
-        end
-    case {'center-touch', 'freq-state'}
-        % Explicit override, used by the A/B comparison.
-    otherwise
-        error('cdr_three_loop_ppm:InvalidFfeGateCriterion', ...
-            ['FfeGateCriterion must be ''auto'', ''center-touch'', or ', ...
-            '''freq-state''; got ''%s''.'], ffeGateCriterion);
-end
+% only accepts a concrete name.
+% The stage-2 (settle -> PVT-track) downshift is gated on the frequency-state
+% lock for every offset, 0 ppm included. Verified 2026-09-26: at 0 ppm the
+% freq-state gate fires 32/32 (the retired center-touch gate fired only 29/32)
+% and the freq-state verdict matches the retired center-touch verdict 32/32.
+% center-touch is no longer used anywhere in this suite; cdr_top still supports
+% it for the v3/v4 FFE-freeze path, which is a different mechanism.
+ffeGateCriterion = 'freq-state';
 if isZeroPpm
     expectedRotationPeriod = NaN;
 else
@@ -421,14 +415,37 @@ for startIndex = 1:numStartPhase
     phaseSettleStd(startIndex) = std(settleWindow);
 
     if isZeroPpm
-        [lockedFlag(startIndex), lockedPhaseCode(startIndex), ...
-            piCenterDiagnostics{startIndex}] = detect_pi_center_touch_lock( ...
-            unwrappedPhaseTrace(startIndex, :), piLockWindowBlocks, ...
-            piLockMinEvents, piLockBandHalfWidth, samplePerSymbol);
-        freqDiagList{startIndex} = struct('MeanValue', NaN, ...
-            'MeanHalfDiff', NaN, 'TailStd', NaN, 'RateError', NaN);
+        % 0 ppm: the expected frequency state is 0 and there is no PI rotation,
+        % so the rotation criterion is not applicable and the frequency-state
+        % verdict alone decides (gated by slew saturation). Verified 2026-09-26:
+        % this matches the retired center-touch verdict 32/32 with the tail
+        % |mean| at 8.9e-5 and std 2.5e-3, far inside the tolerances. The
+        % code-domain center-touch lock is no longer used in this suite.
+        [freqLockFlag(startIndex), freqDiag] = ...
+            loop_monitor.detectFrequencyStateLock( ...
+            loopFrequencyTrace(startIndex, :), piLockWindowBlocks, ...
+            expectedFreqState, options.FreqMeanHalfDiffTol, ...
+            options.FreqStdTol, options.FreqRateTol);
+        tailIndex = (numBlocks - piLockWindowBlocks + 1):numBlocks;
+        slewDeltaMeanAbs(startIndex) = ...
+            mean(abs(deltaCodeTrace(startIndex, tailIndex)));
+        slewPendingMeanAbs(startIndex) = ...
+            mean(abs(loopPendingCodeTrace(startIndex, tailIndex)));
+        slewSaturatedFlag(startIndex) = ...
+            slewDeltaMeanAbs(startIndex) >= ...
+            options.SlewSatDeltaFrac * options.MaxDeltaCode || ...
+            slewPendingMeanAbs(startIndex) >= options.SlewSatPendingTol;
+        lockedFlag(startIndex) = freqLockFlag(startIndex) && ...
+            ~slewSaturatedFlag(startIndex);
+        freqDiagList{startIndex} = freqDiag;
         rotationDiagList{startIndex} = struct('PeriodMean', NaN, ...
             'PeriodStd', NaN, 'PeriodCov', NaN, 'EventCount', 0);
+        eyeTail = unwrappedPhaseTrace(startIndex, ...
+            end - piLockWindowBlocks + 1:end) + ...
+            driftSampleTrace(startIndex, end - piLockWindowBlocks + 1:end);
+        lockedPhaseCode(startIndex) = mod(round(mean(eyeTail)), samplePerSymbol);
+        piCenterDiagnostics{startIndex} = struct('CenterUnwrapped', ...
+            round(mean(eyeTail)), 'FinalCount', NaN);
     else
         [freqLockFlag(startIndex), freqDiag] = ...
             loop_monitor.detectFrequencyStateLock( ...
@@ -473,9 +490,10 @@ for startIndex = 1:numStartPhase
     end
 
     if isZeroPpm
-        modeText = 'center-touch';
-        lockDetail = sprintf('events=%g', ...
-            piCenterDiagnostics{startIndex}.FinalCount);
+        modeText = 'freq-state';
+        lockDetail = sprintf('freqMean=%.4g(exp%.4g) tailStd=%.3g', ...
+            freqDiagList{startIndex}.MeanValue, expectedFreqState, ...
+            freqDiagList{startIndex}.TailStd);
     else
         modeText = 'freq+rotation';
         lockDetail = sprintf('freqMean=%.4g(exp%.4g) cov=%.3g period=%.4g', ...
@@ -966,7 +984,7 @@ result.ExpectedFreqState = expectedFreqState;
 result.ExpectedRotationPeriodBlocks = expectedRotationPeriod;
 result.DriftBudgetUi = driftBudgetUi;
 result.IsZeroPpm = isZeroPpm;
-result.LockMode = ternaryChar(isZeroPpm, 'center-touch', 'freq+rotation');
+result.LockMode = ternaryChar(isZeroPpm, 'freq-state', 'freq+rotation');
 result.RotationCriterionApplicable = rotationApplicable;
 result.RotPeriodTolBlocks = rotPeriodTolBlocks;
 result.SlewUtilization = slewUtilization;
@@ -1188,11 +1206,6 @@ defaults.FfeFreezeMinEvents = 100;
 defaults.FfeFreezeBandHalfWidth = 3;
 defaults.FfeFreezeMode = 'pvt-track';
 defaults.FfeStepSizePvtTrack = 0.0002;
-% Gate criterion for the second-stage downshift. 'auto' picks 'center-touch'
-% at exactly zero frequency offset and 'freq-state' otherwise, mirroring the
-% way the offline pass/fail verdict already switches between the modal and the
-% frequency-domain criteria. Force either name to override.
-defaults.FfeGateCriterion = 'auto';
 % PI phase-table nonideality: 'ab_constant' (cdr_pi's physical a+b=1 atan2
 % model, 2.891 LSB pk-pk INL) or 'ideal' (exactly linear).
 defaults.PiNonideal = 'ab_constant';

@@ -378,13 +378,14 @@ This document is derived only from `src/TX+Channel`, `src/AFE`, `src/ADC`, and `
 - Row 2 is not evidence that the live stage-2 gate fired for the runs that
   produced it historically. Those saved MATs were made with the center-touch
   gate; at `+/-100 ppm`, raw unwrapped PI code ramps at `0.8192 code/block`, so
-  that gate fired on 0/32 phases at either offset. Current runner default
-  `FfeGateCriterion = 'auto'` selects the frequency-state gate at nonzero ppm
-  and retains center-touch at exactly zero. As of the 2026-09-26 32-start
-  regeneration the three result directories **were** rerun under `auto`, so
-  their stage-2 fields now describe the selected gate (32/32 fired at
-  `+/-100 ppm`, 29/32 at 0 ppm); the row-2 label still means "after the lock
-  criterion is satisfied" and never "after the second downshift".
+  that gate fired on 0/32 phases at either offset. The ppm runner now uses the
+  frequency-state gate at **every** offset (the `FfeGateCriterion` option and its
+  `'auto'` split were retired on 2026-09-28; 0 ppm no longer uses center-touch
+  for either the gate or the verdict). As of the 2026-09-28 32-start
+  regeneration the three result directories were rerun under the freq-state gate,
+  so their stage-2 fields describe it (32/32 fired at all three offsets: -100 ppm
+  4966..6458, 0 ppm 2000..2782, +100 ppm 2445..2798); the row-2 label still means
+  "after the lock criterion is satisfied" and never "after the second downshift".
 
 ### PI nonideality assumptions in the ppm suite
 

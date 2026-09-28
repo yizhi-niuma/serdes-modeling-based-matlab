@@ -1,6 +1,25 @@
 ﻿# Current State
 
-Updated: 2026-09-26
+Updated: 2026-09-28
+
+## 2026-09-28: center-touch retired from the ppm suite; frequency-state is the sole lock criterion and stage-2 gate at every offset
+
+- The ppm runner `cdr_three_loop_ppm` no longer uses the modal center-touch criterion anywhere. The `FfeGateCriterion` option (and its `'auto'` default that resolved to `'center-touch'` at exactly 0 ppm) was deleted; the stage-2 (settle -> PVT-track) downshift is now hardcoded to the frequency-state gate for every offset, 0 ppm included. At 0 ppm the pass/fail verdict also moved to `loop_monitor.detectFrequencyStateLock` (expected rate 0, gated by the same slew-saturation guard used at nonzero ppm); the rotation criterion stays inapplicable because there is no PI rotation at 0 ppm. `result.LockMode` at 0 ppm is now `'freq-state'` (was `'center-touch'`). The zero-ppm `LockPhase` is derived from the trailing-window mean of the tracked eye phase instead of the retired modal center.
+- **Why now / evidence it is safe:** a no-source-change experiment (32 phases, `FfeGateCriterion='freq-state'`) had already shown the freq-state verdict matches the center-touch verdict **32/32** at 0 ppm, and the freq-state stage-2 gate fires **32/32** where center-touch fired only **29/32** (the three non-latching phases were the known code-domain limitation of the modal gate). The tail freq-state `|mean|` is `<=8.9e-5` and `std ~2.5e-3`, far inside the runner tolerances.
+- `detect_pi_center_touch_lock.m` is **retained** and still tested (`test_detect_pi_center_touch_lock` 9/9); the v3/v4 dLev+CDR-FFE suites still use it for their FFE-freeze write gate, and `cdr_top` still accepts `FfeGateCriterion='center-touch'` as its library default. Only the ppm suite dropped it.
+- Removed file: `validation/CDR/test_cdr_three_loop_wi_ppm/ab_stage2_gate.m` (the center-touch-vs-freq-state A/B harness), obsolete once the runner has no selectable criterion. No other references remained.
+- `helpers/write_ppm_lock_summary_txt.m` and `helpers/make_ppm_stage_eyes.m` still carry a center-touch branch keyed on `result.FfeGateCriterion`; that branch is now a **backward-compat reader for pre-2026-09-28 MATs only**. Every new run writes `FfeGateCriterion='freq-state'`, so the live path never enters it.
+
+**Regenerated artefacts** (`StartPhaseStep = 4` -> 32 start phases, runner default `NumBlock = 15000`, `PiNonideal = 'ab_constant'`, `FfeGateCriterion` retired -> freq-state). All three directories were rewritten by the runner and their three-eye sets rebuilt offline from the new MATs:
+
+| ppm | LockMode | Locked | AllPhase | Common / spread | Stage1 block range | Stage2 fired / block range | eyes (snr/lock/final) |
+|-----|----------|--------|----------|-----------------|--------------------|----------------------------|-----------------------|
+| -100 | `freq+rotation` | 32/32 | 1 | 107 / 3 | 2716..4216 | 32/32, 4966..6458 | 1/1/1 |
+| 0 | `freq-state` | 32/32 | 1 | 113 / 3 | 501..1028 | 32/32, 2000..2782 | 1/1/1 |
+| +100 | `freq+rotation` | 32/32 | 1 | 121 / 3 | 336..563 | 32/32, 2445..2798 | 1/1/1 |
+
+- `FreqStateMean` per offset: -100 ppm `0.819166..0.819308` (exp 0.8192), 0 ppm `-8.86e-5..8.85e-5` (exp 0), +100 ppm `-0.819406..-0.819146` (exp -0.8192). The only material deltas versus the 2026-09-26 regeneration are at 0 ppm: `LockMode` `center-touch -> freq-state`, stage-2 fired `29/32 -> 32/32`, and locked-phase spread `2 -> 3` (the eye-tail-mean `LockPhase` differs slightly from the modal center). -100/+100 ppm are unchanged.
+- Verified: `checkcode` clean on the runner; `tests/CDR` **15/17** (only the pre-existing `test_cdr_ffe`/`test_cdr_ffe_loop` pair fails, proven on a clean HEAD worktree; `test_detect_pi_center_touch_lock` 9/9, `test_freq_state_gate` all-pass, `test_loop_monitor` 15/15, `test_cdr_top_configured` 10/10). Eyes rebuilt 1/1/1 for all three offsets.
 
 ## 2026-09-26: dLev settle detector and runner P-only schedule removed; SNR is the sole stage-1 gate
 

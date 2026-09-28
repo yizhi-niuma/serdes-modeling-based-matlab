@@ -1,5 +1,34 @@
 ﻿# Decisions
 
+## 2026-09-28: retire center-touch from the ppm suite; frequency-state is the sole lock criterion and stage-2 gate at every offset
+
+- **Decision (user-approved):** delete the `FfeGateCriterion` option and its
+  `'auto'` default from `cdr_three_loop_ppm`, hardcode the stage-2 downshift to
+  the frequency-state gate for every offset, and move the 0 ppm pass/fail
+  verdict from `detect_pi_center_touch_lock` to
+  `loop_monitor.detectFrequencyStateLock` (expected rate 0, same slew-saturation
+  guard as nonzero ppm). This supersedes the 2026-09-26 `'auto'` policy that
+  resolved to `'center-touch'` at exactly 0 ppm. No compatibility switch was
+  kept in the runner (per user: no dead options).
+- **Why:** center-touch at 0 ppm was a code-domain modal test that only fired on
+  29/32 phases even when the loop was locked, and it duplicated a verdict the
+  frequency-state detector already produces. A no-source-change experiment
+  showed the freq-state verdict matches center-touch **32/32** at 0 ppm and its
+  stage-2 gate fires **32/32**, with tail freq-state `|mean| <= 8.9e-5` and
+  `std ~2.5e-3`. Removing the split makes the pass/fail criterion and the
+  stage-2 gate identical across all offsets except for the rotation term (still
+  applicable only when the PI rotates).
+- **Scope preserved:** `detect_pi_center_touch_lock.m` is retained and tested;
+  the v3/v4 dLev+CDR-FFE suites still use it for their FFE-freeze write gate, and
+  `cdr_top` still accepts `FfeGateCriterion='center-touch'` as its library
+  default. `ab_stage2_gate.m` (the A/B harness) was deleted as obsolete. The two
+  helper summary/eye writers keep a center-touch branch as a backward-compat
+  reader for pre-2026-09-28 MATs only.
+- **Verified:** `checkcode` clean; `tests/CDR` 15/17 (only the pre-existing
+  `test_cdr_ffe`/`test_cdr_ffe_loop` pair fails); all three ppm directories
+  regenerated (32 phases, 15000 blocks) lock 32/32 with eyes 1/1/1. See
+  `CURRENT_STATE.md` 2026-09-28 for the table.
+
 ## 2026-09-26: remove the legacy dLev settle detector and the runner P-only schedule
 
 - **Decision (user-approved):** delete the dLev settle detector from
