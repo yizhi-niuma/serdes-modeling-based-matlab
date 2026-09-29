@@ -473,11 +473,13 @@ classdef cdr_top < handle
                 % 在此处恒成立。非 Fast 版另外维护的 LastGradient/LastDelta/
                 % UpdateCount 只是诊断量，本类与任何 runner 都不读。
                 rawDelta = obj.FfeLoop.updateSsLmsFast(blockRegressor, errorBlock);
-                % 主抽头保持固定的单位增益锚点。FfeAdaptEnableMask 默认
-                % [1 1 0 1 1 1]，updateSsLms 已按 mask 把这一项清零，所以这
-                % 一行在默认配置下是冗余的；保留它是因为 mask 由配置提供，
-                % 而 cdr_ffe.applyCoefficientDelta 会拒绝非零的主抽头增量
-                % (cdr_ffe:MainTapUpdate)。它是本层对该不变量的兜底。
+                % 主抽头保持固定的单位增益锚点。cdr_ffe_loop 的构造器现在硬性
+                % 拒绝任何使能主抽头的 mask(cdr_ffe_loop:MainTapAdaptEnabled)，
+                % 所以 updateSsLmsFast 按 ~mask 清零后，主抽头增量必然已是精确
+                % 0——这一行现在是可证明的死代码，不再依赖"mask 由配置提供"这个
+                % 早先的理由。保留它是纵深防御的最后一道兜底，与
+                % cdr_ffe.applyCoefficientDelta 拒绝非零主抽头增量
+                % (cdr_ffe:MainTapUpdate)相呼应。
                 rawDelta(obj.Ffe.MainTapIndex) = 0;
                 proposedCoefficients = obj.Ffe.Coefficients + rawDelta;
                 adaptationCalculated = true;
