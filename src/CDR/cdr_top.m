@@ -291,11 +291,12 @@ classdef cdr_top < handle
                 centerTouchBandHalfWidth, centerTouchStartBlock);
             obj.Monitor.enableSnrSettle(cfg.SnrSettleThresholdDb, ...
                 cfg.SnrSettleAlpha, cfg.SnrSettleMinBlock);
-            % FfeGateCriterion 目前只接受 'freq-state' 这一个值(见
-            % validateConfig 的 requireTextChoice)，所以这里的 strcmp 恒真。
-            % 刻意保留而不是简化成 if cfg.FfeGateEnable:它是判据的显式接入
-            % 点，将来再加一种判据时只需在这里分支，不必重新推导语义。
-            if cfg.FfeGateEnable && strcmp(cfg.FfeGateCriterion, 'freq-state')
+            % FfeGateCriterion 目前被 validateConfig 限制为唯一值 'freq-state'
+            % (见 requireTextChoice)，所以旧代码里的 strcmp 恒真,已删除。该字段
+            % 仍保留:它是写进 result 供离线工具(make_ppm_stage_eyes /
+            % write_ppm_lock_summary_txt)判断本次 run 用了哪种门控的标签。将来
+            % 若真的加入第二种判据,再在这里按 cfg.FfeGateCriterion 分支即可。
+            if cfg.FfeGateEnable
                 obj.Monitor.enableFreqStateGate( ...
                     cfg.FfeGateFreqWindowBlocks, ...
                     cfg.FfeGateFreqExpectedRate, ...
