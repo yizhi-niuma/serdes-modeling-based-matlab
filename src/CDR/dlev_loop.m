@@ -62,6 +62,15 @@ classdef dlev_loop < handle
                 polarity = 1;
             end
 
+            % 构造器与 setStepSize 共用同一套校验,消除"同一个 stepSize 构造时
+            % 被静默接受、setStepSize 却拒绝"的双标准。其余参数一并校验,堵住
+            % blockSize=0 除零静默变 NaN、字符 'a' 被 double() 悄悄当成 97 等陷阱。
+            dlev_loop.validatePositiveScalar(stepSize, 'InvalidStepSize', 'stepSize');
+            dlev_loop.validatePositiveIntegerScalar(blockSize, 'InvalidBlockSize', 'blockSize');
+            dlev_loop.validatePositiveScalar(levelsInner, 'InvalidLevelsInner', 'levelsInner');
+            dlev_loop.validatePositiveScalar(levelsOuter, 'InvalidLevelsOuter', 'levelsOuter');
+            dlev_loop.validatePolarity(polarity);
+
             obj.StepSize = double(stepSize);
             obj.BlockSize = double(blockSize);
             obj.LevelsInner = double(levelsInner);
@@ -144,11 +153,8 @@ classdef dlev_loop < handle
             %
             % 只改步长,不动两环幅度/门限/轨迹与更新计数,故换挡瞬间自适应
             % 状态连续,仅后续块的更新增益改变。捕获档用大 mu 快速逼近真值,
-            % 相位环锁定后切到稳态档小 mu 压低稳态抖动。
-            if ~(isscalar(stepSize) && isnumeric(stepSize) && stepSize > 0)
-                error('dlev_loop:InvalidStepSize', ...
-                    'stepSize must be a positive scalar.');
-            end
+            % 相位环锁定后切到稳态档小 mu 压低稳态抖动。校验与构造器同源。
+            dlev_loop.validatePositiveScalar(stepSize, 'InvalidStepSize', 'stepSize');
             obj.StepSize = double(stepSize);
         end
     end
@@ -195,6 +201,38 @@ classdef dlev_loop < handle
             obj.DLevOuterTrace(end + 1) = obj.DLevOuter;
             obj.ErrInnerTrace(end + 1) = sum(innerErr) / obj.BlockSize;
             obj.ErrOuterTrace(end + 1) = sum(outerErr) / obj.BlockSize;
+        end
+    end
+
+    methods (Static, Access = private)
+        function validatePositiveScalar(value, idSuffix, argumentName)
+            % validatePositiveScalar  正实有限标量校验,构造器与 setStepSize 共用。
+            isValid = isscalar(value) && isnumeric(value) && isreal(value) && ...
+                isfinite(value) && value > 0;
+            if ~isValid
+                error(['dlev_loop:' idSuffix], ...
+                    '%s must be a positive real finite scalar.', argumentName);
+            end
+        end
+
+        function validatePositiveIntegerScalar(value, idSuffix, argumentName)
+            % validatePositiveIntegerScalar  正整数标量校验(BlockSize 需 >=1)。
+            isValid = isscalar(value) && isnumeric(value) && isreal(value) && ...
+                isfinite(value) && value >= 1 && value == fix(value);
+            if ~isValid
+                error(['dlev_loop:' idSuffix], ...
+                    '%s must be a positive integer scalar.', argumentName);
+            end
+        end
+
+        function validatePolarity(value)
+            % validatePolarity  极性因子只允许 +1 或 -1。
+            isValid = isscalar(value) && isnumeric(value) && isreal(value) && ...
+                (value == 1 || value == -1);
+            if ~isValid
+                error('dlev_loop:InvalidPolarity', ...
+                    'polarity must be +1 or -1.');
+            end
         end
     end
 end

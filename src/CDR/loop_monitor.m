@@ -425,13 +425,23 @@ classdef loop_monitor < handle
             end
 
             % Oldest-to-newest view of the ring, i.e. the same trailing window
-            % the offline criterion would take from the full trace.
+            % the offline criterion would take from the full trace. The window
+            % is finite by construction and the gate config was validated at
+            % enableFreqStateGate, so this calls the validator-free core
+            % directly and only assembles diag when the caller asked for it.
             ordered = [obj.FreqRingValue(slot + 1:end), ...
                 obj.FreqRingValue(1:slot)];
-            [locked, diag] = loop_monitor.detectFrequencyStateLock( ...
-                ordered, window, obj.FreqGateExpectedRate, ...
-                obj.FreqGateMeanHalfDiffTol, obj.FreqGateStdTol, ...
-                obj.FreqGateRateTol, obj.FreqGateSatLevel);
+            if reportDiag
+                [locked, diag] = loop_monitor.freqStateLockCore( ...
+                    ordered, window, obj.FreqGateExpectedRate, ...
+                    obj.FreqGateMeanHalfDiffTol, obj.FreqGateStdTol, ...
+                    obj.FreqGateRateTol, obj.FreqGateSatLevel, true);
+            else
+                locked = loop_monitor.freqStateLockCore( ...
+                    ordered, window, obj.FreqGateExpectedRate, ...
+                    obj.FreqGateMeanHalfDiffTol, obj.FreqGateStdTol, ...
+                    obj.FreqGateRateTol, obj.FreqGateSatLevel, false);
+            end
             if locked
                 obj.FreqGateDone = true;
                 obj.FreqGateBlock = blockIndex;
@@ -515,6 +525,13 @@ classdef loop_monitor < handle
             % satLevel here, keeping the online verdict identical by
             % construction to this offline one over the same window and the
             % same satLevel.
+            %
+            % The numerical work lives in the private freqStateLockCore, which
+            % this method calls after validating its inputs. The core assembles
+            % the diagnostic struct only when its caller asks for it, so a
+            % single-output call pays neither the struct build nor -- via the
+            % online gate, which calls the core directly -- the input
+            % validators. The verdict is identical either way.
             if nargin < 7
                 satLevel = Inf;
             end
@@ -528,38 +545,15 @@ classdef loop_monitor < handle
             loop_monitor.validateNonnegativeScalar(stdTol, 'stdTol');
             loop_monitor.validateNonnegativeScalarOrInf(rateTol, 'rateTol');
             loop_monitor.validateNonnegativeScalarOrInf(satLevel, 'satLevel');
-
-            seq = reshape(double(freqStateSeq), 1, []);
-            totalLength = numel(seq);
-            windowLength = min(totalLength, double(windowBlocks));
-            diag = struct('WindowLength', windowLength, 'MeanValue', NaN, ...
-                'MeanHalfDiff', NaN, 'TailStd', NaN, ...
-                'ExpectedRate', double(expectedRate), 'RateError', NaN, ...
-                'FlatnessOk', false, 'RateOk', false, 'SatOk', false);
-            if windowLength < 2
-                locked = false;
-                return;
-            end
-
-            window = seq(totalLength - windowLength + 1:end);
-            half = floor(windowLength / 2);
-            meanFirst = mean(window(1:half));
-            meanSecond = mean(window(half + 1:end));
-            diag.MeanValue = mean(window);
-            diag.MeanHalfDiff = abs(meanFirst - meanSecond);
-            diag.TailStd = std(window);
-            diag.RateError = diag.MeanValue - double(expectedRate);
-            diag.FlatnessOk = diag.MeanHalfDiff <= meanHalfDiffTol && ...
-                diag.TailStd <= stdTol;
-            if isnan(expectedRate) || ~isfinite(rateTol)
-                diag.RateOk = true;
+            if nargout > 1
+                [locked, diag] = loop_monitor.freqStateLockCore(freqStateSeq, ...
+                    windowBlocks, expectedRate, meanHalfDiffTol, stdTol, ...
+                    rateTol, satLevel, true);
             else
-                diag.RateOk = abs(abs(diag.MeanValue) - ...
-                    abs(double(expectedRate))) <= rateTol;
+                locked = loop_monitor.freqStateLockCore(freqStateSeq, ...
+                    windowBlocks, expectedRate, meanHalfDiffTol, stdTol, ...
+                    rateTol, satLevel, false);
             end
-            diag.SatOk = max(abs(window)) < double(satLevel);
-            locked = totalLength >= double(windowBlocks) && ...
-                diag.FlatnessOk && diag.RateOk && diag.SatOk;
         end
 
         function [locked, diag] = detectRotationPeriodLock(unwrappedSeq, ...
@@ -636,6 +630,58 @@ classdef loop_monitor < handle
     end
 
     methods (Static, Access = private)
+        function [locked, diag] = freqStateLockCore(freqStateSeq, ...
+                windowBlocks, expectedRate, meanHalfDiffTol, stdTol, ...
+                rateTol, satLevel, wantDiag)
+            %FREQSTATELOCKCORE Validator-free numerical core of the flat-mean
+            % loop-frequency lock criterion. Shared by the public
+            % detectFrequencyStateLock (which validates first) and the online
+            % updateFreqStateGate (whose window is finite by construction and
+            % whose config was validated at enableFreqStateGate), so both
+            % reach an identical verdict. The hot online path pays neither the
+            % input validators nor -- when wantDiag is false -- the 8-field
+            % diagnostic struct build.
+            seq = reshape(double(freqStateSeq), 1, []);
+            totalLength = numel(seq);
+            windowLength = min(totalLength, double(windowBlocks));
+            if windowLength < 2
+                locked = false;
+                if wantDiag
+                    diag = struct('WindowLength', windowLength, ...
+                        'MeanValue', NaN, 'MeanHalfDiff', NaN, ...
+                        'TailStd', NaN, 'ExpectedRate', double(expectedRate), ...
+                        'RateError', NaN, 'FlatnessOk', false, ...
+                        'RateOk', false, 'SatOk', false);
+                end
+                return;
+            end
+
+            window = seq(totalLength - windowLength + 1:end);
+            half = floor(windowLength / 2);
+            meanFirst = mean(window(1:half));
+            meanSecond = mean(window(half + 1:end));
+            meanValue = mean(window);
+            meanHalfDiff = abs(meanFirst - meanSecond);
+            tailStd = std(window);
+            flatnessOk = meanHalfDiff <= meanHalfDiffTol && tailStd <= stdTol;
+            if isnan(expectedRate) || ~isfinite(rateTol)
+                rateOk = true;
+            else
+                rateOk = abs(abs(meanValue) - abs(double(expectedRate))) <= ...
+                    rateTol;
+            end
+            satOk = max(abs(window)) < double(satLevel);
+            locked = totalLength >= double(windowBlocks) && ...
+                flatnessOk && rateOk && satOk;
+            if wantDiag
+                diag = struct('WindowLength', windowLength, ...
+                    'MeanValue', meanValue, 'MeanHalfDiff', meanHalfDiff, ...
+                    'TailStd', tailStd, 'ExpectedRate', double(expectedRate), ...
+                    'RateError', meanValue - double(expectedRate), ...
+                    'FlatnessOk', flatnessOk, 'RateOk', rateOk, 'SatOk', satOk);
+            end
+        end
+
         function validateIntegerArg(value, minimum, idSuffix, argumentName)
             isValid = isnumeric(value) && isreal(value) && isscalar(value) && ...
                 isfinite(value) && value >= minimum && value == fix(value);
@@ -701,10 +747,11 @@ classdef loop_monitor < handle
 
             candidates = obj.SearchCodes(obj.SearchCounts == largestCount);
             center = min(candidates);
-            centerIndex = find(obj.SearchCodes == center, 1);
             obj.CenterUnwrapped = center;
             obj.CandidateStartBlock = blockIndex;
-            obj.ModeOccurrences = obj.SearchCounts(centerIndex);
+            % ModeOccurrences 已在上面置为 largestCount。center 取自
+            % SearchCounts==largestCount 的集合,故其计数恒等于 largestCount,
+            % 无需再 find(SearchCodes==center) 回查一遍(第三次全数组扫描)。
             obj.EventCount = 0;
             obj.HavePrevious = true;
             obj.PreviousCode = code;
@@ -746,15 +793,6 @@ classdef loop_monitor < handle
                 error(['loop_monitor:' idSuffix], ...
                     '%s must be a finite integer scalar in its valid range.', ...
                     argumentName);
-            end
-        end
-
-        function validateLevel(~, value, argumentName)
-            isValid = isnumeric(value) && isreal(value) && isscalar(value) && ...
-                isfinite(value);
-            if ~isValid
-                error('loop_monitor:InvalidDlevOuter', ...
-                    '%s must be a finite real scalar.', argumentName);
             end
         end
     end

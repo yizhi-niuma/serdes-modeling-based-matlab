@@ -16,6 +16,15 @@ classdef cdr_ffe < handle
         PostTapCount
     end
 
+    properties (Access = private)
+        % processBlockFast 的 regressorIndex 只取决于 blockLength 与固定的抽头
+        % 数,对同一 blockLength 是常量。缓存它,避免每块重建 blockLength×TapCount
+        % 索引矩阵及其一次隐式扩展分配(cdr_top 每块必走这条最热路径,
+        % blockLength 除首块/flush 外恒为 BlockSize,命中率 ~99.98%)。
+        CachedBlockLength = NaN
+        CachedRegressorIndex = []
+    end
+
     methods
         function obj = cdr_ffe(initialCoefficients, preTapCount)
             % cdr_ffe  构造一个无跨块缓存的浮点 CDR FFE。
@@ -45,10 +54,14 @@ classdef cdr_ffe < handle
         function [outputBlock, regressor] = processBlockFast(obj, inputWindow)
             % processBlockFast  处理一个已由调用方校验的 double 行向量输入窗口。
             blockLength = numel(inputWindow) - obj.PostTapCount - obj.PreTapCount;
-            firstTapSampleIndex = (obj.TapCount - 1) + (1:blockLength).';
-            tapOffset = 0:obj.TapCount - 1;
-            regressorIndex = firstTapSampleIndex - tapOffset;
-            regressor = inputWindow(regressorIndex);
+            if blockLength ~= obj.CachedBlockLength
+                % blockLength 变了(首块/flush 或不同块长)才重建索引矩阵。
+                firstTapSampleIndex = (obj.TapCount - 1) + (1:blockLength).';
+                tapOffset = 0:obj.TapCount - 1;
+                obj.CachedRegressorIndex = firstTapSampleIndex - tapOffset;
+                obj.CachedBlockLength = blockLength;
+            end
+            regressor = inputWindow(obj.CachedRegressorIndex);
             outputBlock = (regressor * obj.Coefficients.').';
         end
 
