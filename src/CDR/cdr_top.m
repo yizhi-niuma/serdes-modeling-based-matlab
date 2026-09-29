@@ -201,10 +201,12 @@ classdef cdr_top < handle
             cfg.FfeGateFreqMinBlock = 1;
             % 饱和守卫。撞在 ±FrequencyLimit 上的积分频率态是"完美平坦"的
             % (半差=0、std=0)，而默认口径是纯平坦性(ExpectedRate=NaN /
-            % RateTol=Inf)，detectFrequencyStateLock 会把它判成锁定——但那是
-            % railed 而不是锁定，此时眼睛通常还没开、环路根本没在跟踪。门控
-            % 因此拒绝把 |FrequencyState| >= FfeGateFreqSatFrac*FrequencyLimit
-            % 的块喂进判决窗口。设 >1 可关闭；FrequencyLimit=Inf 时自动失效。
+            % RateTol=Inf)，纯平坦判据会把它判成锁定——但那是 railed 而不是
+            % 锁定，此时眼睛通常还没开、环路根本没在跟踪。守卫住在判据内部:
+            % enableFreqStateGate 把 satLevel=FfeGateFreqSatFrac*FrequencyLimit
+            % 交给 detectFrequencyStateLock,尾窗峰值 max(|x|) >= satLevel 时判据
+            % 直接拒绝(见 processConfiguredBlock 的无条件喂入)。设 >1 可关闭;
+            % FrequencyLimit=Inf 时 satLevel=Inf, 守卫自动失效。
             cfg.FfeGateFreqSatFrac = 0.9;
         end
 
@@ -297,12 +299,17 @@ classdef cdr_top < handle
             % write_ppm_lock_summary_txt)判断本次 run 用了哪种门控的标签。将来
             % 若真的加入第二种判据,再在这里按 cfg.FfeGateCriterion 分支即可。
             if cfg.FfeGateEnable
+                % satLevel = FfeGateFreqSatFrac*FrequencyLimit 直接交给判据:
+                % 门控窗口的饱和拒绝现在住在 detectFrequencyStateLock 内部,
+                % processConfiguredBlock 不再需要在喂入前挑掉饱和块(见那里的
+                % 说明)。FrequencyLimit=Inf 时 satLevel=Inf, 守卫自动失效。
                 obj.Monitor.enableFreqStateGate( ...
                     cfg.FfeGateFreqWindowBlocks, ...
                     cfg.FfeGateFreqExpectedRate, ...
                     cfg.FfeGateFreqMeanHalfDiffTol, ...
                     cfg.FfeGateFreqStdTol, cfg.FfeGateFreqRateTol, ...
-                    cfg.FfeGateFreqMinBlock);
+                    cfg.FfeGateFreqMinBlock, ...
+                    cfg.FfeGateFreqSatFrac * cfg.FrequencyLimit);
             end
             obj.resetState();
         end
@@ -438,15 +445,15 @@ classdef cdr_top < handle
                 % trace 的 LoopFrequencyState 是同一个值，在线判定与离线判据
                 % 逐块对齐。
                 freqState = obj.LoopFilter.FrequencyState;
-                % 饱和守卫(定义见 defaultConfig 的 FfeGateFreqSatFrac)：钳在
-                % 积分限幅上的频率态是平坦的，但那是 railed 而非锁定。把这种
-                % 块排除出门控窗口，否则纯平坦口径会误闩锁，进而过早把
-                % dLev/FFE 降到 PVT 档且再也追不回来。与 updateFreqStateGate
-                % 跳过非有限样本是同一性质的输入过滤。
-                if abs(freqState) < cfg.FfeGateFreqSatFrac * cfg.FrequencyLimit
-                    loopLockedEvent = obj.Monitor.updateFreqStateGate( ...
-                        blockIndex, freqState);
-                end
+                % 无条件把这一块的频率态喂进门控。饱和守卫(钳在积分限幅上的
+                % railed 频率态是"完美平坦"却并非锁定)现在住在判据内部:
+                % enableFreqStateGate 已把 satLevel=FfeGateFreqSatFrac*
+                % FrequencyLimit 交给它,railed 尾窗会因峰值 max(|x|)>=satLevel 被
+                % detectFrequencyStateLock 直接拒绝。这样在线门控与离线判据在
+                % 同一尾窗、同一 satLevel 下逐块一致,不再有 cdr_top 侧的整块
+                % 预过滤把两者分开。非有限样本仍由 updateFreqStateGate 自行跳过。
+                loopLockedEvent = obj.Monitor.updateFreqStateGate( ...
+                    blockIndex, freqState);
                 if loopLockedEvent
                     obj.GatedCoefficients = obj.Ffe.Coefficients;
                     if strcmp(cfg.FfeGateMode, 'pvt-track')
@@ -491,11 +498,10 @@ classdef cdr_top < handle
             end
 
             obj.BlockIndex = blockIndex;
-            % 一次 struct(...) 构造输出,而不是 38 次 output.<field> 增量赋值:
-            % 每加一个字段都要重排结构体的字段表,逐字段写是 O(nField^2)。
+            % 把本块的 38 个输出值填进 v(顺序随意),再交给 buildConfiguredOutput
+            % 按规范顺序装配。字段名与顺序的单一真相源在那个方法里,空块路径
+            % emptyConfiguredOutput 走同一个装配器,因此两种输出不会再漂移。
             % 子模块句柄也先取进局部变量,省掉几十次 obj.X.Y 两级查找。
-            % 字段名与顺序必须与 emptyConfiguredOutput 严格一致,否则两种
-            % 输出拼不进同一个 struct 数组。
             phaseInterp = obj.PhaseInterpolator;
             obj.CurrentLocalIndexFloat = phaseInterp.getLocalIndex();
             loopFilter = obj.LoopFilter;
@@ -504,87 +510,113 @@ classdef cdr_top < handle
             % 环路滤波器的亚码连续量：LoopControl 是量化前的相位速度需求
             % (code/block)，LoopFrequencyState 是积分态。整数 PI code 会把
             % 亚码运动藏起来，这两个量用于区分"真抖动"与"缓慢漂移"。
-            output = struct( ...
-                'HasOutput', true, ...
-                'BlockIndex', blockIndex, ...
-                'SampleCodeWrapped', codeWrapped, ...
-                'SampleUiSlip', uiSlip, ...
-                'UnwrappedCode', uiSlip * cfg.SamplesPerSymbol + codeWrapped, ...
-                'FfeOutput', ffeOutput, ...
-                'ValidMask', blockValid, ...
-                'Decision', decision, ...
-                'SliceError', sliceError, ...
-                'DataSymbol', dataSymbol, ...
-                'ErrorBit', errorBit, ...
-                'PhaseDecision', phaseDecision, ...
-                'ValidTransition', validTransition, ...
-                'PhaseError', phaseError, ...
-                'DeltaCode', deltaCode, ...
-                'LoopControl', loopFilter.LastControl, ...
-                'LoopFrequencyState', loopFilter.FrequencyState, ...
-                'LoopCodeResidue', loopFilter.CodeResidue, ...
-                'LoopPendingCode', loopFilter.PendingCode, ...
-                'NextCodeWrapped', phaseInterp.CodeWrapped, ...
-                'NextUiSlip', phaseInterp.UiSlip, ...
-                'DlevInner', dlev.DLevInner, ...
-                'DlevOuter', dlev.DLevOuter, ...
-                'DlevThreshold', dlev.Threshold, ...
-                'FfeCoefficients', obj.Ffe.Coefficients, ...
-                'FfeRawDelta', rawDelta, ...
-                'FfeAppliedDelta', appliedDelta, ...
-                'FfeProposedCoefficients', proposedCoefficients, ...
-                'FfeAdaptationCalculated', adaptationCalculated, ...
-                'FfeWriteApplied', writeApplied, ...
-                'LoopLockedEvent', loopLockedEvent, ...
-                'GateEngaged', obj.gateLatched(), ...
-                'SnrDb', snrDb, ...
-                'SnrEwmaDb', monitor.SnrEwmaDb, ...
-                'SnrSettleDone', monitor.SnrSettleDone, ...
-                'SnrSettleBlock', monitor.SnrSettleBlock, ...
-                'DlevStepSize', dlev.StepSize, ...
-                'FfeStepSize', obj.FfeLoop.StepSize);
+            v = struct();
+            v.HasOutput = true;
+            v.BlockIndex = blockIndex;
+            v.SampleCodeWrapped = codeWrapped;
+            v.SampleUiSlip = uiSlip;
+            v.UnwrappedCode = uiSlip * cfg.SamplesPerSymbol + codeWrapped;
+            v.FfeOutput = ffeOutput;
+            v.ValidMask = blockValid;
+            v.Decision = decision;
+            v.SliceError = sliceError;
+            v.DataSymbol = dataSymbol;
+            v.ErrorBit = errorBit;
+            v.PhaseDecision = phaseDecision;
+            v.ValidTransition = validTransition;
+            v.PhaseError = phaseError;
+            v.DeltaCode = deltaCode;
+            v.LoopControl = loopFilter.LastControl;
+            v.LoopFrequencyState = loopFilter.FrequencyState;
+            v.LoopCodeResidue = loopFilter.CodeResidue;
+            v.LoopPendingCode = loopFilter.PendingCode;
+            v.NextCodeWrapped = phaseInterp.CodeWrapped;
+            v.NextUiSlip = phaseInterp.UiSlip;
+            v.DlevInner = dlev.DLevInner;
+            v.DlevOuter = dlev.DLevOuter;
+            v.DlevThreshold = dlev.Threshold;
+            v.FfeCoefficients = obj.Ffe.Coefficients;
+            v.FfeRawDelta = rawDelta;
+            v.FfeAppliedDelta = appliedDelta;
+            v.FfeProposedCoefficients = proposedCoefficients;
+            v.FfeAdaptationCalculated = adaptationCalculated;
+            v.FfeWriteApplied = writeApplied;
+            v.LoopLockedEvent = loopLockedEvent;
+            v.GateEngaged = obj.gateLatched();
+            v.SnrDb = snrDb;
+            v.SnrEwmaDb = monitor.SnrEwmaDb;
+            v.SnrSettleDone = monitor.SnrSettleDone;
+            v.SnrSettleBlock = monitor.SnrSettleBlock;
+            v.DlevStepSize = dlev.StepSize;
+            v.FfeStepSize = obj.FfeLoop.StepSize;
+            output = obj.buildConfiguredOutput(v);
+        end
+
+        function output = buildConfiguredOutput(~, v)
+            % 正常块(processConfiguredBlock)与空块(emptyConfiguredOutput)两个
+            % 输出路径共用这里的规范字段顺序,取代过去两份手工维护、必须逐字段
+            % 保持一致的平行字段表。调用方只需把 38 个值填进 v(顺序随意),这里
+            % 按 names 的顺序装配,保证两种输出字段名与顺序完全一致,能拼进同一
+            % 个 struct 数组;v 若缺字段会在此处即时报错,漂移无法静默通过。
+            names = { ...
+                'HasOutput', 'BlockIndex', 'SampleCodeWrapped', ...
+                'SampleUiSlip', 'UnwrappedCode', 'FfeOutput', 'ValidMask', ...
+                'Decision', 'SliceError', 'DataSymbol', 'ErrorBit', ...
+                'PhaseDecision', 'ValidTransition', 'PhaseError', 'DeltaCode', ...
+                'LoopControl', 'LoopFrequencyState', 'LoopCodeResidue', ...
+                'LoopPendingCode', 'NextCodeWrapped', 'NextUiSlip', ...
+                'DlevInner', 'DlevOuter', 'DlevThreshold', 'FfeCoefficients', ...
+                'FfeRawDelta', 'FfeAppliedDelta', 'FfeProposedCoefficients', ...
+                'FfeAdaptationCalculated', 'FfeWriteApplied', 'LoopLockedEvent', ...
+                'GateEngaged', 'SnrDb', 'SnrEwmaDb', 'SnrSettleDone', ...
+                'SnrSettleBlock', 'DlevStepSize', 'FfeStepSize'};
+            output = struct();
+            for index = 1:numel(names)
+                output.(names{index}) = v.(names{index});
+            end
         end
 
         function output = emptyConfiguredOutput(obj)
-            output = struct();
-            output.HasOutput = false;
-            output.BlockIndex = 0;
-            output.SampleCodeWrapped = NaN;
-            output.SampleUiSlip = NaN;
-            output.UnwrappedCode = NaN;
-            output.FfeOutput = zeros(1, 0);
-            output.ValidMask = false(1, obj.Config.BlockSize);
-            output.Decision = zeros(1, 0);
-            output.SliceError = zeros(1, 0);
-            output.DataSymbol = zeros(1, 0);
-            output.ErrorBit = zeros(1, 0);
-            output.PhaseDecision = zeros(1, 0, 'int8');
-            output.ValidTransition = false(1, 0);
-            output.PhaseError = NaN;
-            output.DeltaCode = NaN;
-            output.LoopControl = NaN;
-            output.LoopFrequencyState = obj.LoopFilter.FrequencyState;
-            output.LoopCodeResidue = obj.LoopFilter.CodeResidue;
-            output.LoopPendingCode = obj.LoopFilter.PendingCode;
-            output.NextCodeWrapped = obj.PhaseInterpolator.CodeWrapped;
-            output.NextUiSlip = obj.PhaseInterpolator.UiSlip;
-            output.DlevInner = obj.Dlev.DLevInner;
-            output.DlevOuter = obj.Dlev.DLevOuter;
-            output.DlevThreshold = obj.Dlev.Threshold;
-            output.FfeCoefficients = obj.Ffe.Coefficients;
-            output.FfeRawDelta = nan(1, obj.Ffe.TapCount);
-            output.FfeAppliedDelta = zeros(1, obj.Ffe.TapCount);
-            output.FfeProposedCoefficients = nan(1, obj.Ffe.TapCount);
-            output.FfeAdaptationCalculated = false;
-            output.FfeWriteApplied = false;
-            output.LoopLockedEvent = false;
-            output.GateEngaged = obj.gateLatched();
-            output.SnrDb = NaN;
-            output.SnrEwmaDb = obj.Monitor.SnrEwmaDb;
-            output.SnrSettleDone = obj.Monitor.SnrSettleDone;
-            output.SnrSettleBlock = obj.Monitor.SnrSettleBlock;
-            output.DlevStepSize = obj.Dlev.StepSize;
-            output.FfeStepSize = obj.FfeLoop.StepSize;
+            v = struct();
+            v.HasOutput = false;
+            v.BlockIndex = 0;
+            v.SampleCodeWrapped = NaN;
+            v.SampleUiSlip = NaN;
+            v.UnwrappedCode = NaN;
+            v.FfeOutput = zeros(1, 0);
+            v.ValidMask = false(1, obj.Config.BlockSize);
+            v.Decision = zeros(1, 0);
+            v.SliceError = zeros(1, 0);
+            v.DataSymbol = zeros(1, 0);
+            v.ErrorBit = zeros(1, 0);
+            v.PhaseDecision = zeros(1, 0, 'int8');
+            v.ValidTransition = false(1, 0);
+            v.PhaseError = NaN;
+            v.DeltaCode = NaN;
+            v.LoopControl = NaN;
+            v.LoopFrequencyState = obj.LoopFilter.FrequencyState;
+            v.LoopCodeResidue = obj.LoopFilter.CodeResidue;
+            v.LoopPendingCode = obj.LoopFilter.PendingCode;
+            v.NextCodeWrapped = obj.PhaseInterpolator.CodeWrapped;
+            v.NextUiSlip = obj.PhaseInterpolator.UiSlip;
+            v.DlevInner = obj.Dlev.DLevInner;
+            v.DlevOuter = obj.Dlev.DLevOuter;
+            v.DlevThreshold = obj.Dlev.Threshold;
+            v.FfeCoefficients = obj.Ffe.Coefficients;
+            v.FfeRawDelta = nan(1, obj.Ffe.TapCount);
+            v.FfeAppliedDelta = zeros(1, obj.Ffe.TapCount);
+            v.FfeProposedCoefficients = nan(1, obj.Ffe.TapCount);
+            v.FfeAdaptationCalculated = false;
+            v.FfeWriteApplied = false;
+            v.LoopLockedEvent = false;
+            v.GateEngaged = obj.gateLatched();
+            v.SnrDb = NaN;
+            v.SnrEwmaDb = obj.Monitor.SnrEwmaDb;
+            v.SnrSettleDone = obj.Monitor.SnrSettleDone;
+            v.SnrSettleBlock = obj.Monitor.SnrSettleBlock;
+            v.DlevStepSize = obj.Dlev.StepSize;
+            v.FfeStepSize = obj.FfeLoop.StepSize;
+            output = obj.buildConfiguredOutput(v);
         end
 
         function configurePiNonideal(obj)

@@ -38,11 +38,14 @@ classdef loop_monitor < handle
     %    detectFrequencyStateLock criterion defined below. It keeps a ring
     %    buffer of the last windowBlocks loop frequency-state samples and,
     %    once that buffer is full, hands the ordered window to that very same
-    %    static detector. The online verdict is therefore identical by
-    %    construction to the offline one evaluated over the same trailing
-    %    window: there is no second copy of the criterion to drift out of
-    %    sync. Memory is one window regardless of run length, and the cost is
-    %    O(windowBlocks) per block only until the gate latches.
+    %    static detector, forwarding the same satLevel it was enabled with.
+    %    The online verdict is therefore identical by construction to the
+    %    offline one evaluated over the same trailing window and satLevel:
+    %    there is no second copy of the criterion to drift out of sync, and
+    %    the railed-integrator rejection lives in the one criterion rather
+    %    than in a caller's pre-filter. Memory is one window regardless of run
+    %    length, and the cost is O(windowBlocks) per block only until the gate
+    %    latches.
     %
     %    It exists because detector 1 above is a CODE-DOMAIN center-touch
     %    test. Under a frequency offset the PI code ramps continuously and
@@ -82,6 +85,7 @@ classdef loop_monitor < handle
         FreqGateMeanHalfDiffTol = NaN
         FreqGateStdTol = NaN
         FreqGateRateTol = NaN
+        FreqGateSatLevel = Inf
         FreqGateMinBlock = NaN
         FreqGateDone = false
         FreqGateBlock = NaN
@@ -303,14 +307,21 @@ classdef loop_monitor < handle
         end
 
         function enableFreqStateGate(obj, windowBlocks, expectedRate, ...
-                meanHalfDiffTol, stdTol, rateTol, minBlock)
+                meanHalfDiffTol, stdTol, rateTol, minBlock, satLevel)
             %ENABLEFREQSTATEGATE Turn on the online frequency-state lock gate.
             %
-            %   windowBlocks, expectedRate, meanHalfDiffTol, stdTol and
-            %   rateTol carry exactly the meaning documented on the static
-            %   detectFrequencyStateLock, because the online gate forwards
-            %   them to that function unchanged. expectedRate may be NaN and
-            %   rateTol may be Inf to test flatness only.
+            %   windowBlocks, expectedRate, meanHalfDiffTol, stdTol,
+            %   rateTol and satLevel carry exactly the meaning documented on
+            %   the static detectFrequencyStateLock, because the online gate
+            %   forwards them to that function unchanged. expectedRate may be
+            %   NaN and rateTol may be Inf to test flatness only.
+            %
+            %   satLevel is optional and defaults to Inf (disabled). When
+            %   finite it rejects a window whose peak magnitude has railed at
+            %   the integrator saturation level, so a caller no longer needs
+            %   to pre-filter saturated samples before feeding them: the
+            %   online verdict stays identical by construction to the offline
+            %   detector evaluated with the same satLevel.
             %
             %   minBlock suppresses the trigger while the loop is still in its
             %   capture transient, in the same spirit as the SNR settle
@@ -321,10 +332,14 @@ classdef loop_monitor < handle
             %   This is a separate configuration call rather than extra
             %   constructor arguments so the documented 4-argument constructor
             %   arity stays valid for every existing caller.
-            if nargin ~= 7
+            if nargin < 7 || nargin > 8
                 error('loop_monitor:InvalidFreqGateConfig', ...
                     ['Expected windowBlocks, expectedRate, ', ...
-                    'meanHalfDiffTol, stdTol, rateTol, and minBlock.']);
+                    'meanHalfDiffTol, stdTol, rateTol, minBlock, ', ...
+                    'and optional satLevel.']);
+            end
+            if nargin < 8
+                satLevel = Inf;
             end
             obj.validateInteger(windowBlocks, 2, ...
                 'InvalidFreqGateWindow', 'windowBlocks');
@@ -336,6 +351,7 @@ classdef loop_monitor < handle
             loop_monitor.validateNonnegativeScalarOrInf(rateTol, 'rateTol');
             obj.validateInteger(minBlock, 1, ...
                 'InvalidFreqGateMinBlock', 'minBlock');
+            loop_monitor.validateNonnegativeScalarOrInf(satLevel, 'satLevel');
 
             obj.FreqGateEnabled = true;
             obj.FreqGateWindow = double(windowBlocks);
@@ -344,6 +360,7 @@ classdef loop_monitor < handle
             obj.FreqGateStdTol = double(stdTol);
             obj.FreqGateRateTol = double(rateTol);
             obj.FreqGateMinBlock = double(minBlock);
+            obj.FreqGateSatLevel = double(satLevel);
             obj.FreqGateDone = false;
             obj.FreqGateBlock = NaN;
             obj.FreqGateSampleCount = 0;
@@ -384,7 +401,8 @@ classdef loop_monitor < handle
                 diag = struct('WindowLength', 0, 'MeanValue', NaN, ...
                     'MeanHalfDiff', NaN, 'TailStd', NaN, ...
                     'ExpectedRate', obj.FreqGateExpectedRate, ...
-                    'RateError', NaN, 'FlatnessOk', false, 'RateOk', false);
+                    'RateError', NaN, 'FlatnessOk', false, ...
+                    'RateOk', false, 'SatOk', false);
             end
             if obj.FreqGateDone
                 return;
@@ -413,7 +431,7 @@ classdef loop_monitor < handle
             [locked, diag] = loop_monitor.detectFrequencyStateLock( ...
                 ordered, window, obj.FreqGateExpectedRate, ...
                 obj.FreqGateMeanHalfDiffTol, obj.FreqGateStdTol, ...
-                obj.FreqGateRateTol);
+                obj.FreqGateRateTol, obj.FreqGateSatLevel);
             if locked
                 obj.FreqGateDone = true;
                 obj.FreqGateBlock = blockIndex;
@@ -458,6 +476,7 @@ classdef loop_monitor < handle
             state.FreqGateMeanHalfDiffTol = obj.FreqGateMeanHalfDiffTol;
             state.FreqGateStdTol = obj.FreqGateStdTol;
             state.FreqGateRateTol = obj.FreqGateRateTol;
+            state.FreqGateSatLevel = obj.FreqGateSatLevel;
             state.FreqGateMinBlock = obj.FreqGateMinBlock;
             state.FreqGateDone = obj.FreqGateDone;
             state.FreqGateBlock = obj.FreqGateBlock;
@@ -468,7 +487,8 @@ classdef loop_monitor < handle
 
     methods (Static)
         function [locked, diag] = detectFrequencyStateLock(freqStateSeq, ...
-                windowBlocks, expectedRate, meanHalfDiffTol, stdTol, rateTol)
+                windowBlocks, expectedRate, meanHalfDiffTol, stdTol, ...
+                rateTol, satLevel)
             %DETECTFREQUENCYSTATELOCK Flat-mean loop-frequency lock criterion.
             %
             % Under a frequency offset the timing loop tracks by holding a
@@ -483,6 +503,21 @@ classdef loop_monitor < handle
             %
             % expectedRate may be NaN to skip the rate match (pure flatness),
             % and rateTol may be Inf for the same effect.
+            %
+            % satLevel is optional (default Inf = disabled). A frequency state
+            % railed at the integrator saturation limit is also "perfectly
+            % flat" (half-diff 0, std 0) and would pass the pure-flatness
+            % branch, yet it is railed rather than locked. When satLevel is
+            % finite the window is rejected once its peak magnitude
+            % max(|x|) >= satLevel, so a single railed sample anywhere in the
+            % window blocks the lock. A caller therefore no longer needs to
+            % pre-filter saturated samples: the online gate forwards its own
+            % satLevel here, keeping the online verdict identical by
+            % construction to this offline one over the same window and the
+            % same satLevel.
+            if nargin < 7
+                satLevel = Inf;
+            end
             loop_monitor.validateFiniteRealVector(freqStateSeq, ...
                 'InvalidFreqSeq', 'freqStateSeq');
             loop_monitor.validateIntegerArg(windowBlocks, 1, ...
@@ -492,6 +527,7 @@ classdef loop_monitor < handle
                 'meanHalfDiffTol');
             loop_monitor.validateNonnegativeScalar(stdTol, 'stdTol');
             loop_monitor.validateNonnegativeScalarOrInf(rateTol, 'rateTol');
+            loop_monitor.validateNonnegativeScalarOrInf(satLevel, 'satLevel');
 
             seq = reshape(double(freqStateSeq), 1, []);
             totalLength = numel(seq);
@@ -499,7 +535,7 @@ classdef loop_monitor < handle
             diag = struct('WindowLength', windowLength, 'MeanValue', NaN, ...
                 'MeanHalfDiff', NaN, 'TailStd', NaN, ...
                 'ExpectedRate', double(expectedRate), 'RateError', NaN, ...
-                'FlatnessOk', false, 'RateOk', false);
+                'FlatnessOk', false, 'RateOk', false, 'SatOk', false);
             if windowLength < 2
                 locked = false;
                 return;
@@ -521,8 +557,9 @@ classdef loop_monitor < handle
                 diag.RateOk = abs(abs(diag.MeanValue) - ...
                     abs(double(expectedRate))) <= rateTol;
             end
+            diag.SatOk = max(abs(window)) < double(satLevel);
             locked = totalLength >= double(windowBlocks) && ...
-                diag.FlatnessOk && diag.RateOk;
+                diag.FlatnessOk && diag.RateOk && diag.SatOk;
         end
 
         function [locked, diag] = detectRotationPeriodLock(unwrappedSeq, ...
