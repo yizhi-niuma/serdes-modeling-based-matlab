@@ -179,18 +179,13 @@ classdef cdr_top < handle
             cfg.FfeGateEnable = true;
             cfg.FfeGateMode = 'pvt-track';
             cfg.FfeStepSizePvtTrack = 2e-4;
-            % 以下三项只配置 loop_monitor 内部那台 center-touch 检测器,而
-            % cdr_top 自 2026-09-28 起再也不调 updateFfeGate,所以它们对本类
-            % 的行为没有任何影响。保留而不是删除的原因有二:loop_monitor 的
-            % 构造器要求这三个位置参数;v4 runner、ppm runner 与
-            % test_cdr_top_configured 目前都还在写这三个字段,删掉会同时改到
-            % 三处调用方的选项面。注意离线回放(make_ppm_stage_eyes /
+            % center-touch 的三个检测器参数(MinModeOccurrences / MinEvents /
+            % BandHalfWidth)与 StartBlock 已于 2026-09-29 从本类配置面移除:
+            % cdr_top 自 2026-09-28 起再也不调 updateFfeGate,这些值对本类行为
+            % 没有任何影响。loop_monitor 的构造器仍要求它们,所以构造处(见下)
+            % 传入固定的惰性常量。离线回放(make_ppm_stage_eyes /
             % write_ppm_lock_summary_txt)另建自己的 loop_monitor,用的是
-            % result.RunOptions.FfeFreeze*,而不是这里的值。
-            cfg.FfeGateMinModeOccurrences = 500;
-            cfg.FfeGateMinEvents = 100;
-            cfg.FfeGateBandHalfWidth = 3;
-            cfg.FfeGateStartBlock = 1;
+            % result.RunOptions.FfeFreeze*,不受此处影响。
             % 第二级降档的门控判据。唯一判据为 'freq-state'：用环路积分频率态的
             % 平坦性判据，与离线 loop_monitor.detectFrequencyStateLock 同源，在
             % 任意 ppm(含 0)下都成立。历史上的码域众数 'center-touch' 判据已于
@@ -283,9 +278,17 @@ classdef cdr_top < handle
                 cfg.DlevInnerInit, cfg.DlevOuterInit, cfg.DlevPolarity);
             obj.FfeLoop = cdr_ffe_loop(cfg.FfeStepSize, obj.Ffe.TapCount, ...
                 obj.Ffe.MainTapIndex, cfg.BlockSize, cfg.FfeAdaptEnableMask);
+            % center-touch 检测器在 cdr_top 里永不启用(本类从不调 updateFfeGate)，
+            % 但 loop_monitor 的构造器仍按位置要求这四个参数。传入固定惰性常量,
+            % 沿用历史默认值 (500,100,3,1) 使 loop_monitor 内部状态与移除配置面
+            % 之前逐位相同; 这些值不影响 cdr_top 的任何输出。
+            centerTouchMinModeOccurrences = 500;
+            centerTouchMinEvents = 100;
+            centerTouchBandHalfWidth = 3;
+            centerTouchStartBlock = 1;
             obj.Monitor = loop_monitor( ...
-                cfg.FfeGateMinModeOccurrences, cfg.FfeGateMinEvents, ...
-                cfg.FfeGateBandHalfWidth, cfg.FfeGateStartBlock);
+                centerTouchMinModeOccurrences, centerTouchMinEvents, ...
+                centerTouchBandHalfWidth, centerTouchStartBlock);
             obj.Monitor.enableSnrSettle(cfg.SnrSettleThresholdDb, ...
                 cfg.SnrSettleAlpha, cfg.SnrSettleMinBlock);
             % FfeGateCriterion 目前只接受 'freq-state' 这一个值(见
@@ -685,14 +688,6 @@ classdef cdr_top < handle
                 'FfeGateMode', {'freeze', 'pvt-track'});
             obj.requireNonnegativeScalar(cfg.FfeStepSizePvtTrack, ...
                 'FfeStepSizePvtTrack');
-            obj.requirePositiveInteger(cfg.FfeGateMinModeOccurrences, ...
-                'FfeGateMinModeOccurrences');
-            obj.requirePositiveInteger(cfg.FfeGateMinEvents, ...
-                'FfeGateMinEvents');
-            obj.requireNonnegativeInteger(cfg.FfeGateBandHalfWidth, ...
-                'FfeGateBandHalfWidth');
-            obj.requirePositiveInteger(cfg.FfeGateStartBlock, ...
-                'FfeGateStartBlock');
             cfg.FfeGateCriterion = obj.requireTextChoice( ...
                 cfg.FfeGateCriterion, 'FfeGateCriterion', ...
                 {'freq-state'});
