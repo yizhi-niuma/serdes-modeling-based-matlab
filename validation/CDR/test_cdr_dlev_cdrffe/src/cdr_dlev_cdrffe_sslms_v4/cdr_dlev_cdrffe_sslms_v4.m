@@ -246,6 +246,20 @@ for startIndex = 1:numStartPhase
                     out.FfeAdaptationCalculated
                 histogramOutputHistory = ...
                     [histogramOutputHistory, out.FfeOutput]; %#ok<AGROW>
+                % Only the last histogramTargetSamples samples are ever read
+                % (see the histogram sampling below), so trim the front once
+                % the buffer exceeds twice the target. Without trimming the
+                % 14998 adaptation blocks x 64 samples grow to ~960k elements
+                % with a realloc-and-copy on every block, and 99.8% of them
+                % are never read. Trimming only ever drops from the FRONT and
+                % always leaves at least histogramTargetSamples samples, so
+                % the tail sampling is bit-identical to the untrimmed run;
+                % when the total never reaches the target the trim never
+                % fires, which preserves the original semantics as well.
+                if numel(histogramOutputHistory) > 2 * histogramTargetSamples
+                    histogramOutputHistory = histogramOutputHistory( ...
+                        end - histogramTargetSamples + 1:end);
+                end
             end
         end
     end
