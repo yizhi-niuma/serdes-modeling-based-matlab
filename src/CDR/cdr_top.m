@@ -162,12 +162,12 @@ classdef cdr_top < handle
             cfg.DlevStepSize = 0.5;
             cfg.DlevStepSizeSettle = 0.1;
             cfg.DlevStepSizePvtTrack = 0.02;
-            % Stage-1 (capture -> settle) mu-downshift gate: the averaged
-            % decision-directed eye SNR crossing SnrSettleThresholdDb. The eye
-            % being open is the actual precondition for slowing the FFE. (A
-            % legacy outer-dLev displacement gate was removed on 2026-09-26; it
-            % was an implicit drift-rate threshold that a slowly ramping dLev
-            % satisfied while the eye was still closed.)
+            % 第一级(capture -> settle)的 mu 降档门控: 判决导向眼 SNR 的
+            % 平均值越过 SnrSettleThresholdDb。眼睛张开才是放慢 FFE 的
+            % 真实前提。(历史上的 outer-dLev 位移门控已于 2026-09-26 移除:
+            % 它本质上是一个隐式的漂移速率门限, 缓慢爬升的 dLev 在眼睛
+            % 还闭着的时候就能满足它, 于是过早触发降档, 把 FFE 步长砍掉
+            % 20 倍, 眼睛反而再也张不开。)
             cfg.SnrSettleThresholdDb = 15;
             cfg.SnrSettleAlpha = 1 / 128;
             cfg.SnrSettleMinBlock = 200;

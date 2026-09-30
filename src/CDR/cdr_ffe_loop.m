@@ -1,8 +1,8 @@
 classdef cdr_ffe_loop < handle
-    % cdr_ffe_loop  Block-rate LMS adaptation for the dedicated CDR FFE.
+    % cdr_ffe_loop  CDR 专用 FFE 的块级 LMS 自适应引擎。
     %
-    % The caller supplies data-sample decision error and the regressor
-    % returned by cdr_ffe. Edge samples do not participate in adaptation.
+    % 调用方负责提供数据样本的判决误差, 以及 cdr_ffe 返回的回归矩阵。
+    % 边界样本不参与自适应。
 
     properties (SetAccess = private)
         StepSize
@@ -17,7 +17,7 @@ classdef cdr_ffe_loop < handle
 
     methods
         function obj = cdr_ffe_loop(stepSize, tapCount, mainTapIndex, blockSize, adaptEnableMask)
-            % cdr_ffe_loop  Construct a floating-point block LMS engine.
+            % cdr_ffe_loop  构造一个浮点块级 LMS 引擎。
             if nargin < 1
                 error('cdr_ffe_loop:MissingStepSize', 'stepSize must be provided explicitly.');
             end
@@ -45,7 +45,7 @@ classdef cdr_ffe_loop < handle
         end
 
         function deltaCoefficients = update(obj, dataRegressor, errorBlock)
-            % update  Validate inputs and compute one block LMS update.
+            % update  校验输入并计算一次块级 LMS 更新。
             obj.validateUpdateInput(dataRegressor, errorBlock);
             dataRegressor = double(dataRegressor);
             errorVector = reshape(double(errorBlock), 1, []);
@@ -57,21 +57,21 @@ classdef cdr_ffe_loop < handle
         end
 
         function [deltaCoefficients, gradient] = updateFast(obj, dataRegressor, errorVector)
-            % updateFast  Compute an update from caller-validated double arrays.
-            % dataRegressor is BlockSize-by-TapCount and errorVector is a
-            % 1-by-BlockSize row vector. This path does not update diagnostics.
+            % updateFast  对调用方已保证合法的 double 数组计算一次更新。
+            % dataRegressor 为 BlockSize×TapCount, errorVector 为 1×BlockSize
+            % 行向量。本路径不更新任何诊断量。
             gradient = errorVector * dataRegressor / obj.BlockSize;
             deltaCoefficients = obj.StepSize * gradient;
             deltaCoefficients(~obj.AdaptEnableMask) = 0;
         end
 
         function deltaCoefficients = updateSsLms(obj, dataRegressor, errorBlock)
-            % updateSsLms  Sign-sign LMS: validate inputs, compute one block SS-LMS update.
+            % updateSsLms  符号-符号 LMS: 校验输入并计算一次块级 SS-LMS 更新。
             %
-            % Replaces the standard LMS gradient  e * X / N  with the sign-sign
-            % variant  sign(e) * sign(X) / N.  Gradient magnitude is bounded by 1
-            % regardless of signal amplitude, so the StepSize must be scaled up
-            % accordingly (typically 100-300x larger than standard LMS mu).
+            % 把标准 LMS 梯度 e * X / N 换成符号-符号形式
+            % sign(e) * sign(X) / N。梯度幅度与信号幅度无关且上界恒为 1,
+            % 因此 StepSize 必须相应放大
+            % (通常比标准 LMS 的 mu 大 100~300 倍)。
             obj.validateUpdateInput(dataRegressor, errorBlock);
             dataRegressor = double(dataRegressor);
             errorVector = reshape(double(errorBlock), 1, []);
@@ -83,29 +83,29 @@ classdef cdr_ffe_loop < handle
         end
 
         function [deltaCoefficients, gradient] = updateSsLmsFast(obj, dataRegressor, errorVector)
-            % updateSsLmsFast  Sign-sign LMS from caller-validated double arrays.
-            % gradient = sign(errorVector) * sign(dataRegressor) / BlockSize.
-            % This path does not update diagnostics.
+            % updateSsLmsFast  对调用方已保证合法的 double 数组做符号-符号 LMS。
+            % gradient = sign(errorVector) * sign(dataRegressor) / BlockSize。
+            % 本路径不更新任何诊断量。
             gradient = sign(errorVector) * sign(dataRegressor) / obj.BlockSize;
             deltaCoefficients = obj.StepSize * gradient;
             deltaCoefficients(~obj.AdaptEnableMask) = 0;
         end
 
         function setStepSize(obj, stepSize)
-            % setStepSize  Change the LMS step size without resetting state.
+            % setStepSize  修改 LMS 步长, 不复位任何状态。
             obj.validateStepSize(stepSize);
             obj.StepSize = double(stepSize);
         end
 
         function resetState(obj)
-            % resetState  Clear adaptation diagnostics and update count.
+            % resetState  清空自适应诊断量与更新计数。
             obj.LastGradient = zeros(1, obj.TapCount);
             obj.LastDelta = zeros(1, obj.TapCount);
             obj.UpdateCount = 0;
         end
 
         function state = getState(obj)
-            % getState  Return the LMS configuration and latest update.
+            % getState  返回 LMS 配置与最近一次更新的结果。
             state = struct();
             state.StepSize = obj.StepSize;
             state.TapCount = obj.TapCount;
