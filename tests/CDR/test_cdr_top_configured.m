@@ -420,8 +420,7 @@ assert(isempty(clean.PreviousDataSymbol) && isempty(clean.PreviousErrorBit));
 assert(~clean.Monitor.SnrSettleDone && isnan(clean.Monitor.SnrSettleBlock));
 assert(clean.Monitor.SnrSettleEnabled);
 assert(all(isnan(clean.GatedCoefficients)));
-assert(~clean.Monitor.FreqGateDone && ~clean.Monitor.Frozen && ...
-    clean.Monitor.EventCount == 0);
+assert(~clean.Monitor.FreqGateDone);
 assert(isequal(clean.Ffe.Coefficients, cfg.FfeInitCoefficients));
 assert(clean.Dlev.DLevInner == cfg.DlevInnerInit);
 assert(clean.Dlev.DLevOuter == cfg.DlevOuterInit);

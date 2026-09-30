@@ -280,17 +280,7 @@ classdef cdr_top < handle
                 cfg.DlevInnerInit, cfg.DlevOuterInit, cfg.DlevPolarity);
             obj.FfeLoop = cdr_ffe_loop(cfg.FfeStepSize, obj.Ffe.TapCount, ...
                 obj.Ffe.MainTapIndex, cfg.BlockSize, cfg.FfeAdaptEnableMask);
-            % center-touch 检测器在 cdr_top 里永不启用(本类从不调 updateFfeGate)，
-            % 但 loop_monitor 的构造器仍按位置要求这四个参数。传入固定惰性常量,
-            % 沿用历史默认值 (500,100,3,1) 使 loop_monitor 内部状态与移除配置面
-            % 之前逐位相同; 这些值不影响 cdr_top 的任何输出。
-            centerTouchMinModeOccurrences = 500;
-            centerTouchMinEvents = 100;
-            centerTouchBandHalfWidth = 3;
-            centerTouchStartBlock = 1;
-            obj.Monitor = loop_monitor( ...
-                centerTouchMinModeOccurrences, centerTouchMinEvents, ...
-                centerTouchBandHalfWidth, centerTouchStartBlock);
+            obj.Monitor = loop_monitor();
             obj.Monitor.enableSnrSettle(cfg.SnrSettleThresholdDb, ...
                 cfg.SnrSettleAlpha, cfg.SnrSettleMinBlock);
             % FfeGateCriterion 目前被 validateConfig 限制为唯一值 'freq-state'

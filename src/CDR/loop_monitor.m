@@ -1,77 +1,38 @@
 classdef loop_monitor < handle
-    %LOOP_MONITOR Causal block-rate policy detectors for the CDR adaptation loops.
+    %LOOP_MONITOR CDR 自适应环路的因果型(逐 block)策略判决器。
     %
-    % The monitor observes one block at a time and reports one-shot policy
-    % events. It only decides; it never holds loop objects and never applies
-    % a step size, a coefficient or a gate. The caller reads the returned
-    % trigger and applies the action, so the data path stays in cdr_top.
+    % 本监视器每次只观测一个 block，并返回一次性(one-shot)策略事件。它
+    % 只做判决：从不持有环路对象，也从不施加步长、系数或门控。调用方读取
+    % 返回的触发标志并施加动作，因此数据通路仍留在 cdr_top。
     %
-    % Three independent causal detectors are provided.
+    % 提供两个相互独立的因果型检测器。
     %
-    % 1) FFE write gate (formerly ffe_freeze_monitor). Three states: before
-    %    StartBlock samples are ignored; SEARCH counts each observed unwrapped
-    %    PI code once and qualifies the lowest-valued mode when its count
-    %    reaches MinModeOccurrences; CANDIDATE fixes that mode as
-    %    CenterUnwrapped and counts center touches and strict side-to-side
-    %    crossings inside the inclusive center band. An outlier abandons the
-    %    candidate and clears all SEARCH history, and the outlier itself is not
-    %    the first sample of the new search. Reaching MinEvents enters FROZEN
-    %    permanently. updateFfeGate returns true only on that transition.
-    %    No sample trace is retained, only sparse SEARCH counts.
+    % 1) 眼质量(SNR) settle 检测器。对逐 block 的判决导向 SNR(dB)做指数加权
+    %    平均(EWMA)，越过阈值即一次性触发。内存仅一个标量，天然有界。它是
+    %    第一级(capture -> settle)降 mu 门控的唯一判据：它观测"眼睛是否张开"，
+    %    这才是决定该不该降 mu 的真正量。(此前由 dLev settle 检测器——在固定
+    %    窗口上做两点位移测试——担任此角色；它本质是隐含的漂移率门限，会在
+    %    dLev 缓慢爬升、眼仍闭合时误报 settle，故已于 2026-09-26 移除，改用
+    %    本门控。)逐 block SNR 噪声极大(未锁定、相位漂移的环路扫过眼心也会
+    %    给出漂亮的单块读数)，因此做平均是必需的而非修饰。用 enableSnrSettle
+    %    显式启用。
     %
-    % 2) Eye-quality (SNR) settle detector. A one-shot trigger on an
-    %    exponentially weighted average of a per-block decision-directed SNR
-    %    in dB. Memory is one scalar, so it is bounded by construction. It is
-    %    the sole stage-1 (capture -> settle) mu-downshift gate: it observes
-    %    whether the eye is open, the quantity that actually matters for a mu
-    %    downshift. (A dLev settle detector, a displacement test over a fixed
-    %    window, previously served this role; being an implicit drift-rate
-    %    threshold it reported settle while a slowly ramping dLev kept the eye
-    %    closed, so it was removed on 2026-09-26 in favour of this gate.)
-    %    Per-block SNR is
-    %    far too noisy to threshold directly (a drifting unlocked loop sweeps
-    %    through the eye centre and produces good single-block readings), so
-    %    the average is mandatory rather than cosmetic. Enable it explicitly
-    %    with enableSnrSettle; the constructor arity is unchanged.
+    % 2) 环路频率态锁定门控。它是下面 detectFrequencyStateLock 判据的一次性
+    %    在线(ONLINE)形式。它用一个环形缓冲保存最近 windowBlocks 个环路频率
+    %    态样本，缓冲满后把有序窗口交给同一个静态判据，并转发启用时给定的
+    %    同一个 satLevel。因此在线判决与在同一尾窗、同一 satLevel 下评估的
+    %    离线判决在构造上完全一致：没有第二份会走样的判据代码，railed 积分器
+    %    的拒绝逻辑住在这唯一一份判据里，而不在调用方的预过滤里。内存只有
+    %    一个窗口，与运行长度无关；每块 O(windowBlocks) 的代价也只持续到门控
+    %    闩锁为止。它作为第二级(settle -> PVT-track)门控，在任意 ppm(含零)下
+    %    都有意义：环路频率态恰恰是"环路跟上频偏后会变恒定"的那个量。用
+    %    enableFreqStateGate 显式启用。
     %
-    % 3) Loop-frequency-state lock gate. A one-shot ONLINE form of the
-    %    detectFrequencyStateLock criterion defined below. It keeps a ring
-    %    buffer of the last windowBlocks loop frequency-state samples and,
-    %    once that buffer is full, hands the ordered window to that very same
-    %    static detector, forwarding the same satLevel it was enabled with.
-    %    The online verdict is therefore identical by construction to the
-    %    offline one evaluated over the same trailing window and satLevel:
-    %    there is no second copy of the criterion to drift out of sync, and
-    %    the railed-integrator rejection lives in the one criterion rather
-    %    than in a caller's pre-filter. Memory is one window regardless of run
-    %    length, and the cost is O(windowBlocks) per block only until the gate
-    %    latches.
-    %
-    %    It exists because detector 1 above is a CODE-DOMAIN center-touch
-    %    test. Under a frequency offset the PI code ramps continuously and
-    %    never dwells on a single code, so detector 1 can never reach its
-    %    mode count and a gate built on it never fires. The loop frequency
-    %    state is instead exactly the quantity that goes constant once the
-    %    loop tracks the offset, so it stays meaningful at any ppm including
-    %    zero. Enable it explicitly with enableFreqStateGate; the documented
-    %    constructor arity is unchanged.
-    %
-    % The detector previously named ffe_freeze_monitor is unchanged in
-    % behaviour; only the class name and error identifiers moved.
+    % 注：原第三个检测器"FFE 写门控(center-touch 码域众数锁定)"已移除，因为
+    % 它只在零频偏下有意义(有频偏时 PI code 持续旋转、永不停在单一 code)，
+    % 其职责已由上面的频率态门控在任意 ppm 下统一承担。
 
     properties (SetAccess = private)
-        MinModeOccurrences
-        MinEvents
-        BandHalfWidth
-        StartBlock
-        Frozen = false
-        FreezeBlock = NaN
-        CenterUnwrapped = NaN
-        CandidateStartBlock = NaN
-        ModeOccurrences = 0
-        EventCount = 0
-        ResetCount = 0
-        LastBlock = NaN
         SnrSettleEnabled = false
         SnrSettleThresholdDb = NaN
         SnrSettleAlpha = NaN
@@ -94,58 +55,18 @@ classdef loop_monitor < handle
     end
 
     properties (Access = private)
-        SearchCodes = zeros(1, 0)
-        SearchCounts = zeros(1, 0)
-        HavePrevious = false
-        PreviousCode = NaN
         FreqRingValue = zeros(1, 0)
     end
 
     methods
-        function obj = loop_monitor(minModeOccurrences, minEvents, ...
-                bandHalfWidth, startBlock)
-            %LOOP_MONITOR Construct with explicit thresholds.
-            %
-            %   loop_monitor(minModeOccurrences, minEvents, bandHalfWidth, ...
-            %       startBlock)
-            %       enables the FFE write gate. The eye-quality (SNR) settle
-            %       detector and the frequency-state lock gate are enabled
-            %       separately with enableSnrSettle / enableFreqStateGate.
-            if nargin ~= 4
-                error('loop_monitor:InvalidConstructor', ...
-                    ['Expected minModeOccurrences, minEvents, ', ...
-                    'bandHalfWidth, and startBlock.']);
-            end
-            obj.validateInteger(minModeOccurrences, 1, ...
-                'InvalidMinModeOccurrences', 'minModeOccurrences');
-            obj.validateInteger(minEvents, 1, ...
-                'InvalidMinEvents', 'minEvents');
-            obj.validateInteger(bandHalfWidth, 0, ...
-                'InvalidBandHalfWidth', 'bandHalfWidth');
-            obj.validateInteger(startBlock, 1, ...
-                'InvalidStartBlock', 'startBlock');
-            obj.MinModeOccurrences = double(minModeOccurrences);
-            obj.MinEvents = double(minEvents);
-            obj.BandHalfWidth = double(bandHalfWidth);
-            obj.StartBlock = double(startBlock);
-
+        function obj = loop_monitor()
+            %LOOP_MONITOR 构造。两个在线检测器——眼质量(SNR) settle 与频率态
+            % 锁定门控——分别用 enableSnrSettle / enableFreqStateGate 启用。
             obj.resetState();
         end
 
         function resetState(obj)
-            %RESETSTATE Clear all dynamic state while preserving configuration.
-            obj.Frozen = false;
-            obj.FreezeBlock = NaN;
-            obj.CenterUnwrapped = NaN;
-            obj.CandidateStartBlock = NaN;
-            obj.ModeOccurrences = 0;
-            obj.EventCount = 0;
-            obj.ResetCount = 0;
-            obj.LastBlock = NaN;
-            obj.SearchCodes = zeros(1, 0);
-            obj.SearchCounts = zeros(1, 0);
-            obj.HavePrevious = false;
-            obj.PreviousCode = NaN;
+            %RESETSTATE 清空全部动态状态，同时保留配置。
             obj.FreqGateDone = false;
             obj.FreqGateBlock = NaN;
             obj.FreqGateSampleCount = 0;
@@ -157,82 +78,15 @@ classdef loop_monitor < handle
             end
         end
 
-        function triggered = update(obj, unwrappedCode, blockIndex)
-            %UPDATE Observe one block for the FFE write gate.
-            %
-            % Retained name so existing runners keep working; identical to
-            % updateFfeGate.
-            triggered = obj.updateFfeGate(unwrappedCode, blockIndex);
-        end
-
-        function triggered = updateFfeGate(obj, unwrappedCode, blockIndex)
-            %UPDATEFFEGATE Observe one block and report only the gate transition.
-            obj.validateInteger(unwrappedCode, -Inf, ...
-                'InvalidCode', 'unwrappedCode');
-            obj.validateInteger(blockIndex, 1, ...
-                'InvalidBlock', 'blockIndex');
-            blockIndex = double(blockIndex);
-            if ~isnan(obj.LastBlock) && blockIndex <= obj.LastBlock
-                error('loop_monitor:NonMonotonicBlock', ...
-                    'blockIndex must be strictly greater than LastBlock.');
-            end
-
-            unwrappedCode = double(unwrappedCode);
-            obj.LastBlock = blockIndex;
-            triggered = false;
-
-            % Frozen observations and pre-start observations only advance
-            % LastBlock; neither can alter detector metadata.
-            if obj.Frozen || blockIndex < obj.StartBlock
-                return;
-            end
-
-            if isnan(obj.CenterUnwrapped)
-                obj.observeSearch(unwrappedCode, blockIndex);
-                return;
-            end
-
-            center = obj.CenterUnwrapped;
-            if abs(unwrappedCode - center) > obj.BandHalfWidth
-                obj.ResetCount = obj.ResetCount + 1;
-                obj.clearCandidateAndSearch();
-                return;
-            end
-
-            if unwrappedCode == center
-                obj.ModeOccurrences = obj.ModeOccurrences + 1;
-            end
-            if obj.HavePrevious
-                isCenterTouch = obj.PreviousCode ~= center && ...
-                    unwrappedCode == center;
-                isStrictCross = (obj.PreviousCode < center && ...
-                    unwrappedCode > center) || ...
-                    (obj.PreviousCode > center && unwrappedCode < center);
-                if isCenterTouch || isStrictCross
-                    obj.EventCount = obj.EventCount + 1;
-                end
-            end
-            obj.PreviousCode = unwrappedCode;
-            obj.HavePrevious = true;
-
-            if obj.EventCount >= obj.MinEvents
-                obj.Frozen = true;
-                obj.FreezeBlock = blockIndex;
-                triggered = true;
-            end
-        end
-
         function enableSnrSettle(obj, thresholdDb, alpha, minBlock)
-            %ENABLESNRSETTLE Turn on the eye-quality settle detector.
+            %ENABLESNRSETTLE 打开眼质量 settle 检测器。
             %
-            %   thresholdDb is the averaged decision-directed SNR in dB at or
-            %   above which the eye counts as open. alpha is the EWMA weight
-            %   in (0, 1]; a smaller alpha means heavier smoothing. minBlock
-            %   suppresses the trigger while the average is still warming up.
+            %   thresholdDb 是判决导向 SNR 的平均值(dB)，达到或超过它即认为
+            %   眼已张开。alpha 是 EWMA 权重，取值 (0, 1]；alpha 越小平滑越重。
+            %   minBlock 在平均值尚在预热阶段时抑制触发。
             %
-            %   This is a separate configuration call rather than extra
-            %   constructor arguments so the documented 4-argument constructor
-            %   arity stays valid for every existing caller.
+            %   这里用一次独立的配置调用而非增加构造函数参数，是为了让文档
+            %   所述的 4 参数构造函数对每个既有调用方都保持有效。
             if nargin ~= 4
                 error('loop_monitor:InvalidSnrSettleConfig', ...
                     'Expected thresholdDb, alpha, and minBlock.');
@@ -263,13 +117,11 @@ classdef loop_monitor < handle
         end
 
         function triggered = updateSnrSettle(obj, blockIndex, snrDb)
-            %UPDATESNRSETTLE Report the one-shot eye-quality settle transition.
+            %UPDATESNRSETTLE 上报一次性的眼质量 settle 跳变。
             %
-            % snrDb is this block's decision-directed SNR in dB. Blocks that
-            % carry no usable eye information (no valid samples, or an exactly
-            % zero error power, i.e. a non-finite reading) are skipped instead
-            % of being folded in, so they can neither poison nor inflate the
-            % average.
+            % snrDb 是本块的判决导向 SNR(dB)。不携带可用眼信息的块(没有有效
+            % 样本，或误差功率恰为零，即非有限读数)会被跳过而非折入平均，因此
+            % 它们既不会污染也不会抬高平均值。
             obj.requireSnrSettleEnabled('updateSnrSettle');
             obj.validateInteger(blockIndex, 1, 'InvalidBlock', 'blockIndex');
             isValidSnr = isnumeric(snrDb) && isreal(snrDb) && isscalar(snrDb);
@@ -287,8 +139,7 @@ classdef loop_monitor < handle
             end
 
             if isnan(obj.SnrEwmaDb)
-                % Seed with the first usable reading; ramping up from zero
-                % would otherwise delay the trigger by ~1/alpha blocks.
+                % 用首个可用读数播种；否则从零缓升会把触发延迟约 1/alpha 个块。
                 obj.SnrEwmaDb = double(snrDb);
             else
                 weight = obj.SnrSettleAlpha;
@@ -308,30 +159,23 @@ classdef loop_monitor < handle
 
         function enableFreqStateGate(obj, windowBlocks, expectedRate, ...
                 meanHalfDiffTol, stdTol, rateTol, minBlock, satLevel)
-            %ENABLEFREQSTATEGATE Turn on the online frequency-state lock gate.
+            %ENABLEFREQSTATEGATE 打开在线的频率态锁定门控。
             %
-            %   windowBlocks, expectedRate, meanHalfDiffTol, stdTol,
-            %   rateTol and satLevel carry exactly the meaning documented on
-            %   the static detectFrequencyStateLock, because the online gate
-            %   forwards them to that function unchanged. expectedRate may be
-            %   NaN and rateTol may be Inf to test flatness only.
+            %   windowBlocks、expectedRate、meanHalfDiffTol、stdTol、rateTol
+            %   与 satLevel 的含义与静态 detectFrequencyStateLock 上所述完全
+            %   相同，因为在线门控原样转发给那个函数。expectedRate 可为 NaN、
+            %   rateTol 可为 Inf，以仅测平坦性。
             %
-            %   satLevel is optional and defaults to Inf (disabled). When
-            %   finite it rejects a window whose peak magnitude has railed at
-            %   the integrator saturation level, so a caller no longer needs
-            %   to pre-filter saturated samples before feeding them: the
-            %   online verdict stays identical by construction to the offline
-            %   detector evaluated with the same satLevel.
+            %   satLevel 可选，默认 Inf(禁用)。取有限值时会拒绝峰值幅度已钳在
+            %   积分器饱和限上的窗口，因此调用方无需在喂入前预过滤饱和样本：
+            %   在线判决在构造上与用同一 satLevel 评估的离线检测器完全一致。
             %
-            %   minBlock suppresses the trigger while the loop is still in its
-            %   capture transient, in the same spirit as the SNR settle
-            %   detector's own minBlock. The gate additionally cannot fire
-            %   before windowBlocks samples have been observed, since a short
-            %   window is rejected by the criterion itself.
+            %   minBlock 在环路仍处于捕获暂态时抑制触发，与 SNR settle 检测器
+            %   自己的 minBlock 用意相同。此外，在观测到 windowBlocks 个样本
+            %   之前门控也不会触发，因为过短的窗口会被判据本身拒绝。
             %
-            %   This is a separate configuration call rather than extra
-            %   constructor arguments so the documented 4-argument constructor
-            %   arity stays valid for every existing caller.
+            %   这里用一次独立的配置调用而非增加构造函数参数，是为了让文档
+            %   所述的 4 参数构造函数对每个既有调用方都保持有效。
             if nargin < 7 || nargin > 8
                 error('loop_monitor:InvalidFreqGateConfig', ...
                     ['Expected windowBlocks, expectedRate, ', ...
@@ -370,18 +214,15 @@ classdef loop_monitor < handle
 
         function [triggered, diag] = updateFreqStateGate(obj, blockIndex, ...
                 freqState)
-            %UPDATEFREQSTATEGATE Report the one-shot frequency-lock transition.
+            %UPDATEFREQSTATEGATE 上报一次性的频率锁定跳变。
             %
-            % freqState is this block's loop-filter integrator frequency state
-            % in code/block, taken AFTER the loop filter update for the block,
-            % so the observed sequence matches the recorded frequency-state
-            % trace sample for sample.
+            % freqState 是本块环路滤波器积分器的频率态(code/block)，取自本块
+            % 环路滤波器更新之后，因此观测序列与记录下来的频率态 trace 逐个
+            % 样本对齐。
             %
-            % Non-finite samples are skipped rather than stored, because the
-            % criterion rejects a non-finite window outright; such a sample
-            % would make the offline detector error rather than return false.
-            % Skips are counted in FreqGateSkippedCount so a run that relied
-            % on them is not silently indistinguishable from a clean one.
+            % 非有限样本被跳过而非存储，因为判据会直接拒绝含非有限值的窗口；
+            % 这样的样本会让离线检测器报错而非返回 false。跳过次数计入
+            % FreqGateSkippedCount，使依赖跳过的运行不会与干净运行无声地混同。
             obj.requireFreqGateEnabled('updateFreqStateGate');
             obj.validateInteger(blockIndex, 1, 'InvalidBlock', 'blockIndex');
             isValidState = isnumeric(freqState) && isreal(freqState) && ...
@@ -424,11 +265,9 @@ classdef loop_monitor < handle
                 return;
             end
 
-            % Oldest-to-newest view of the ring, i.e. the same trailing window
-            % the offline criterion would take from the full trace. The window
-            % is finite by construction and the gate config was validated at
-            % enableFreqStateGate, so this calls the validator-free core
-            % directly and only assembles diag when the caller asked for it.
+            % 环形缓冲的从旧到新视图，即离线判据会从完整 trace 中取的同一个
+            % 尾窗。窗口在构造上是有限的，且门控配置已在 enableFreqStateGate
+            % 校验过，因此这里直接调用无校验的核，仅在调用方需要时才组装 diag。
             ordered = [obj.FreqRingValue(slot + 1:end), ...
                 obj.FreqRingValue(1:slot)];
             if reportDiag
@@ -450,29 +289,8 @@ classdef loop_monitor < handle
         end
 
         function state = getState(obj)
-            %GETSTATE Return a copy of configuration and bounded diagnostics.
+            %GETSTATE 返回配置与有界诊断量的副本。
             state = struct();
-            state.Frozen = obj.Frozen;
-            state.FreezeBlock = obj.FreezeBlock;
-            state.CenterUnwrapped = obj.CenterUnwrapped;
-            state.CandidateStartBlock = obj.CandidateStartBlock;
-            state.ModeOccurrences = obj.ModeOccurrences;
-            state.EventCount = obj.EventCount;
-            state.ResetCount = obj.ResetCount;
-            state.LastBlock = obj.LastBlock;
-            state.MinModeOccurrences = obj.MinModeOccurrences;
-            state.MinEvents = obj.MinEvents;
-            state.BandHalfWidth = obj.BandHalfWidth;
-            state.StartBlock = obj.StartBlock;
-            state.SearchCodes = obj.SearchCodes;
-            state.SearchCounts = obj.SearchCounts;
-            if isempty(obj.SearchCounts)
-                state.SearchModeUnwrapped = NaN;
-            else
-                largestCount = max(obj.SearchCounts);
-                state.SearchModeUnwrapped = min( ...
-                    obj.SearchCodes(obj.SearchCounts == largestCount));
-            end
             state.SnrSettleEnabled = obj.SnrSettleEnabled;
             state.SnrSettleThresholdDb = obj.SnrSettleThresholdDb;
             state.SnrSettleAlpha = obj.SnrSettleAlpha;
@@ -499,39 +317,29 @@ classdef loop_monitor < handle
         function [locked, diag] = detectFrequencyStateLock(freqStateSeq, ...
                 windowBlocks, expectedRate, meanHalfDiffTol, stdTol, ...
                 rateTol, satLevel)
-            %DETECTFREQUENCYSTATELOCK Flat-mean loop-frequency lock criterion.
+            %DETECTFREQUENCYSTATELOCK 平坦均值环路频率锁定判据。
             %
-            % Under a frequency offset the timing loop tracks by holding a
-            % constant nonzero integrator frequency state (code/block). This
-            % offline criterion declares a lock when, over the tail window,
-            % the loop frequency state is a constant: its first-half and
-            % second-half means agree (<= meanHalfDiffTol), its std is small
-            % (<= stdTol), and its magnitude matches the expected drift rate
-            % (|mean| within rateTol of |expectedRate|). The magnitude match
-            % keeps the pass/fail independent of the sign convention while the
-            % returned diagnostics preserve the signed values.
+            % 在频偏下，定时环靠保持一个恒定非零的积分器频率态
+            % (code/block)来跟踪。该离线判据在尾窗内、当环路频率态为恒定
+            % 时判锁：其前半与后半均值一致(<= meanHalfDiffTol)、std 很小
+            % (<= stdTol)、且其幅值与期望漂移率匹配(|mean| 在 |expectedRate| 的
+            % rateTol 内)。幅值匹配使通过/失败与符号约定无关，而返回的诊断量
+            % 保留带符号的值。
             %
-            % expectedRate may be NaN to skip the rate match (pure flatness),
-            % and rateTol may be Inf for the same effect.
+            % expectedRate 可为 NaN 以跳过速率匹配(纯平坦性)，rateTol 可为 Inf
+            % 达到同样效果。
             %
-            % satLevel is optional (default Inf = disabled). A frequency state
-            % railed at the integrator saturation limit is also "perfectly
-            % flat" (half-diff 0, std 0) and would pass the pure-flatness
-            % branch, yet it is railed rather than locked. When satLevel is
-            % finite the window is rejected once its peak magnitude
-            % max(|x|) >= satLevel, so a single railed sample anywhere in the
-            % window blocks the lock. A caller therefore no longer needs to
-            % pre-filter saturated samples: the online gate forwards its own
-            % satLevel here, keeping the online verdict identical by
-            % construction to this offline one over the same window and the
-            % same satLevel.
+            % satLevel 可选(默认 Inf = 禁用)。钳在积分器饱和限上的频率态也是
+            % "完美平坦"(half-diff 0、std 0)，会通过纯平坦性分支，但它是 railed
+            % 而非锁定。satLevel 有限时，一旦窗口峰值 max(|x|) >= satLevel 即拒绝
+            % 该窗口，因此窗内任何一个 railed 样本都会阻止锁定。调用方因此无需
+            % 再预过滤饱和样本：在线门控把自己的 satLevel 转发到这里，使在线
+            % 判决在同一窗口、同一 satLevel 下与本离线判决在构造上完全一致。
             %
-            % The numerical work lives in the private freqStateLockCore, which
-            % this method calls after validating its inputs. The core assembles
-            % the diagnostic struct only when its caller asks for it, so a
-            % single-output call pays neither the struct build nor -- via the
-            % online gate, which calls the core directly -- the input
-            % validators. The verdict is identical either way.
+            % 数值工作住在私有的 freqStateLockCore 里，本方法先校验输入再调用
+            % 它。核仅在调用方需要时才组装诊断 struct，所以单输出调用既不付
+            % struct 构建的开销，也(通过直接调核的在线门控)不付输入校验的
+            % 开销。两种路径的判决结果完全一致。
             if nargin < 7
                 satLevel = Inf;
             end
@@ -559,20 +367,16 @@ classdef loop_monitor < handle
         function [locked, diag] = detectRotationPeriodLock(unwrappedSeq, ...
                 windowBlocks, codesPerUi, minIntervals, covTol, ...
                 expectedPeriod, periodTol)
-            %DETECTROTATIONPERIODLOCK Constant PI rotation period => tracking.
+            %DETECTROTATIONPERIODLOCK 恒定 PI 旋转周期 => 跟踪。
             %
-            % Under a frequency offset the PI code rotates continuously; one
-            % full 128-code rotation crosses one UI boundary (a UI slip). When
-            % the loop is tracking, the number of blocks between successive UI
-            % slips (the rotation period) is constant. This offline criterion
-            % detects UI-slip events in the tail window as changes of
-            % floor(unwrapped / codesPerUi), then declares a lock when there
-            % are enough inter-slip intervals, their coefficient of variation
-            % is small (<= covTol), and their mean matches expectedPeriod
-            % (within periodTol). expectedPeriod may be NaN / periodTol Inf to
-            % skip the period match. A non-rotating sequence (0 ppm) yields
-            % too few events and returns locked = false; use the modal
-            % center-touch criterion for the zero-offset case instead.
+            % 在频偏下 PI code 持续旋转；每转满一周(128 码)跨一个 UI 边界
+            % (一次 UI slip)。环路跟踪时，相邻两次 UI slip 之间的块数(即旋转
+            % 周期)为恒定。该离线判据在尾窗内把 floor(unwrapped / codesPerUi)
+            % 的变化检为 UI-slip 事件，当相邻间隔足够多、其变异系数很小
+            % (<= covTol)、且均值与 expectedPeriod 匹配(在 periodTol 内)时判锁。
+            % expectedPeriod 可为 NaN / periodTol 可为 Inf 以跳过周期匹配。不旋转
+            % 的序列(0 ppm)事件太少，返回 locked = false；零频偏情形请改用
+            % 众数 center-touch 判据。
             if ~(isnumeric(unwrappedSeq) && isreal(unwrappedSeq) && ...
                     (isempty(unwrappedSeq) || isvector(unwrappedSeq)) && ...
                     all(isfinite(unwrappedSeq(:))))
@@ -633,14 +437,12 @@ classdef loop_monitor < handle
         function [locked, diag] = freqStateLockCore(freqStateSeq, ...
                 windowBlocks, expectedRate, meanHalfDiffTol, stdTol, ...
                 rateTol, satLevel, wantDiag)
-            %FREQSTATELOCKCORE Validator-free numerical core of the flat-mean
-            % loop-frequency lock criterion. Shared by the public
-            % detectFrequencyStateLock (which validates first) and the online
-            % updateFreqStateGate (whose window is finite by construction and
-            % whose config was validated at enableFreqStateGate), so both
-            % reach an identical verdict. The hot online path pays neither the
-            % input validators nor -- when wantDiag is false -- the 8-field
-            % diagnostic struct build.
+            %FREQSTATELOCKCORE 平坦均值环路频率锁定判据的无校验数值核。
+            % 由公开的 detectFrequencyStateLock(先校验)与在线的
+            % updateFreqStateGate(其窗口在构造上有限、配置已在
+            % enableFreqStateGate 校验)共用，故二者得到完全一致的判决。
+            % 热的在线路径既不付输入校验，也(在 wantDiag 为 false 时)不付
+            % 8 字段诊断 struct 的构建。
             seq = reshape(double(freqStateSeq), 1, []);
             totalLength = numel(seq);
             windowLength = min(totalLength, double(windowBlocks));
@@ -730,46 +532,6 @@ classdef loop_monitor < handle
     end
 
     methods (Access = private)
-        function observeSearch(obj, code, blockIndex)
-            codeIndex = find(obj.SearchCodes == code, 1);
-            if isempty(codeIndex)
-                obj.SearchCodes(end + 1) = code;
-                obj.SearchCounts(end + 1) = 1;
-            else
-                obj.SearchCounts(codeIndex) = obj.SearchCounts(codeIndex) + 1;
-            end
-
-            largestCount = max(obj.SearchCounts);
-            obj.ModeOccurrences = largestCount;
-            if largestCount < obj.MinModeOccurrences
-                return;
-            end
-
-            candidates = obj.SearchCodes(obj.SearchCounts == largestCount);
-            center = min(candidates);
-            obj.CenterUnwrapped = center;
-            obj.CandidateStartBlock = blockIndex;
-            % ModeOccurrences 已在上面置为 largestCount。center 取自
-            % SearchCounts==largestCount 的集合,故其计数恒等于 largestCount,
-            % 无需再 find(SearchCodes==center) 回查一遍(第三次全数组扫描)。
-            obj.EventCount = 0;
-            obj.HavePrevious = true;
-            obj.PreviousCode = code;
-            obj.SearchCodes = zeros(1, 0);
-            obj.SearchCounts = zeros(1, 0);
-        end
-
-        function clearCandidateAndSearch(obj)
-            obj.CenterUnwrapped = NaN;
-            obj.CandidateStartBlock = NaN;
-            obj.ModeOccurrences = 0;
-            obj.EventCount = 0;
-            obj.SearchCodes = zeros(1, 0);
-            obj.SearchCounts = zeros(1, 0);
-            obj.HavePrevious = false;
-            obj.PreviousCode = NaN;
-        end
-
         function requireSnrSettleEnabled(obj, methodName)
             if ~obj.SnrSettleEnabled
                 error('loop_monitor:SnrSettleDisabled', ...
