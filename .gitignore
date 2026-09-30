@@ -27,3 +27,18 @@ picode.md
 # Stray artifact from a "> nul" redirect run under a POSIX-style shell on
 # Windows, where nul is not the null device
 nul
+
+# Local reference copy-fork of src/ADC (256 MB, carries its own .DS_Store,
+# review_changes/ and review_step1/ scratch). It is a study copy, not part of
+# the model, and must not enter git history.
+src/ADC_model_HSY_2609/
+
+# Generated simulation binaries. docs/requirement.md commits only the text
+# summaries of a validation run (impl_notes / summary / *.csv), never the raw
+# .mat results or .fig figures. Small .png previews stay committable so the
+# markdown docs can reference them. Files already tracked before this rule
+# remain tracked -- gitignore does not untrack anything.
+results/**/*.mat
+results/**/*.fig
+validation/**/result/**/*.mat
+validation/**/result/**/*.fig
