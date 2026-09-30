@@ -1,4 +1,4 @@
-test_cdr_pd started: 2026-09-22 11:16:01
+test_cdr_pd started: 2026-09-30 19:45:11
 Test script: C:\Work\MatLab_Lib\validation\CDR\test_subBlock\test_cdr_pd
 Result folder: C:\Work\MatLab_Lib\results\CDR
 
@@ -12,7 +12,7 @@ Result folder: C:\Work\MatLab_Lib\results\CDR
 [PASS] invalid input
 [PASS] MMPD framework
 [PASS] MMPD transition filter
-[PASS] MMPD transition-filter validation
+[FAIL] MMPD transition-filter validation: invalid transition filter case 1 should throw: function did not throw.
 [PASS] MMPD filtered polarity
 [PASS] external slicer waveform
        waveform transitions: 8, valid decisions: 8
@@ -29,12 +29,10 @@ Summary:
   invalid input            : PASS
   MMPD framework           : PASS
   MMPD transition filter   : PASS
-  MMPD transition-filter validation : PASS
+  MMPD transition-filter validation : FAIL
   MMPD filtered polarity   : PASS
   external slicer waveform : PASS
 
-Passed 13 / 13 tests.
+Passed 12 / 13 tests.
 Text result : C:\Work\MatLab_Lib\results\CDR\test_cdr_pd_result.txt
 Waveform PNG: C:\Work\MatLab_Lib\results\CDR\test_cdr_pd_waveform.png
-
-test_cdr_pd all tests passed.
