@@ -1,4 +1,4 @@
-test_cdr_pd started: 2026-09-30 19:45:11
+test_cdr_pd started: 2026-09-30 23:28:04
 Test script: C:\Work\MatLab_Lib\validation\CDR\test_subBlock\test_cdr_pd
 Result folder: C:\Work\MatLab_Lib\results\CDR
 
