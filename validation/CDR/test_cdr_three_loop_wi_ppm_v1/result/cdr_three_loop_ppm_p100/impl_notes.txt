@@ -1,0 +1,74 @@
+================================================================================
+cdr_three_loop_ppm.m (v1 / 更新后的 TI ADC)  实现说明与一致性验证 (+100 ppm)
+================================================================================
+生成日期: 2026-09-30
+被测脚本: validation/CDR/test_cdr_three_loop_wi_ppm_v1/
+          src/cdr_three_loop_ppm/cdr_three_loop_ppm.m
+对应结果: result/cdr_three_loop_ppm_p100/cdr_three_loop_ppm_result.mat
+
+--------------------------------------------------------------------------------
+一、本 v1 套件与基线的唯一差别
+--------------------------------------------------------------------------------
+本套件是 validation/CDR/test_cdr_three_loop_wi_ppm 的镜像, 唯一改动是 TI ADC 建模
+代码来源:
+    基线: src/ADC/TI_ADC
+    v1  : src/ADC_model_HSY_2609/TI_ADC   (实习生更新的 ADC 模型)
+- ti_adc_top / ti_adc_core / ti_adc_clock / sar_adc_core 的公开接口未变; runner 与
+  helpers 逻辑未改, 只把 setup 的 AdcSourceDir 指向新目录, 并把 setup 函数名改为
+  setup_cdr_three_loop_wi_ppm_v1_paths (以便与基线共存于同一 MATLAB 路径而不互相遮蔽)。
+- 新旧 ADC 的类名相同, 因此基线与 v1 只能在各自独立的 MATLAB 会话中使用。
+
+--------------------------------------------------------------------------------
+二、接口差异 (均向后兼容, runner 调用点无需修改)
+--------------------------------------------------------------------------------
+1. 构造函数新增可选第 7 参 SampleRateHz (默认 56e9); runner 以 6 参调用, 走默认值。
+2. convertOneBlockFast 新增可选第 2 输出 sampling; runner 只取第 1 输出 Dout_dec。
+3. 新 clock 返回小数 index 且 sampleInput 改为线性插值(旧为整数 index 直接取样); 但
+   runner 用理想 clock(无 skew/jitter) + InputMargin=0 + cdrPhaseIndex=1, 采样点恰为
+   整数, 插值分数=0, 因此取样与旧模型逐比特等价。
+4. 新 SAR 去掉 dummy 电容, 并把 DAC 刻度改为 (2^N-1)*lsb/C_tot; 在本套件的理想配置
+   (VL=-4, VH=4, N=7, Gain=1, 无比较器噪声/失配)下 dacScale 恰为 0.0625, 与旧模型的
+   (VH-VL)/C_tot 完全相同, 且 Vcm=0 使旧模型的增益重标成为恒等运算, 逐比特判决等价。
+5. 新 core 采样热噪声默认关闭, 且关闭时不消耗随机数; runner 全程无 RNG, 全链路确定性。
+
+--------------------------------------------------------------------------------
+三、本次运行配置
+--------------------------------------------------------------------------------
+FreqOffsetPpm = +100 , PiNonideal = ab_constant , FfeGateCriterion = auto
+NumBlock = 8000 , StartPhaseStep = 4 => 32 个起始相位 0:4:124
+其余全部 runner 默认(Kp=8, Ki=0.03, MaxDeltaCode=1, FrequencyLimit=4, planB 冷启动,
+dLev 0.5->0.1->0.02, FFE 0.001->2e-4, SettleGate=snr 15 dB)。
+缓存 = channel_ctle_cosim_prbs22 , samplePerSymbol=128 , adcBlockUi=64。
+
+--------------------------------------------------------------------------------
+四、本次结果 (+100 ppm, 32 相位)
+--------------------------------------------------------------------------------
+- 32/32 起始相位锁定, AllPhaseLock=1, CommonLockPhase=120。
+- FreqStateMean ≈ -0.8192 code/block (理论期望 -0.8192); 逐相位数值见 ppm_lock_summary.txt。
+- 离线三阶段眼图(最慢锁定捕获行): start phase=84, SNR settle block=436,
+  lock block=2556, stage-2 block=2556, 三张眼图全部 valid=[1 1 1]。
+
+--------------------------------------------------------------------------------
+五、与原 ADC 的一致性 (核心结论)
+--------------------------------------------------------------------------------
+在完全相同的配置下, 将本 v1 (新 ADC) 与基线 (旧 ADC) 逐字段比较:
+1. ADC 单元等价探针 (result/adc_equivalence/): 对 1,157,162 个输入电压(细扫覆盖全
+   量程与两侧限幅 + 精确码阈值 VL+code*lsb 及其邻域 + 25.6 万个实测 CTLE 样本)逐码
+   比较, 新旧 ADC 输出码 0 处不一致, 最大绝对码差 = 0。
+2. 全链路比较 (result/consistency/): 8 相位/8000 block 下 -100/+100/0 ppm 三组结果,
+   除 9 个自指的输出文件路径字段(各自指向本套件的 result 目录)外, 所有数值/逻辑
+   trace(锁定标志、频率态、旋转周期、眼相位、FFE 系数、dLev、SNR、slew、诊断)逐比特
+   相同 (见 consistency_report_p100_8000.txt 等)。
+结论: 更新后的 TI ADC 在本套件配置下与原 ADC 输出完全一致, 因此 v1 的仿真结果与原
+ADC 结果一致(逐比特), 差异仅为各自的输出文件路径。
+
+--------------------------------------------------------------------------------
+六、复现方法 (独立会话)
+--------------------------------------------------------------------------------
+从仓库根目录:
+    addpath(fullfile(pwd,'validation','CDR','test_cdr_three_loop_wi_ppm_v1'));
+    setup_cdr_three_loop_wi_ppm_v1_paths();
+    r = cdr_three_loop_ppm('FreqOffsetPpm', 100, 'StartPhaseStep', 4);
+    make_ppm_stage_eyes('ResultDirs', {'cdr_three_loop_ppm_p100'});
+重跑同一命令可复现相同汇总数值(确定性)。
+================================================================================

@@ -1,0 +1,14 @@
+PI INL A/B 对照 (ideal vs ab_constant), FreqOffsetPpm=100
+起始相位: [0 64] ; 块数: 15000 ; 稳态窗: 尾20%
+
+量              ideal      ab_constant
+locked数        2          2         
+公共锁相           121        121       
+--- 起始相位 0 ---
+  freqMean      -0.81920   -0.81926  (期望 -0.81920)
+  残差std(sample) 0.6840     0.9861
+  残差pk-pk(samp) 4.0000     5.0000
+--- 起始相位 64 ---
+  freqMean      -0.81925   -0.81929  (期望 -0.81920)
+  残差std(sample) 0.7020     1.0266
+  残差pk-pk(samp) 4.0000     6.0000

@@ -1,0 +1,75 @@
+PI INL A/B 对照实验 — 实现说明
+================================================================================
+生成日期: 2026-09-28
+结果目录: validation/CDR/test_cdr_three_loop_wi_ppm/result/ideal_vs_ab_constant_pi_comparison/
+运行方式: 一次性 driver (tmp_pi_ab.m, 未入库) 两次调用 cdr_three_loop_ppm，
+          除 PiNonideal 外参数完全相同，SaveOutputs=false（不覆盖 canonical 产物）。
+
+一、验证目标与结构
+--------------------------------------------------------------------------------
+隔离并量化 PI 相位插值器 INL（cdr_pi 的 'ab_constant' 非理想相位表，INL pk-pk
+≈ 2.891 LSB）对闭环 CDR 的净影响。做法是同一 ppm 下跑两组、只改一个变量：
+    A 组 PiNonideal = 'ideal'        （完全线性相位表，无 INL）
+    B 组 PiNonideal = 'ab_constant'  （默认 a+b=1 / atan2 非理想表）
+其余全同，diff 即 INL 的净贡献。
+
+为什么选 ppm != 0：INL 是 code->相位 的静态曲线，只有当 PI code 连续旋转、
+扫过全部 128 个 code 时才被完整激励。0 ppm 下环路锁在单一 code 附近抖动，只
+看到局部近似常数的 INL、且被"offset-compensated"参考扣掉，无法体现 INL 的
+变化分量。故本实验用 +100 ppm（易方向，全相位可锁）。
+
+二、运行配置
+--------------------------------------------------------------------------------
+FreqOffsetPpm = 100 ; StartPhaseList = [0 64] ; NumBlock = 15000（默认）
+CosimDir = channel_ctle_cosim_prbs22（PRBS22 缓存）; 其余为 runner 默认。
+稳态统计窗 = 尾 20% block。判据/门控为默认 freq-state（stage-2）+ SNR settle。
+
+三、关键结果（尾 20% 稳态窗）
+--------------------------------------------------------------------------------
+量                     ideal        ab_constant     INL 影响
+locked 数              2/2          2/2             不变
+公共锁相 code          121          121             不变
+相位0 freqMean         -0.81920     -0.81926        ~不变（期望 -0.81920）
+相位64 freqMean        -0.81925     -0.81929        ~不变
+相位0 残差 std(sample) 0.6840       0.9861          +44%
+相位64 残差 std(sample)0.7020       1.0266          +46%
+相位0 残差 pk-pk(samp) 4.0          5.0             +1
+相位64 残差 pk-pk(samp)4.0          6.0             +2
+
+四、结论
+--------------------------------------------------------------------------------
+1. INL 不改变锁定能力和频率跟踪：两组 locked 数、公共锁相、freqMean 基本一致
+   （freqMean 差异在 6e-5 量级，噪声级）。
+2. INL 的净影响体现在稳态 PI 跟踪残差：旋转场景下把残差 std 抬高约 44-46%、
+   pk-pk 多出 1-2 个样本。机制是 code 旋转扫过整条 INL 弯（±1.45 LSB），给
+   MMPD bang-bang 抖动叠加了一个 code 相关的确定性分量。
+3. 佐证前述"毛刺"归因：0 ppm 毛刺纯为 MMPD/数据；INL 只在 code 旋转时叠加，
+   且表现为 code 相关的残差抬升，而非逐块随机毛刺。
+4. INL 签名图（inl_signature_by_code.png）：把残差按 wrapped code 分箱，
+   ab_constant 呈 code 相关起伏（沿 INL 曲线），ideal 近似零均值——直接把
+   "INL 确定性分量"与"MMPD 随机抖动"分离开。
+
+五、产物
+--------------------------------------------------------------------------------
+summary.txt                  数值汇总
+residual_trace_overlay.fig   稳态残差轨迹叠加（ideal vs ab_constant，相位0）
+inl_signature_by_code.fig    INL 签名：残差按 code 分箱
+ab_comparison_traces.mat     关键统计与分箱曲线（-v7）
+
+六、复现方法
+--------------------------------------------------------------------------------
+在工作区根目录执行（driver 为一次性脚本，可按此重建）：
+  addpath('validation/CDR/test_cdr_three_loop_wi_ppm');
+  setup_cdr_three_loop_wi_ppm_paths();
+  common = {'FreqOffsetPpm',100,'StartPhaseList',[0 64],'SaveOutputs',false};
+  rI = cdr_three_loop_ppm(common{:},'PiNonideal','ideal');
+  rN = cdr_three_loop_ppm(common{:},'PiNonideal','ab_constant');
+再对 PiTrackingErrorTrace / PhaseCodeTrace / LoopFrequencyStateTrace 按尾 20%
+窗统计与按 code 分箱即可。切换方向改 FreqOffsetPpm 符号（-100 为困难方向）。
+
+七、边界与说明
+--------------------------------------------------------------------------------
+- 仅 2 个起始相位、单一 +100 ppm；未扫全相位/双向。定性/定量诊断，非回归门限。
+- canonical m100/p100/p0 标准产物未改动（本实验 SaveOutputs=false，另存独立目录）。
+- INL 曲线本体（pk-pk 2.891 LSB、采样点整数偏移 {-2,-1,0,1}）见
+  results/CDR/pi_inl_diagnostic/pi_inl_curve.fig。
