@@ -440,18 +440,15 @@ if isfield(result, 'Stage2GateBlock')
     end
 end
 
-runOptions = result.RunOptions;
-monitor = loop_monitor(runOptions.FfeFreezeMinModeOccurrences, ...
-    runOptions.FfeFreezeMinEvents, runOptions.FfeFreezeBandHalfWidth, 1);
-unwrappedTrace = reshape(double(result.UnwrappedPhaseTrace( ...
-    rowIndex, 1:double(result.NumBlocks))), 1, []);
+% 旧 MAT 没有 Stage2GateBlock 字段。此前这里会回放 center-touch 写门控来补算
+% 该块号，但该门控已于 2026-09-30 随重构从 loop_monitor 整体删除(它在有频偏时
+% 因 PI code 持续爬升而永不触发，已被 freq-state 判据取代)，因此无法再回放。
+% 这里如实返回 NaN 并告警，而不是改用另一条语义不同的判据冒充原结果。
+warning('write_ppm_lock_summary_txt:Stage2GateBlockUnavailable', ...
+    ['结果 MAT 缺少 Stage2GateBlock 字段，且 center-touch 写门控已从 ' ...
+    'loop_monitor 删除、无法回放，第 %d 个起始相位的 stage-2 块号记为 NaN。'], ...
+    rowIndex);
 fireBlock = NaN;
-for blockIndex = 1:double(result.NumBlocks)
-    if monitor.updateFfeGate(unwrappedTrace(blockIndex), blockIndex)
-        fireBlock = blockIndex;
-        return;
-    end
-end
 end
 
 function text = optionalTextField(result, fieldName, fallbackText)

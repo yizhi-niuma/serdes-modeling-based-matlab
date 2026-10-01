@@ -180,18 +180,15 @@ classdef cdr_top < handle
             cfg.FfeGateMode = 'pvt-track';
             cfg.FfeStepSizePvtTrack = 2e-4;
             % center-touch 的三个检测器参数(MinModeOccurrences / MinEvents /
-            % BandHalfWidth)与 StartBlock 已于 2026-09-29 从本类配置面移除:
-            % cdr_top 自 2026-09-28 起再也不调 updateFfeGate,这些值对本类行为
-            % 没有任何影响。loop_monitor 的构造器仍要求它们,所以构造处(见下)
-            % 传入固定的惰性常量。离线回放(make_ppm_stage_eyes /
-            % write_ppm_lock_summary_txt)另建自己的 loop_monitor,用的是
-            % result.RunOptions.FfeFreeze*,不受此处影响。
+            % BandHalfWidth)与 StartBlock 已于 2026-09-29 从本类配置面移除,
+            % 2026-09-30 又随 center-touch 本体一起从 loop_monitor 删除。
+            % loop_monitor 现在是零参构造, 这里不再需要传任何惰性常量。
             % 第二级降档的门控判据。唯一判据为 'freq-state'：用环路积分频率态的
             % 平坦性判据，与离线 loop_monitor.detectFrequencyStateLock 同源，在
             % 任意 ppm(含 0)下都成立。历史上的码域众数 'center-touch' 判据已于
             % 2026-09-28 从 cdr_top 删除：0 ppm 下 freq-state 与它 32/32 一致，
-            % 有 ppm 时 center-touch 因 PI code 持续爬升永不触发。loop_monitor
-            % 仍保留 updateFfeGate 供旧 MAT 的离线回放，cdr_top 不再选用它。
+            % 有 ppm 时 center-touch 因 PI code 持续爬升永不触发。该判据已于
+            % 2026-09-30 从 loop_monitor 本体一并删除, 不存在任何回放路径。
             cfg.FfeGateCriterion = 'freq-state';
             cfg.FfeGateFreqWindowBlocks = 2000;
             cfg.FfeGateFreqExpectedRate = NaN;

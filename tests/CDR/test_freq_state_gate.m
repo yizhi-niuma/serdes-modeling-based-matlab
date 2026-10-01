@@ -26,9 +26,9 @@ end
 % -------------------------------------------------------------------------
 
 function mon = makeMonitor()
-% Constructor arity is unchanged by the gate; use the documented 4-argument
-% form and configure the gate separately.
-mon = loop_monitor(500, 100, 3, 1);
+% 构造器自 2026-09-30 的 center-touch 移除后变为零参；频率态门控通过
+% enableFreqStateGate 单独配置，与构造完全解耦。
+mon = loop_monitor();
 end
 
 function blk = offlineFirstLockBlock(seq, window, expectedRate, ...
