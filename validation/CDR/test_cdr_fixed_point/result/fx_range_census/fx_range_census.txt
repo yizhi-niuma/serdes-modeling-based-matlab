@@ -1,0 +1,31 @@
+定点化范围普查报告
+生成时间: 2026-10-01 21:14:43
+数据来源: ppm 套件 result MAT, 工况 p100 / p0 / m100
+口径: 跨工况取最坏值; 整数位不含符号位且已含 1 bit 瞬态余量;
+      自适应量的小数位由逐块增量的 1% 分位反推并留 3 bit 余量。
+
+Node                       Kind                 Min            Max        MinStep          LSB    Int   Frac     WL
+--------------------------------------------------------------------------------------------------------------------
+AdcCodeEnvelope            range                -48             48              -            -      7    TBD      -
+PhaseError_Voter           range           -0.21875         0.1875              -            -      1    TBD      -
+LoopControl                range           -2.44699        2.07027              -            -      3    TBD      -
+FrequencyState             adaptive        -0.92761       0.838079      0.0004687    3.052e-05      1     15     17
+CodeResidue                range                 -1              1              -            -      1    TBD      -
+PendingCode                range                -66              5              -            -      8    TBD      -
+DeltaCode                  range                 -1              1              -            -      1    TBD      -
+PhaseCodeWrapped           range                  0            127              -            -      8    TBD      -
+UiSlip                     range                -96             78              -            -      8    TBD      -
+UnwrappedPhase             range             -12167          10091              -            -     15    TBD      -
+DlevInner                  adaptive         7.84375        17.1328      0.0003125    3.052e-05      6     15     22
+DlevOuter                  adaptive         25.2109             48      0.0003125    3.052e-05      7     15     23
+DlevThreshold              adaptive         16.8125             32      0.0001562    1.526e-05      6     16     23
+EdgeCountPerBlock          range                  0             22              -            -      6    TBD      -
+DriftSample                range             -12287          12287              -            -     15    TBD      -
+SnrDb                      range            5.37691        29.5002              -            -      6    TBD      -
+FfeTap1                    adaptive      -0.0076875      0.0410562      3.125e-06    2.384e-07      1     22     24
+FfeTap2                    adaptive       -0.234088     0.00845313      3.125e-06    2.384e-07      1     22     24
+FfeTap3_MAIN_frozen        range                  1              1              -            -      1    TBD      -
+FfeTap4                    adaptive       -0.305641      0.0107344      3.125e-06    2.384e-07      1     22     24
+FfeTap5                    adaptive     -0.00732813       0.228466      3.125e-06    2.384e-07      1     22     24
+FfeTap6                    adaptive      -0.0932031        0.00775      3.125e-06    2.384e-07      1     22     24
+--------------------------------------------------------------------------------------------------------------------
