@@ -95,6 +95,13 @@ classdef cdr_top < handle
             obj.resetState();
         end
 
+        function output = processBlock(obj, centeredCode)
+            %PROCESSBLOCK 喂入一块 ADC 码。公开入口，名字与浮点参考一致。
+            %   保持同名是刻意的：fp 套件的 runner 由 float 套件逐字派生而来，
+            %   公开面同形状才能让两条路径只差"换了哪个类"这一件事。
+            output = obj.processConfiguredBlock(centeredCode);
+        end
+
         function output = processConfiguredBlock(obj, centeredCode)
             %PROCESSCONFIGUREDBLOCK 喂入一块 ADC 码，返回上一块的处理结果。
             %   一块 pending 流水：输出对应的是上一块，相位生效延迟 2 块。
@@ -312,6 +319,7 @@ classdef cdr_top < handle
             v.ValidTransition = validTransition;
             v.PhaseError = phaseError;
             v.DeltaCode = deltaCode;
+            v.LoopControl = lf.LastControl;
             v.LoopFrequencyState = lf.FrequencyState;
             v.LoopCodeResidue = lf.CodeResidue;
             v.LoopPendingCode = lf.PendingCode;
@@ -334,6 +342,10 @@ classdef cdr_top < handle
             v.SnrSettleBlock = obj.Monitor.SnrSettleBlock;
             v.DecisionPower = decisionPower;
             v.ErrorPower = errorPower;
+            % SnrDb / SnrEwmaDb 只是把功率比换回 dB 供测试台记录与绘图。
+            % 硅里没有这一步：门控内部走的是乘法比较，对数不进硅。
+            v.SnrDb = obj.toDb(decisionPower, errorPower);
+            v.SnrEwmaDb = obj.ewmaToDb();
             output = v;
         end
 
@@ -348,6 +360,7 @@ classdef cdr_top < handle
                 'SliceError', zeros(1, 0), 'DataSymbol', zeros(1, 0), ...
                 'ErrorBit', zeros(1, 0), 'PhaseDecision', zeros(1, 0), ...
                 'ValidTransition', false(1, 0), 'PhaseError', 0, 'DeltaCode', 0, ...
+                'LoopControl', 0, ...
                 'LoopFrequencyState', 0, 'LoopCodeResidue', 0, 'LoopPendingCode', 0, ...
                 'NextCodeWrapped', obj.PhaseInterpolator.CodeWrapped, ...
                 'NextUiSlip', obj.PhaseInterpolator.UiSlip, ...
@@ -361,7 +374,8 @@ classdef cdr_top < handle
                 'LoopLockedEvent', false, 'GateEngaged', obj.gateLatched(), ...
                 'SnrSettleDone', obj.Monitor.SnrSettleDone, ...
                 'SnrSettleBlock', obj.Monitor.SnrSettleBlock, ...
-                'DecisionPower', NaN, 'ErrorPower', NaN);
+                'DecisionPower', NaN, 'ErrorPower', NaN, ...
+                'SnrDb', NaN, 'SnrEwmaDb', NaN);
         end
 
         function [decision, sliceError, dataSymbol, errorBit] = ...
@@ -380,6 +394,27 @@ classdef cdr_top < handle
             sliceError = cdr_fx.fxq.apply(sample - decision, obj.FmtSliceErr, 'floor');
             dataSymbol = double(isPositive) * 2 + double(isPositive == isOuter);
             errorBit = double(sliceError >= 0);
+        end
+
+        function db = toDb(~, decisionPower, errorPower)
+            %TODB 把两路功率换回 dB。**仅供测试台记录与绘图，不代表硅内运算。**
+            if ~isfinite(decisionPower) || ~isfinite(errorPower)
+                db = NaN;
+            elseif errorPower <= 0
+                db = Inf;
+            else
+                db = 10 * log10(decisionPower / errorPower);
+            end
+        end
+
+        function db = ewmaToDb(obj)
+            %EWMATODB 把门控内部的功率比 EWMA 换回 dB，同样仅供测试台。
+            r = obj.Monitor.SnrEwma;
+            if ~obj.Monitor.SnrSeeded || ~isfinite(r) || r <= 0
+                db = NaN;
+            else
+                db = 10 * log10(r);
+            end
         end
 
         function [decisionPower, errorPower] = blockPowers(~, decision, sliceError)

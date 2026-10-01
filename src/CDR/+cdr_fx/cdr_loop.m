@@ -29,6 +29,7 @@ classdef cdr_loop < handle
         FrequencyState  double
         CodeResidue     double
         PendingCode     double
+        LastControl     double
 
         FmtKp           struct
         FmtKi           struct
@@ -72,7 +73,12 @@ classdef cdr_loop < handle
 
             % 积分支路。Ki*pe 的乘积小数位是 FmtKi.FracBits（pe 是整数），
             % 回缩到频率态格式后再累加，然后按 FrequencyMin/Max 饱和。
-            kiTerm = fx.quant(obj.Ki * phaseError, obj.FmtFreq.FracBits, 'floor');
+            % 这里用 'round' 而不是 'floor'：floor 每次累加都引入 -0.5 LSB 的
+            % 系统偏置，而积分器会把它一路累积，直到 PD 产生一个反向偏置来平衡，
+            % 最终表现为采样相位偏移。实测 0 ppm 下 floor 留下 -0.0035 的残余
+            % 频率态(约 115 个 LSB)。RTL 里 round 就是"加半个 LSB 再截断"，
+            % 只多一个常数加法器，代价可忽略。
+            kiTerm = fx.quant(obj.Ki * phaseError, obj.FmtFreq.FracBits, 'round');
             freqRaw = obj.FrequencyState + kiTerm;
             freqRaw = min(max(freqRaw, obj.FrequencyMin), obj.FrequencyMax);
             [obj.FrequencyState, nOv] = fx.apply(freqRaw, obj.FmtFreq, 'floor');
@@ -83,6 +89,7 @@ classdef cdr_loop < handle
             controlRaw = kpTerm + obj.FrequencyState;
             [control, nOv] = fx.apply(controlRaw, obj.FmtControl, 'floor');
             obj.OverflowControl = obj.OverflowControl + nOv;
+            obj.LastControl = control;
 
             % 残量累加后取整出整数码。**这里必须是向零取整**，见类头第 1 条。
             residueAccum = obj.CodeResidue + control;
@@ -156,6 +163,7 @@ classdef cdr_loop < handle
             obj.FrequencyState = 0;
             obj.CodeResidue = 0;
             obj.PendingCode = 0;
+            obj.LastControl = 0;
             obj.OverflowFreq = 0;
             obj.OverflowControl = 0;
             obj.OverflowResidue = 0;
@@ -171,6 +179,7 @@ classdef cdr_loop < handle
                 'FrequencyState', obj.FrequencyState, ...
                 'CodeResidue', obj.CodeResidue, ...
                 'PendingCode', obj.PendingCode, ...
+                'LastControl', obj.LastControl, ...
                 'OverflowFreq', obj.OverflowFreq, ...
                 'OverflowControl', obj.OverflowControl, ...
                 'OverflowResidue', obj.OverflowResidue, ...

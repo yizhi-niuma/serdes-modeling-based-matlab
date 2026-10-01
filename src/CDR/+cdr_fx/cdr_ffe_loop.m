@@ -91,7 +91,12 @@ classdef cdr_ffe_loop < handle
             gradient = fx.quant((sgnE * sgnX) / obj.BlockSize, ...
                 obj.FmtAccum.FracBits, 'floor');
 
-            rawDelta = fx.quant(-obj.StepSize * gradient, ...
+            % 符号约定必须与浮点参考一致：cdr_ffe_loop.updateSsLmsFast 用的是
+            % +StepSize * gradient，配合 cdr_top 传入的 error = decision -
+            % ffeOutput。若照搬教科书里 e = x - d 对应的 -StepSize，LMS 会反向
+            % 收敛 —— 实测表现为 pre1 抽头符号翻转（+0.497 而非 -0.226）、
+            % 眼睛打不开（末段 SNR 9.65 dB 对 23.57 dB）、第一级门控永不触发。
+            rawDelta = fx.quant(obj.StepSize * gradient, ...
                 obj.FmtAccum.FracBits, 'floor');
             rawDelta(~obj.AdaptEnableMask) = 0;
             rawDelta(obj.MainTapIndex) = 0;   % 纵深防御，掩码已保证
