@@ -1,0 +1,89 @@
+================================================================================
+CDR three-loop ppm lock summary : cdr_three_loop_ppm_p100
+================================================================================
+Runner           : cdr_three_loop_ppm
+FreqOffsetPpm    : +100
+NumBlocks        : 8000      StartPhases : 8
+LockMode         : freq+rotation     LockWindowBlocks : 2000
+ExpectedFreqState        : -0.8192 code/block
+ExpectedRotationPeriod   : 156.25 block/UI   (applicable = 1)
+SnrSettleThresholdDb     : 15 dB   alpha = 0.0078125   minBlock = 200
+FfeGateCriterion : freq-state   (stage-2 mu downshift gate)
+PiNonideal       : ab_constant
+Generated        : 2026-10-02 13:46:04
+
+Column definitions
+  StartPhase      initial PI phase code, 0..SamplePerSymbol-1
+  Locked          pass/fail verdict of the lock criterion for this start phase
+  FreqStateMean   tail-window mean loop frequency state, code/block
+  RotationPeriod  tail-window mean PI rotation period, block per UI slip
+  LockPhase       tail-window eye-phase code, mod(round(mean(eyePhase)), SPS)
+  Stage1Block     first block whose SNR EWMA reaches the settle threshold
+                  (stage-1 mu downshift for the dLev and FFE loops)
+  Stage1Phase     eye-phase code at Stage1Block
+  LockBlock       first block at which the lock criterion above is satisfied,
+                  evaluated with the same detectors and tolerances as the
+                  verdict over a trailing LockWindowBlocks window. Because the
+                  window must be full, this value can never be below
+                  LockWindowBlocks.
+  LockPhaseAtBlk  eye-phase code at LockBlock
+  Stage2Block     block at which the stage-2 mu downshift actually fired, i.e.
+                  the settle -> PVT-track handover of the dLev and FFE loops.
+                  The armed gate is FfeGateCriterion above:
+                    freq-state    the lock criterion itself (frequencyState mean
+                                  within +/-tolerance), so Stage2Block equals
+                                  LockBlock by construction.
+                    center-touch  one raw unwrapped PI code recurring often
+                                  enough to nominate a centre. A locked phase
+                                  sitting off that centre can keep this gate
+                                  from ever latching, reported as n/a.
+  All phase codes are eye phase = unwrapped PI code + drift, wrapped to one UI.
+
+--------------------------------------------------------------------------------
+ idx  StartPhase  Locked  FreqStateMean  RotationPeriod  LockPhase  Stage1Block  Stage1Phase  LockBlock  LockPhaseAtBlk  Stage2Block
+--------------------------------------------------------------------------------
+   1           0       1  -0.819089263916   156.333333333        120          390          121       2660             119         2088
+   2          16       1  -0.819001739502   156.333333333        120          352          122       2636             121         2066
+   3          32       1  -0.819024002075   156.333333333        120          339          122       2610             119         2049
+   4          48       1  -0.819022674561   156.333333333        120          331          122       2589             120         2048
+   5          64       1  -0.819029708862   156.416666667        121          337          122       2565             120         2048
+   6          80       1  -0.819027420044   156.333333333        121          358          121       2544             120         2048
+   7          96       1  -0.819029281616   156.333333333        120          384          121       2523             120         2048
+   8         112       1  -0.819189407349   156.416666667        120          412          121       2686             120         2118
+--------------------------------------------------------------------------------
+
+Supplementary columns (everything else the CSV carried)
+--------------------------------------------------------------------------------
+ idx  StartPhase  FreqLock  RotationLock  SlewSaturated  AcquisitionBlock  RotationCov  DeltaCodeMeanAbs  PendingCodeMeanAbs
+--------------------------------------------------------------------------------
+   1           0         1             1              0               168  0.00629892491152            0.8185               0.163
+   2          16         1             1              0               130  0.0056777741872            0.8185              0.1465
+   3          32         1             1              0               181  0.0056777741872            0.8185               0.147
+   4          48         1             1              0               187  0.0049797373827            0.8185              0.1365
+   5          64         1             1              0               209  0.00792826260653            0.8185               0.127
+   6          80         1             1              0               237  0.0049797373827             0.819              0.1375
+   7          96         1             1              0               264  0.0056777741872            0.8185               0.147
+   8         112         1             1              0               197  0.00506954583547             0.819              0.1555
+--------------------------------------------------------------------------------
+
+Aggregate
+  Locked                : 8 / 8
+  AllPhaseLock          : 1       CommonLockPhase : 120   spread : 1
+  FreqStateMean         : min -0.819189407349  max -0.819001739502   (expected -0.8192)
+  Stage1Block           : min 331  max 412   (n/a count 0)
+  LockBlock             : min 2523  max 2686   (n/a count 0)
+  Stage2Block fired     : 8 / 8 start phases
+
+Note on the stage-2 mu downshift
+  The stage-2 gate fired for 8 of 8 start phases, from block 2048
+  through block 2118.
+  The armed gate is freq-state: the online form of the same
+  frequency-state detector, trailing window and tolerances the verdict
+  uses. It is therefore the frequency-state COMPONENT of the verdict, not
+  the whole verdict. When RotationCriterionApplicable is 1 the verdict
+  additionally requires detectRotationPeriodLock, so Stage2Block can only
+  be at or before LockBlock; the two coincide exactly when the rotation
+  component is already satisfied at that block.
+  Measured in this run: 0 of 8 comparable row(s) agree exactly, 8
+  row(s) have Stage2Block strictly earlier than LockBlock.
+================================================================================

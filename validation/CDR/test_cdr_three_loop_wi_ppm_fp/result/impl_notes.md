@@ -120,7 +120,7 @@ FFE 三档步长/门控阈值全部沿用浮点默认值。
 
 ## 3. 本次运行配置
 
-- 全默认：`NumBlock=15000`，`StartPhaseStep=16`（8 个起始相位 0:16:112）
+- `NumBlock=8000`，`StartPhaseStep=16`（8 个起始相位 0:16:112）
 - `CosimDir='channel_ctle_cosim_prbs22'`，PRBS22 完整周期缓存
 - `FreqOffsetPpm` 分别取 +100 / 0 / −100
 - 无参运行即可复现
@@ -128,6 +128,16 @@ FFE 三档步长/门控阈值全部沿用浮点默认值。
 ## 4. 关键结果与结论
 
 **三个 ppm 点全部 8/8 锁定，`AllPhaseLock=1`。**
+
+8000 block（本次归档配置）：
+
+| ppm | 定点 freqMean 范围 | 理论期望 |
+|---|---|---|
+| +100 | −0.81919 ~ −0.81900 | −0.81920 |
+| 0 | −0.00004 ~ +0.00016 | 0 |
+| −100 | +0.81925 ~ +0.81944 | +0.81920 |
+
+15000 block（更长观测，与浮点同配置对照）：
 
 | ppm | 定点 freqMean 范围 | 浮点 freqMean 范围 | 理论期望 |
 |---|---|---|---|
@@ -152,14 +162,30 @@ FFE 三档步长/门控阈值全部沿用浮点默认值。
 
 定点的尾段 std 反而比浮点小一半 —— 量化栅格抑制了小幅抖动。
 
+### 4.1 眼图产物
+
+`make_ppm_stage_eyes()` 离线回放已保存的 trace（不重跑仿真），为每个 ppm 工况
+生成四张固定系数 FFE 眼图：
+
+| 文件 | 时刻 |
+|---|---|
+| `cdr_ffe_eye_at_snr_settle_2048ui.fig` | 第一级 SNR 降档触发时 |
+| `cdr_ffe_eye_at_lock_2048ui.fig` | 首次满足锁定判据时 |
+| `cdr_ffe_eye_final_2048ui.fig` | 最终尾窗 |
+| `cdr_ffe_eye_stage_comparison.fig` | 三阶段并排对比 |
+
+另有 `ppm_stage_eye_summary.csv` 与 `ppm_lock_summary.txt`。产物清单与 `_v1`
+套件逐项对齐。
+
 ## 5. 复现方法
 
 ```matlab
 cd validation/CDR/test_cdr_three_loop_wi_ppm_fp
 setup_cdr_three_loop_wi_ppm_fp_paths();
-cdr_three_loop_ppm();                                  % 默认 +100 ppm
-cdr_three_loop_ppm('FreqOffsetPpm', 0);
-cdr_three_loop_ppm('FreqOffsetPpm', -100);
+cdr_three_loop_ppm('NumBlock', 8000);                      % 默认 +100 ppm
+cdr_three_loop_ppm('NumBlock', 8000, 'FreqOffsetPpm', 0);
+cdr_three_loop_ppm('NumBlock', 8000, 'FreqOffsetPpm', -100);
+make_ppm_stage_eyes();                                     % 离线生成四张眼图
 cdr_three_loop_ppm('FreqOffsetPpm', 100, 'SaveOutputs', false);   % 只看结论不落盘
 ```
 
