@@ -583,3 +583,21 @@ Measured on the saved 8000-block, 32-start-phase, PRBS22 default runs, with the 
 3. Add automated BBPD and PI wrap/nonideality tests under `tests/CDR`.
 4. Extend the validated ideal TI-ADC/CDR loop with controlled ADC skew, jitter, and mismatch corners.
 5. Move remaining waveform studies, input data, and generated artifacts out of `src`.
+
+### EWMA stage-2 gate experiment (2026-10-09)
+
+- `loop_monitor` gained an EWMA frequency-state gate (`freqStateLockCoreEWAM`
+  plus `enableFreqEwmaGate` / `updateFreqEwmaGate`), selectable via
+  `cdr_top.FfeGateUseEwma` (default false). The `test_cdr_three_loop_wi_ppm_v1`
+  runner enables it by default so EWMA can be compared against the window gate;
+  the baseline ppm and `_fp` suites and bare library callers are unchanged.
+- The offline static criterion was renamed `detectFrequencyStateLock` ->
+  `judgeFreqStateGateOffline` across code, tests, docs, and all three ppm suites.
+- `test_loop_monitor` is 5/5 (new `testFreqStateEwma`: online latch == offline
+  `LatchBlock`, ramp / rail / wrong-rate rejected, non-finite skip counted).
+  `test_cdr_top_configured` stays 12/12 (default window path byte-identical).
+- Reduced check (2 phases, 8000 blocks): +100 ppm 2/2 and 0 ppm 2/2 locked; the
+  EWMA online gate fired the stage-2 downshift within ~45 blocks of the window
+  gate (+100 ppm EWMA 2712/2610 vs window 2667/2569; 0 ppm 695/951). The full
+  32-phase acceptance (-100 / 0 / +100 ppm, 15000 blocks) is recorded under
+  VALIDATION.

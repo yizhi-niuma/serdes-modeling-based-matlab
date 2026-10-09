@@ -52,6 +52,40 @@ classdef loop_monitor < handle
         FreqGateBlock = NaN
         FreqGateSampleCount = 0
         FreqGateSkippedCount = 0
+
+        % ---- 频率态门控（EWMA 版，路线 A）----
+        % 窗口门控（上面那组 FreqGate*）之外的另一套在线判据：用三条指数加权
+        % 平均（EWMA）替代 2000 深滑窗的 mean/std/max。默认关闭，仅由实验套件
+        % （cdr_top 的 FfeGateUseEwma=true）启用。闩锁复用上面的 FreqGateDone /
+        % FreqGateBlock，因此 gateLatched / 输出装配 / freeze 写抑制均无需改动。
+        %
+        %   FreqEwmaFast (α=AlphaFast) 快速跟随当前频率态
+        %   FreqEwmaSlow (α=AlphaSlow) 慢速基准，近似窗口均值
+        %   FreqEwmaMad  (α=AlphaMad)  |x - slow| 的指数平均，替代窗口 std
+        %
+        % 判据轴与窗口判据一一对应：
+        %   平坦  |fast - slow| <= FreqEwmaMeanHalfDiffTol  （对应半窗均值差）
+        %   波动  mad           <= FreqEwmaStdTol           （对应窗口 std）
+        %   速率  ||slow| - |expected|| <= FreqEwmaRateTol  （NaN/Inf 旁路）
+        %   饱和  |x| < FreqEwmaSatLevel                     （逐样本，railed 清 dwell）
+        % 四轴同时满足记为一次 instOk；连续 FreqEwmaDwellBlocks 个 instOk 才闩锁，
+        % 把窗口判据"整窗满足"隐含的驻留语义显式化（railed 一次即清零重数）。
+        FreqEwmaEnabled = false
+        FreqEwmaExpectedRate = NaN
+        FreqEwmaMeanHalfDiffTol = NaN
+        FreqEwmaStdTol = NaN
+        FreqEwmaRateTol = Inf
+        FreqEwmaMinBlock = NaN
+        FreqEwmaSatLevel = Inf
+        FreqEwmaDwellBlocks = NaN
+        FreqEwmaAlphaFast = NaN
+        FreqEwmaAlphaSlow = NaN
+        FreqEwmaAlphaMad = NaN
+        FreqEwmaFast = NaN
+        FreqEwmaSlow = NaN
+        FreqEwmaMad = NaN
+        FreqEwmaSeeded = false
+        FreqEwmaDwell = 0
     end
 
     properties (Access = private)
@@ -67,6 +101,13 @@ classdef loop_monitor < handle
 
         function resetState(obj)
             %RESETSTATE 清空全部动态状态，同时保留配置。
+            % EWMA 门控的运行态随每次 reset 清空；配置（alpha / 容差 / dwell）
+            % 由 enableFreqEwmaGate 设定并跨 reset 保留，与窗口门控同口径。
+            obj.FreqEwmaFast = NaN;
+            obj.FreqEwmaSlow = NaN;
+            obj.FreqEwmaMad = NaN;
+            obj.FreqEwmaSeeded = false;
+            obj.FreqEwmaDwell = 0;
             obj.FreqGateDone = false;
             obj.FreqGateBlock = NaN;
             obj.FreqGateSampleCount = 0;
@@ -288,6 +329,102 @@ classdef loop_monitor < handle
             end
         end
 
+        function enableFreqEwmaGate(obj, expectedRate, meanHalfDiffTol, ...
+                stdTol, rateTol, minBlock, satLevel, dwellBlocks, ...
+                alphaFast, alphaSlow, alphaMad)
+            %ENABLEFREQEWMAGATE 打开 EWMA 版在线频率态锁定门控（路线 A）。
+            %
+            %   语义与 enableFreqStateGate 一致，但把 2000 深滑窗换成三条 EWMA。
+            %   expectedRate / meanHalfDiffTol / stdTol / rateTol / minBlock /
+            %   satLevel 的含义与窗口门控完全相同（rateTol 可为 Inf、expectedRate
+            %   可为 NaN 以仅测平坦与波动）。dwellBlocks 是必须连续满足四轴的块数
+            %   （驻留），替代窗口门控"整窗满足"的隐式驻留。三个 α 可选，默认
+            %   1/64、1/512、1/256，必须落在 (0, 1]。
+            if nargin < 9 || isempty(alphaFast); alphaFast = 1 / 64; end
+            if nargin < 10 || isempty(alphaSlow); alphaSlow = 1 / 512; end
+            if nargin < 11 || isempty(alphaMad); alphaMad = 1 / 256; end
+            loop_monitor.validateFiniteOrNaNScalar(expectedRate, 'expectedRate');
+            loop_monitor.validateNonnegativeScalar(meanHalfDiffTol, ...
+                'meanHalfDiffTol');
+            loop_monitor.validateNonnegativeScalar(stdTol, 'stdTol');
+            loop_monitor.validateNonnegativeScalarOrInf(rateTol, 'rateTol');
+            obj.validateInteger(minBlock, 1, ...
+                'InvalidFreqEwmaMinBlock', 'minBlock');
+            loop_monitor.validateNonnegativeScalarOrInf(satLevel, 'satLevel');
+            obj.validateInteger(dwellBlocks, 1, ...
+                'InvalidFreqEwmaDwellBlocks', 'dwellBlocks');
+            loop_monitor.validateAlpha(alphaFast, 'alphaFast');
+            loop_monitor.validateAlpha(alphaSlow, 'alphaSlow');
+            loop_monitor.validateAlpha(alphaMad, 'alphaMad');
+
+            obj.FreqEwmaEnabled = true;
+            obj.FreqEwmaExpectedRate = double(expectedRate);
+            obj.FreqEwmaMeanHalfDiffTol = double(meanHalfDiffTol);
+            obj.FreqEwmaStdTol = double(stdTol);
+            obj.FreqEwmaRateTol = double(rateTol);
+            obj.FreqEwmaMinBlock = double(minBlock);
+            obj.FreqEwmaSatLevel = double(satLevel);
+            obj.FreqEwmaDwellBlocks = double(dwellBlocks);
+            obj.FreqEwmaAlphaFast = double(alphaFast);
+            obj.FreqEwmaAlphaSlow = double(alphaSlow);
+            obj.FreqEwmaAlphaMad = double(alphaMad);
+            obj.FreqGateDone = false;
+            obj.FreqGateBlock = NaN;
+            obj.FreqEwmaFast = NaN;
+            obj.FreqEwmaSlow = NaN;
+            obj.FreqEwmaMad = NaN;
+            obj.FreqEwmaSeeded = false;
+            obj.FreqEwmaDwell = 0;
+        end
+
+        function triggered = updateFreqEwmaGate(obj, blockIndex, freqState)
+            %UPDATEFREQEWMAGATE 上报一次性的频率锁定跳变（EWMA 在线形式）。
+            %
+            % 与 updateFreqStateGate 的返回契约相同：返回是否在本块首次闩锁，
+            % 闩锁复用进 FreqGateDone / FreqGateBlock。每块 O(1)：推进三条 EWMA、
+            % 算四轴 instOk、维护 dwell 计数。非有限样本跳过且计入
+            % FreqGateSkippedCount，与窗口门控同口径。递推与判据核
+            % freqStateLockCoreEWAM 完全一致，故在线判决与离线整条回放逐块对齐。
+            obj.requireFreqEwmaEnabled('updateFreqEwmaGate');
+            obj.validateInteger(blockIndex, 1, 'InvalidBlock', 'blockIndex');
+            isValidState = isnumeric(freqState) && isreal(freqState) && ...
+                isscalar(freqState);
+            if ~isValidState
+                error('loop_monitor:InvalidFreqState', ...
+                    'freqState must be a real scalar.');
+            end
+
+            triggered = false;
+            if obj.FreqGateDone
+                return;
+            end
+            if ~isfinite(freqState)
+                obj.FreqGateSkippedCount = obj.FreqGateSkippedCount + 1;
+                return;
+            end
+
+            [obj.FreqEwmaFast, obj.FreqEwmaSlow, obj.FreqEwmaMad, ...
+                obj.FreqEwmaSeeded] = loop_monitor.freqEwmaStep( ...
+                double(freqState), obj.FreqEwmaFast, obj.FreqEwmaSlow, ...
+                obj.FreqEwmaMad, obj.FreqEwmaSeeded, obj.FreqEwmaAlphaFast, ...
+                obj.FreqEwmaAlphaSlow, obj.FreqEwmaAlphaMad);
+            instOk = loop_monitor.freqEwmaInstOk(double(freqState), ...
+                obj.FreqEwmaFast, obj.FreqEwmaSlow, obj.FreqEwmaMad, ...
+                obj.FreqEwmaMeanHalfDiffTol, obj.FreqEwmaStdTol, ...
+                obj.FreqEwmaRateTol, obj.FreqEwmaExpectedRate, ...
+                obj.FreqEwmaSatLevel);
+            if instOk
+                obj.FreqEwmaDwell = obj.FreqEwmaDwell + 1;
+            else
+                obj.FreqEwmaDwell = 0;
+            end
+            if blockIndex >= obj.FreqEwmaMinBlock && ...
+                    obj.FreqEwmaDwell >= obj.FreqEwmaDwellBlocks
+                obj.FreqGateDone = true;
+                obj.FreqGateBlock = blockIndex;
+                triggered = true;
+            end
+        end
         function state = getState(obj)
             %GETSTATE 返回配置与有界诊断量的副本。
             state = struct();
@@ -314,6 +451,71 @@ classdef loop_monitor < handle
     end
 
     methods (Static)
+        function [locked, diag] = freqStateLockCoreEWAM(freqStateSeq, ...
+                expectedRate, meanHalfDiffTol, stdTol, rateTol, satLevel, ...
+                dwellBlocks, alphaFast, alphaSlow, alphaMad)
+            %FREQSTATELOCKCOREEWAM 频率态锁定判据的 EWMA 版本（离线整条回放）。
+            %
+            % 这是 judgeFreqStateGateOffline（窗口版）的 EWMA 对应物：对整条
+            % freqStateSeq 从头跑三条 EWMA，逐样本判四轴 instOk 并累计 dwell，
+            % 一旦连续 dwellBlocks 个 instOk 即判锁（one-shot，锁后不回落）。与
+            % 在线 updateFreqEwmaGate 共用同一递推与判据，故把完整轨迹喂进本函数
+            % 得到的终判与在线门控逐块对齐。
+            %
+            %   expectedRate 可为 NaN、rateTol 可为 Inf 以仅测平坦与波动。
+            %   satLevel 可为 Inf 关闭饱和轴（本套件另有 slew 饱和守卫兜底）。
+            %   三个 α 可选，默认 1/64、1/512、1/256。
+            if nargin < 8 || isempty(alphaFast); alphaFast = 1 / 64; end
+            if nargin < 9 || isempty(alphaSlow); alphaSlow = 1 / 512; end
+            if nargin < 10 || isempty(alphaMad); alphaMad = 1 / 256; end
+            loop_monitor.validateFiniteRealVector(freqStateSeq, ...
+                'InvalidFreqSeq', 'freqStateSeq');
+            loop_monitor.validateFiniteOrNaNScalar(expectedRate, 'expectedRate');
+            loop_monitor.validateNonnegativeScalar(meanHalfDiffTol, ...
+                'meanHalfDiffTol');
+            loop_monitor.validateNonnegativeScalar(stdTol, 'stdTol');
+            loop_monitor.validateNonnegativeScalarOrInf(rateTol, 'rateTol');
+            loop_monitor.validateNonnegativeScalarOrInf(satLevel, 'satLevel');
+            loop_monitor.validateIntegerArg(dwellBlocks, 1, ...
+                'InvalidDwellBlocks', 'dwellBlocks');
+            loop_monitor.validateAlpha(alphaFast, 'alphaFast');
+            loop_monitor.validateAlpha(alphaSlow, 'alphaSlow');
+            loop_monitor.validateAlpha(alphaMad, 'alphaMad');
+
+            seq = reshape(double(freqStateSeq), 1, []);
+            fast = NaN;
+            slow = NaN;
+            mad = NaN;
+            seeded = false;
+            dwell = 0;
+            locked = false;
+            latchBlock = NaN;
+            lastFlat = false;
+            lastQuiet = false;
+            lastRate = false;
+            for k = 1:numel(seq)
+                x = seq(k);
+                [fast, slow, mad, seeded] = loop_monitor.freqEwmaStep( ...
+                    x, fast, slow, mad, seeded, alphaFast, alphaSlow, alphaMad);
+                [instOk, lastFlat, lastQuiet, lastRate] = ...
+                    loop_monitor.freqEwmaInstOk(x, fast, slow, mad, ...
+                    meanHalfDiffTol, stdTol, rateTol, expectedRate, satLevel);
+                if instOk
+                    dwell = dwell + 1;
+                else
+                    dwell = 0;
+                end
+                if ~locked && dwell >= dwellBlocks
+                    locked = true;
+                    latchBlock = k;
+                end
+            end
+            if nargout > 1
+                diag = loop_monitor.freqEwmaDiag(slow, fast, mad, ...
+                    expectedRate, lastFlat, lastQuiet, lastRate);
+                diag.LatchBlock = latchBlock;
+            end
+        end
         function [locked, diag] = judgeFreqStateGateOffline(freqStateSeq, ...
                 windowBlocks, expectedRate, meanHalfDiffTol, stdTol, ...
                 rateTol, satLevel)
@@ -434,6 +636,65 @@ classdef loop_monitor < handle
     end
 
     methods (Static, Access = private)
+        function [fast, slow, mad, seeded] = freqEwmaStep(x, fast, slow, ...
+                mad, seeded, alphaFast, alphaSlow, alphaMad)
+            %FREQEWMASTEP 推进一步三条 EWMA。首个有效样本用于播种，避免从 0
+            % 缓升引入约 1/alpha 块的纯延迟。由在线门控与离线判据核共用，保证
+            % 两者逐块一致。
+            if ~seeded
+                fast = x;
+                slow = x;
+                mad = 0;
+                seeded = true;
+            else
+                fast = fast + alphaFast * (x - fast);
+                slow = slow + alphaSlow * (x - slow);
+                mad = mad + alphaMad * (abs(x - slow) - mad);
+            end
+        end
+
+        function [instOk, flatOk, quietOk, rateOk] = freqEwmaInstOk(x, ...
+                fast, slow, mad, meanHalfDiffTol, stdTol, rateTol, ...
+                expectedRate, satLevel)
+            %FREQEWMAINSTOK 单样本四轴判据：平坦 / 波动 / 速率 / 饱和。速率轴用
+            % 双重绝对值，与窗口判据一致，使通过/失败与符号约定无关。饱和轴逐
+            % 样本判定：railed 样本令 instOk 为假，从而把 dwell 清零。
+            flatOk = abs(fast - slow) <= meanHalfDiffTol;
+            quietOk = mad <= stdTol;
+            if isnan(expectedRate) || ~isfinite(rateTol)
+                rateOk = true;
+            else
+                rateOk = abs(abs(slow) - abs(double(expectedRate))) <= rateTol;
+            end
+            satOk = abs(x) < satLevel;
+            instOk = flatOk && quietOk && rateOk && satOk;
+        end
+
+        function diag = freqEwmaDiag(slow, fast, mad, expectedRate, ...
+                flatOk, quietOk, rateOk)
+            %FREQEWMADIAG 组装与窗口判据 diag 同名字段的诊断结构，便于下游
+            % （freqDiagList 拼接、summary、eye 回放）无需区分两种判据来源。
+            diag = struct( ...
+                'WindowLength', NaN, ...
+                'MeanValue', slow, ...
+                'MeanHalfDiff', abs(fast - slow), ...
+                'TailStd', mad, ...
+                'ExpectedRate', double(expectedRate), ...
+                'RateError', slow - double(expectedRate), ...
+                'FlatnessOk', logical(flatOk && quietOk), ...
+                'RateOk', logical(rateOk), ...
+                'SatOk', true);
+        end
+
+        function validateAlpha(value, argumentName)
+            %VALIDATEALPHA EWMA 权重必须是落在 (0, 1] 的有限实标量。
+            isValid = isnumeric(value) && isreal(value) && isscalar(value) && ...
+                isfinite(value) && value > 0 && value <= 1;
+            if ~isValid
+                error('loop_monitor:InvalidAlpha', ...
+                    '%s must be a finite real scalar in (0, 1].', argumentName);
+            end
+        end
         function [locked, diag] = freqStateLockCore(freqStateSeq, ...
                 windowBlocks, expectedRate, meanHalfDiffTol, stdTol, ...
                 rateTol, satLevel, wantDiag)
@@ -548,6 +809,13 @@ classdef loop_monitor < handle
             end
         end
 
+        function requireFreqEwmaEnabled(obj, methodName)
+            if ~obj.FreqEwmaEnabled
+                error('loop_monitor:FreqEwmaDisabled', ...
+                    ['%s requires the EWMA frequency-state gate; call ', ...
+                    'enableFreqEwmaGate first.'], methodName);
+            end
+        end
         function validateInteger(~, value, minimum, idSuffix, argumentName)
             isValid = isnumeric(value) && isreal(value) && isscalar(value) && ...
                 isfinite(value) && value >= minimum && value == fix(value);

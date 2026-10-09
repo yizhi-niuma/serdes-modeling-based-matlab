@@ -988,3 +988,26 @@ pass (only the converse holds). Bisection assumes the verdict is monotonic in
 `|ppm|`; no tested point violated it, but not every integer ppm was evaluated.
 Failure severity is **not** monotonic: `-107` diverged outright
 (`maxPend 9259`, freq error `3.72`) while `-106` and `-110` failed cleanly.
+
+### EWMA frequency-state stage-2 gate (2026-10-09)
+
+- Unit: `tests/CDR/test_loop_monitor` is 5/5. The added `testFreqStateEwma`
+  asserts (1) a stabilizing sequence latches, (2) a slow ramp never latches,
+  (3) a railed constant at the saturation limit is rejected by the sat axis,
+  (4) a wrong-slope flat sequence passes only when the rate axis is bypassed
+  (NaN expected rate) and is rejected with the rate axis on, (5) the online
+  gate's per-block latch block equals the offline whole-trace
+  `freqStateLockCoreEWAM` `LatchBlock`, (6) calling the online gate before
+  enabling and an out-of-range alpha both throw, (7) a non-finite sample is
+  skipped and counted. `tests/CDR/test_cdr_top_configured` stays 12/12 with the
+  default window path unchanged.
+- Full acceptance (`test_cdr_three_loop_wi_ppm_v1`, EWMA gate on by default,
+  `StartPhaseStep=4` -> 32 start phases, `NumBlock=15000`, PRBS22):
+  -100 ppm 32/32 locked, 0 ppm 32/32, +100 ppm 32/32; `AllPhaseLock=1` for all
+  three offsets, and the EWMA online stage-2 downshift fired for 32/32 phases at
+  every offset. This matches the window-gate baseline capability.
+- Cross-check (2 phases, 8000 blocks): the EWMA online gate fired stage-2
+  within ~45 blocks of the window gate (+100 ppm: EWMA 2712/2610 vs window
+  2667/2569), confirming the EWMA gate is a faithful replacement rather than a
+  trivially-passing one. `freqMean` matched the expected drift rate to 1e-4
+  (-0.8192 at +100 ppm, ~0 at 0 ppm).

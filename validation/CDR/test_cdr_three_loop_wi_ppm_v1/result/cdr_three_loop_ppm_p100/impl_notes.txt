@@ -72,3 +72,33 @@ ADC 结果一致(逐比特), 差异仅为各自的输出文件路径。
     make_ppm_stage_eyes('ResultDirs', {'cdr_three_loop_ppm_p100'});
 重跑同一命令可复现相同汇总数值(确定性)。
 ================================================================================
+
+--------------------------------------------------------------------------------
+2026-10-09 追加: 第二级门控改用 EWMA 频率态判据 (路线 A)
+--------------------------------------------------------------------------------
+本次 result 由 EWMA 版第二级门控生成 (RunOptions.FfeGateUseEwma=true)。相对窗口
+门控的改动:
+  - loop_monitor 新增 freqStateLockCoreEWAM (离线整条回放判据核) 与在线门控
+    enableFreqEwmaGate / updateFreqEwmaGate; 三条 EWMA (fast 1/64, slow 1/512,
+    MAD 1/256) + 平坦/波动/速率/饱和四轴 + dwell(=512) 驻留, 取代 2000 深滑窗的
+    mean/std/max。闩锁复用 FreqGateDone, 故 cdr_top 的 gateLatched / 输出装配 /
+    FFE freeze 写抑制均不变。
+  - cdr_top 新增默认关闭的开关 FfeGateUseEwma; 本 v1 runner 默认开启。基线
+    test_cdr_three_loop_wi_ppm / _fp 与库默认调用方不受影响。
+  - 离线锁定判决与本 result 的 ppm_lock_summary / 眼图分档 helper 一并改走 EWMA
+    判据核 (isfield 守卫兼容旧 result mat)。
+
+本次运行配置: FreqOffsetPpm=+100, StartPhaseStep=4 (32 相位), NumBlock=15000,
+    PRBS22, 其余参数同基线。EWMA 容差沿用窗口值 (0.03 / 0.08 / 0.12)。
+
+关键结果: 32/32 相位锁定, AllPhaseLock=1, 第二级降档 32/32 触发。示例相位 80:
+    SNR settle(第一级) block 553, 频率态 EWMA 门控(第二级)闩锁 block 2615。
+    freqMean 精确匹配 -0.8192。减量对照(2 相位/8000 block): EWMA stage-2 块
+    2712/2610 对窗口门控 2667/2569, 相差约 45 block —— 忠实替代而非蒙混通过。
+
+复现:
+    addpath(fullfile(pwd,'validation','CDR','test_cdr_three_loop_wi_ppm_v1'));
+    setup_cdr_three_loop_wi_ppm_v1_paths();
+    r = cdr_three_loop_ppm('FreqOffsetPpm', 100, 'StartPhaseStep', 4);
+    % runner 默认 FfeGateUseEwma=true; 传 'FfeGateUseEwma', false 可回退窗口门控。
+================================================================================

@@ -847,3 +847,41 @@ The following values appear in current ADC waveform studies but are not yet perm
   `ppm_stage_eye_summary.csv` is a different eye-summary artefact and remains.
   The text writer uses recorded `result.Stage2GateBlock` for current MATs and
   replays center-touch only as a compatibility fallback for older MATs.
+
+## 2026-10-09: EWMA frequency-state lock gate (Route A, stage-2 downshift)
+
+- Renamed the static offline criterion `detectFrequencyStateLock` to
+  `judgeFreqStateGateOffline` (judge = evaluate, not trigger; the `Offline`
+  suffix marks it as the test-bench oracle, distinct from the per-block online
+  gate `updateFreqStateGate`).
+- Added an EWMA variant of the frequency-state criterion alongside the existing
+  2000-deep sliding window, selected by `cdr_top` config `FfeGateUseEwma`
+  (default **false**; only the `test_cdr_three_loop_wi_ppm_v1` runner enables it
+  by default). The window gate and every other caller (baseline ppm and `_fp`
+  suites, bare library defaults) are byte-for-byte unchanged.
+- `loop_monitor` gains: the static batch core `freqStateLockCoreEWAM`
+  (whole-trace replay, returns `diag.LatchBlock`), the online gate
+  `enableFreqEwmaGate` / `updateFreqEwmaGate` (O(1) per block, latch reuses
+  `FreqGateDone` / `FreqGateBlock`), and shared private helpers `freqEwmaStep` /
+  `freqEwmaInstOk`. The online and offline paths run the identical recursion and
+  verdict, so feeding the full trace to the batch core yields the same latch
+  block as the online gate steps to -- asserted in `test_loop_monitor`.
+- Detector: three EWMAs (fast alpha=1/64, slow alpha=1/512, MAD alpha=1/256)
+  feed four axes -- flat `|fast-slow| <= MeanHalfDiffTol`, quiet
+  `mad <= StdTol`, rate `||slow|-|expected|| <= RateTol` (NaN/Inf bypasses),
+  sat `|x| < SatLevel` (per-sample; a railed sample resets dwell). A latch needs
+  `DwellBlocks` consecutive four-axis passes, making the window gate's implicit
+  whole-window dwell explicit.
+- The v1 runner's offline pass/fail verdict and the eye/summary helpers
+  (`make_ppm_stage_eyes`, `write_ppm_lock_summary_txt`) switch to the EWMA core
+  when `RunOptions.FfeGateUseEwma` is true; an `isfield` guard keeps older result
+  mats on the window path. The helpers derive the lock block from
+  `freqStateLockCoreEWAM`'s `LatchBlock` (equal to the online latch by
+  construction) instead of a fresh-window sliding replay.
+- Tolerance caveat: for Gaussian noise MAD ~= 0.7979*std, so reusing the window
+  `StdTol` makes the quiet axis slightly stricter (deliberate: prefer late over
+  early trigger). The trend axis also differs in gain (`|fast-slow|` steady state
+  ~= (1/alphaSlow - 1/alphaFast)*s versus the window half-diff ~= (W/2)*s), so
+  `MeanHalfDiffTol` and `DwellBlocks` may need per-corner retuning. The current
+  experiment reuses the window tolerances (0.03 / 0.08 / 0.12) with
+  `DwellBlocks = 512`.

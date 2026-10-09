@@ -386,3 +386,17 @@ The current `src/CDR` directory does not yet contain:
 - CTLE waveform studies and large CSV files remain under `src/ADC/ADC_sample_CTEL_output`.
 - Several SAR ADC implementations overlap in responsibility.
 - Some Chinese comments have encoding corruption and should be normalized separately.
+
+### loop_monitor EWMA frequency-state gate (2026-10-09)
+
+`loop_monitor` now offers two interchangeable frequency-state lock criteria: the
+original 2000-deep sliding-window core (`judgeFreqStateGateOffline` offline,
+`enableFreqStateGate` / `updateFreqStateGate` online) and an EWMA variant
+(`freqStateLockCoreEWAM` offline, `enableFreqEwmaGate` / `updateFreqEwmaGate`
+online). The EWMA path uses three exponential averages (fast / slow / MAD) plus a
+dwell counter instead of windowed mean/std/max, trading O(W) ring memory for O(1)
+state. `cdr_top.FfeGateUseEwma` (default false) selects which gate drives the
+stage-2 (settle -> PVT-track) downshift; the EWMA latch reuses `FreqGateDone`, so
+`gateLatched`, output assembly, and FFE freeze logic are unchanged. The two cores
+share the per-sample recursion and verdict, so the online gate and a whole-trace
+offline replay agree block-for-block.
