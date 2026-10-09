@@ -276,7 +276,7 @@ SS-LMS 依赖这一点：`sliceErrors` 把环外样本置零后，`sign(0) = 0`
 ## 6. `loop_monitor`：只有两个在线检测器算硅
 
 **用户 2026-10-01 界定**：只有 **SNR settle 检测器**与**频率态门控**两个
-*在线*检测器算硅。静态离线判据 `detectFrequencyStateLock` /
+*在线*检测器算硅。静态离线判据 `judgeFreqStateGateOffline` /
 `detectRotationPeriodLock` 只在仿真结束后对轨迹做事后判定，属测试台，
 保持浮点，不需要定点化。
 

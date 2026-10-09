@@ -220,7 +220,7 @@ cdr_three_loop_ppm('FreqOffsetPpm', 100, 'SaveOutputs', false);   % 只看结论
 ## 6. 遗留与下一步
 
 1. ~~`PendingCode` 钳位待复核~~ **已于 2026-10-01 在饱和区实测验证**，见 §4.2。
-2. **离线静态判据仍是浮点**（`detectFrequencyStateLock` / `detectRotationPeriodLock`）。
+2. **离线静态判据仍是浮点**（`judgeFreqStateGateOffline` / `detectRotationPeriodLock`）。
    按用户 2026-10-01 的界定，只有 SNR 与频率态两个**在线**检测器算硅，
    离线判据属测试台，不需要定点化。
 3. 尚未做**判决级位精确对拍**（`PhaseDecision` / `DataSymbol` / `ErrorBit` 逐块

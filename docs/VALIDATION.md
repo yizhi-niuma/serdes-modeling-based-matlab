@@ -629,11 +629,11 @@ The replacement is criterion-selectable. The ppm runner's default
 `LockWindowBlocks`, expected frequency state, and
 `FreqMeanHalfDiffTol`/`FreqStdTol`/`FreqRateTol` used by the offline frequency
 verdict. `loop_monitor.updateFreqStateGate` calls the same static
-`detectFrequencyStateLock` on its ordered trailing ring, so online and offline
+`judgeFreqStateGateOffline` on its ordered trailing ring, so online and offline
 results are identical by construction on the same window.
 
 The pass/fail verdict is still independent of stage 2. For nonzero-ppm runs,
-`Locked` requires **both** `detectFrequencyStateLock` and
+`Locked` requires **both** `judgeFreqStateGateOffline` and
 `detectRotationPeriodLock`; `LockBlock` is the first verdict-satisfied block,
 whereas `Stage2GateBlock` is the actual second downshift. The CDR still has
 three step-size tiers and two events (`capture -> settle -> pvt-track`): dLev
@@ -689,7 +689,7 @@ without that field. `ppm_stage_eye_summary.csv` is a different output from
 The switchable `FfeGateCriterion` (2026-09-26) was removed from the ppm runner.
 The stage-2 downshift is now the frequency-state gate at every offset, and the
 0 ppm pass/fail verdict moved from `detect_pi_center_touch_lock` to
-`loop_monitor.detectFrequencyStateLock` (expected rate 0, slew-guarded). The
+`loop_monitor.judgeFreqStateGateOffline` (expected rate 0, slew-guarded). The
 retirement was justified by a no-source-change experiment (32 phases,
 `FfeGateCriterion='freq-state'`, `SaveOutputs=false`): the freq-state verdict
 matched the center-touch verdict **32/32** at 0 ppm, and the freq-state stage-2
@@ -756,7 +756,7 @@ The driver constructs three 2048-UI rows: stage-1 SNR settle, first satisfied
 pass/fail lock criterion, and final tail. It replays `SnrDbTrace` exactly as
 `loop_monitor.updateSnrSettle` (`alpha = 1/128`, threshold 15 dB, minimum block
 200), then tests each trailing `LockWindowBlocks` slice with the verdict's own
-detectors and tolerances: `detectFrequencyStateLock`, plus
+detectors and tolerances: `judgeFreqStateGateOffline`, plus
 `detectRotationPeriodLock` when applicable, at nonzero ppm, and
 `detect_pi_center_touch_lock` at zero ppm. Because the lock
 criterion uses `LockWindowBlocks = 2000`, row 2 cannot precede block 2000 and
@@ -764,7 +764,7 @@ means the first block whose trailing 2000-block window satisfies the criterion,
 not the instant the loop locked. `CaptureBlock` is context only.
 
 The sliding search passes `seq(k-w+1:k)`, not the whole prefix `seq(1:k)`, to
-`detectFrequencyStateLock`, `detectRotationPeriodLock`, and
+`judgeFreqStateGateOffline`, `detectRotationPeriodLock`, and
 `detect_pi_center_touch_lock`. This is mathematically identical because each
 detector evaluates only its trailing `windowBlocks` samples, but avoids repeated
 O(k) validation of growing prefixes and keeps the 32-phase sweep linear. It

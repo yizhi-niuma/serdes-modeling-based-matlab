@@ -3,7 +3,7 @@ classdef loop_monitor < handle
 %
 %   范围界定（用户 2026-10-01 决策）：
 %     算硅   —— SNR settle 检测器、频率态门控。两者都必须可综合。
-%     不算硅 —— 静态离线判据 detectFrequencyStateLock / detectRotationPeriodLock。
+%     不算硅 —— 静态离线判据 judgeFreqStateGateOffline / detectRotationPeriodLock。
 %               它们只在仿真结束后对轨迹做事后判定，属测试台，保持浮点。
 %
 %   与浮点参考的两处结构性改写：

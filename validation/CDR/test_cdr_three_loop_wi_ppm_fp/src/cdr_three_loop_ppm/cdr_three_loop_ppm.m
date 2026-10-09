@@ -30,7 +30,7 @@ function result = cdr_three_loop_ppm(varargin)
 %
 %
 %   锁定判据（对任意频偏都以频率态为主）：
-%     - loop_monitor.detectFrequencyStateLock —— 环路积分器的频率态在尾窗内
+%     - loop_monitor.judgeFreqStateGateOffline —— 环路积分器的频率态在尾窗内
 %       均值恒定，且与期望漂移率相符（0 ppm 时为 0）。这一条单独决定判决，
 %       并由 slew 饱和守卫否决。
 %     - FreqOffsetPpm ~= 0 时额外要求
@@ -321,7 +321,7 @@ for startIndex = 1:numStartPhase
     % 第二级（settle -> PVT-track）降档门控。'center-touch' 是码域众数测试，
     % 只有当 PI code 停留在某一个码上时才可能触发，也就是只在零频偏下有效。
     % 'freq-state' 改用环路积分器频率态的平坦性判据，它就是离线判决所用的
-    % 同一个 loop_monitor.detectFrequencyStateLock 的在线形式，
+    % 同一个 loop_monitor.judgeFreqStateGateOffline 的在线形式，
     % 因此在任意 ppm 下都仍然有意义。窗口与各项容差刻意取成与判决完全相同，
     % 这样门控触发的依据就是这次运行被评判的那条判据本身，
     % 而不是另一条独立调过参的规则。
@@ -443,7 +443,7 @@ for startIndex = 1:numStartPhase
         % |均值| 为 8.9e-5、标准差为 2.5e-3，远在容差范围内。
         % code 域的 center-touch 锁定判据在本测试套件中已不再使用。
         [freqLockFlag(startIndex), freqDiag] = ...
-            loop_monitor.detectFrequencyStateLock( ...
+            loop_monitor.judgeFreqStateGateOffline( ...
             loopFrequencyTrace(startIndex, :), piLockWindowBlocks, ...
             expectedFreqState, options.FreqMeanHalfDiffTol, ...
             options.FreqStdTol, options.FreqRateTol);
@@ -469,7 +469,7 @@ for startIndex = 1:numStartPhase
             round(mean(eyeTail)), 'FinalCount', NaN);
     else
         [freqLockFlag(startIndex), freqDiag] = ...
-            loop_monitor.detectFrequencyStateLock( ...
+            loop_monitor.judgeFreqStateGateOffline( ...
             loopFrequencyTrace(startIndex, :), piLockWindowBlocks, ...
             expectedFreqState, options.FreqMeanHalfDiffTol, ...
             options.FreqStdTol, options.FreqRateTol);

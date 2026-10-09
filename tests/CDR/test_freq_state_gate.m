@@ -1,7 +1,7 @@
 function test_freq_state_gate()
 %TEST_FREQ_STATE_GATE Online frequency-state lock gate in loop_monitor.
 %
-%   The gate is an online form of the static detectFrequencyStateLock. The
+%   The gate is an online form of the static judgeFreqStateGateOffline. The
 %   decisive property is therefore not "does it ever fire" but "does it fire
 %   on exactly the block at which the offline criterion, evaluated on the
 %   trace prefix, first turns true". Every case below is built around that
@@ -39,7 +39,7 @@ for k = window:numel(seq)
     if k < minBlock
         continue;
     end
-    locked = loop_monitor.detectFrequencyStateLock(seq(1:k), window, ...
+    locked = loop_monitor.judgeFreqStateGateOffline(seq(1:k), window, ...
         expectedRate, meanHalfDiffTol, stdTol, rateTol);
     if locked
         blk = k;

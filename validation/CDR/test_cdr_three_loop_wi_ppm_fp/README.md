@@ -55,7 +55,7 @@ At 100 ppm the steady timing rate the loop must supply is
   fixed code.
 - `FreqOffsetPpm ~= 0`: two frequency-domain criteria added to
   `src/CDR/loop_monitor.m`:
-  1. `loop_monitor.detectFrequencyStateLock` -- the loop integrator frequency
+  1. `loop_monitor.judgeFreqStateGateOffline` -- the loop integrator frequency
      state has a constant tail-window mean (first/second half agree, low std)
      whose magnitude matches the expected drift rate.
   2. `loop_monitor.detectRotationPeriodLock` -- the PI code rotation period
@@ -118,7 +118,7 @@ directory without rerunning the CDR simulation:
    `SnrDbTrace` exactly as `loop_monitor.updateSnrSettle` does;
 2. **after the lock criterion is first satisfied** -- the first block `k`
    for which the trailing `LockWindowBlocks` slice satisfies the run's own
-   pass/fail detectors and tolerances: `loop_monitor.detectFrequencyStateLock`,
+   pass/fail detectors and tolerances: `loop_monitor.judgeFreqStateGateOffline`,
    plus `detectRotationPeriodLock` when `RotationCriterionApplicable`, for
    nonzero ppm, or `detect_pi_center_touch_lock` at zero ppm; and
 3. **final** -- the last 2048 UI of the run.
@@ -269,7 +269,7 @@ center-touch gate. Their historical replay therefore remains:
 
 At nonzero ppm, center-touch was enabled but dead because the raw unwrapped PI
 code ramps continuously. The implemented `freq-state` choice instead keeps a
-`LockWindowBlocks` ring and calls the same `detectFrequencyStateLock` used by the
+`LockWindowBlocks` ring and calls the same `judgeFreqStateGateOffline` used by the
 offline verdict. This does **not** wire the complete verdict into stage 2:
 nonzero-ppm `Locked` still also requires `detectRotationPeriodLock`. Therefore
 `LockBlock` and recorded `Stage2GateBlock` are distinct.

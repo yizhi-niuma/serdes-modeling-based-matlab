@@ -103,7 +103,7 @@
   `'auto'` default from `cdr_three_loop_ppm`, hardcode the stage-2 downshift to
   the frequency-state gate for every offset, and move the 0 ppm pass/fail
   verdict from `detect_pi_center_touch_lock` to
-  `loop_monitor.detectFrequencyStateLock` (expected rate 0, same slew-saturation
+  `loop_monitor.judgeFreqStateGateOffline` (expected rate 0, same slew-saturation
   guard as nonzero ppm). This supersedes the 2026-09-26 `'auto'` policy that
   resolved to `'center-touch'` at exactly 0 ppm. No compatibility switch was
   kept in the runner (per user: no dead options).
@@ -784,7 +784,7 @@ The following values appear in current ADC waveform studies but are not yet perm
   standalone 2048-UI eyes plus one 1500x1500 three-row comparison.
 - **Row-2 decision**: anchor the second row by sliding the run's own pass/fail
   lock detectors and tolerances over prefixes `1:k`. Nonzero ppm uses
-  `loop_monitor.detectFrequencyStateLock` and, when
+  `loop_monitor.judgeFreqStateGateOffline` and, when
   `RotationCriterionApplicable`, `detectRotationPeriodLock`; zero ppm uses
   `detect_pi_center_touch_lock`. This avoids inventing a new eye-only definition
   of lock and keeps the diagnostic aligned with the acceptance verdict.
@@ -828,7 +828,7 @@ The following values appear in current ADC waveform studies but are not yet perm
   `FfeGateMode = 'pvt-track'`. This was not an intentional disabling policy.
 - **Criterion reuse:** `loop_monitor.enableFreqStateGate` configures a bounded
   trailing-window ring and `updateFreqStateGate` passes its ordered full window
-  to the existing static `detectFrequencyStateLock`. There is no second
+  to the existing static `judgeFreqStateGateOffline`. There is no second
   implementation of frequency lock; online and offline verdicts are identical
   by construction for the same samples. The ppm runner passes the exact verdict
   window, expected rate, and frequency tolerances.

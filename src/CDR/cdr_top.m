@@ -184,7 +184,7 @@ classdef cdr_top < handle
             % 2026-09-30 又随 center-touch 本体一起从 loop_monitor 删除。
             % loop_monitor 现在是零参构造, 这里不再需要传任何惰性常量。
             % 第二级降档的门控判据。唯一判据为 'freq-state'：用环路积分频率态的
-            % 平坦性判据，与离线 loop_monitor.detectFrequencyStateLock 同源，在
+            % 平坦性判据，与离线 loop_monitor.judgeFreqStateGateOffline 同源，在
             % 任意 ppm(含 0)下都成立。历史上的码域众数 'center-touch' 判据已于
             % 2026-09-28 从 cdr_top 删除：0 ppm 下 freq-state 与它 32/32 一致，
             % 有 ppm 时 center-touch 因 PI code 持续爬升永不触发。该判据已于
@@ -201,7 +201,7 @@ classdef cdr_top < handle
             % RateTol=Inf)，纯平坦判据会把它判成锁定——但那是 railed 而不是
             % 锁定，此时眼睛通常还没开、环路根本没在跟踪。守卫住在判据内部:
             % enableFreqStateGate 把 satLevel=FfeGateFreqSatFrac*FrequencyLimit
-            % 交给 detectFrequencyStateLock,尾窗峰值 max(|x|) >= satLevel 时判据
+            % 交给 judgeFreqStateGateOffline,尾窗峰值 max(|x|) >= satLevel 时判据
             % 直接拒绝(见 processConfiguredBlock 的无条件喂入)。设 >1 可关闭;
             % FrequencyLimit=Inf 时 satLevel=Inf, 守卫自动失效。
             cfg.FfeGateFreqSatFrac = 0.9;
@@ -287,7 +287,7 @@ classdef cdr_top < handle
             % 若真的加入第二种判据,再在这里按 cfg.FfeGateCriterion 分支即可。
             if cfg.FfeGateEnable
                 % satLevel = FfeGateFreqSatFrac*FrequencyLimit 直接交给判据:
-                % 门控窗口的饱和拒绝现在住在 detectFrequencyStateLock 内部,
+                % 门控窗口的饱和拒绝现在住在 judgeFreqStateGateOffline 内部,
                 % processConfiguredBlock 不再需要在喂入前挑掉饱和块(见那里的
                 % 说明)。FrequencyLimit=Inf 时 satLevel=Inf, 守卫自动失效。
                 obj.Monitor.enableFreqStateGate( ...
@@ -436,7 +436,7 @@ classdef cdr_top < handle
                 % railed 频率态是"完美平坦"却并非锁定)现在住在判据内部:
                 % enableFreqStateGate 已把 satLevel=FfeGateFreqSatFrac*
                 % FrequencyLimit 交给它,railed 尾窗会因峰值 max(|x|)>=satLevel 被
-                % detectFrequencyStateLock 直接拒绝。这样在线门控与离线判据在
+                % judgeFreqStateGateOffline 直接拒绝。这样在线门控与离线判据在
                 % 同一尾窗、同一 satLevel 下逐块一致,不再有 cdr_top 侧的整块
                 % 预过滤把两者分开。非有限样本仍由 updateFreqStateGate 自行跳过。
                 loopLockedEvent = obj.Monitor.updateFreqStateGate( ...

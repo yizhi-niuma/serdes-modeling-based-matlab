@@ -17,7 +17,7 @@ classdef loop_monitor < handle
     %    给出漂亮的单块读数)，因此做平均是必需的而非修饰。用 enableSnrSettle
     %    显式启用。
     %
-    % 2) 环路频率态锁定门控。它是下面 detectFrequencyStateLock 判据的一次性
+    % 2) 环路频率态锁定门控。它是下面 judgeFreqStateGateOffline 判据的一次性
     %    在线(ONLINE)形式。它用一个环形缓冲保存最近 windowBlocks 个环路频率
     %    态样本，缓冲满后把有序窗口交给同一个静态判据，并转发启用时给定的
     %    同一个 satLevel。因此在线判决与在同一尾窗、同一 satLevel 下评估的
@@ -162,7 +162,7 @@ classdef loop_monitor < handle
             %ENABLEFREQSTATEGATE 打开在线的频率态锁定门控。
             %
             %   windowBlocks、expectedRate、meanHalfDiffTol、stdTol、rateTol
-            %   与 satLevel 的含义与静态 detectFrequencyStateLock 上所述完全
+            %   与 satLevel 的含义与静态 judgeFreqStateGateOffline 上所述完全
             %   相同，因为在线门控原样转发给那个函数。expectedRate 可为 NaN、
             %   rateTol 可为 Inf，以仅测平坦性。
             %
@@ -314,7 +314,7 @@ classdef loop_monitor < handle
     end
 
     methods (Static)
-        function [locked, diag] = detectFrequencyStateLock(freqStateSeq, ...
+        function [locked, diag] = judgeFreqStateGateOffline(freqStateSeq, ...
                 windowBlocks, expectedRate, meanHalfDiffTol, stdTol, ...
                 rateTol, satLevel)
             %DETECTFREQUENCYSTATELOCK 平坦均值环路频率锁定判据。
@@ -438,7 +438,7 @@ classdef loop_monitor < handle
                 windowBlocks, expectedRate, meanHalfDiffTol, stdTol, ...
                 rateTol, satLevel, wantDiag)
             %FREQSTATELOCKCORE 平坦均值环路频率锁定判据的无校验数值核。
-            % 由公开的 detectFrequencyStateLock(先校验)与在线的
+            % 由公开的 judgeFreqStateGateOffline(先校验)与在线的
             % updateFreqStateGate(其窗口在构造上有限、配置已在
             % enableFreqStateGate 校验)共用，故二者得到完全一致的判决。
             % 热的在线路径既不付输入校验，也(在 wantDiag 为 false 时)不付
