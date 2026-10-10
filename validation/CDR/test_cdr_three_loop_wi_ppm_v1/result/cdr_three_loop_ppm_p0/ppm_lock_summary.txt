@@ -10,7 +10,7 @@ ExpectedRotationPeriod   : NaN block/UI   (applicable = 0)
 SnrSettleThresholdDb     : 15 dB   alpha = 0.0078125   minBlock = 200
 FfeGateCriterion : freq-state   (stage-2 mu downshift gate)
 PiNonideal       : ab_constant
-Generated        : 2026-10-09 18:04:39
+Generated        : 2026-10-10 10:53:56
 
 Column definitions
   StartPhase      initial PI phase code, 0..SamplePerSymbol-1

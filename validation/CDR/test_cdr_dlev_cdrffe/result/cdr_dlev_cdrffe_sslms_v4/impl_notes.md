@@ -320,3 +320,12 @@ v4 此前依赖 cdr_top 内部的 center-touch 门控来冻结 FFE：读 `Monito
 
 **复现**：无参默认 `cdr_dlev_cdrffe_sslms_v4()`；快速冒烟
 `cdr_dlev_cdrffe_sslms_v4('NumBlock',4000,'StartPhaseList',[16 64],'SaveOutputs',false,'EyeDiagramEnable',false)`。
+
+
+## 2026-10-09 (b): 窗口频率态门控删除, FFE 冻结改用 EWMA
+
+本次 result 由 EWMA-only 代码重生。FFE 冻结门控原走滑窗频率态判据, 现统一为
+EWMA(loop_monitor 的 enableFreqStateGate / updateFreqStateGate)。runner 的
+FfeFreezeWindowBlocks 现映射为 EWMA dwell(默认 2000)。无参默认(PRBS22 / 8 相位 /
+NumBlock=15000)验收: 8/8 相位锁定, FFE 冻结门控正常。cdr_top 不再有
+FfeGateUseEwma / FfeGateFreqWindowBlocks。

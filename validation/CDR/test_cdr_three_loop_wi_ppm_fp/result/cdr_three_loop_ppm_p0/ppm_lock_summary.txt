@@ -3,14 +3,14 @@ CDR three-loop ppm lock summary : cdr_three_loop_ppm_p0
 ================================================================================
 Runner           : cdr_three_loop_ppm
 FreqOffsetPpm    : +0
-NumBlocks        : 8000      StartPhases : 8
+NumBlocks        : 15000      StartPhases : 32
 LockMode         : freq-state     LockWindowBlocks : 2000
 ExpectedFreqState        : -0 code/block
 ExpectedRotationPeriod   : NaN block/UI   (applicable = 0)
 SnrSettleThresholdDb     : 15 dB   alpha = 0.0078125   minBlock = 200
 FfeGateCriterion : freq-state   (stage-2 mu downshift gate)
 PiNonideal       : ab_constant
-Generated        : 2026-10-02 13:45:51
+Generated        : 2026-10-10 11:35:58
 
 Column definitions
   StartPhase      initial PI phase code, 0..SamplePerSymbol-1
@@ -42,40 +42,88 @@ Column definitions
 --------------------------------------------------------------------------------
  idx  StartPhase  Locked  FreqStateMean  RotationPeriod  LockPhase  Stage1Block  Stage1Phase  LockBlock  LockPhaseAtBlk  Stage2Block
 --------------------------------------------------------------------------------
-   1           0       1  6.31713867187e-05             n/a        112          515          110       2000             111         2048
-   2          16       1  -3.75366210937e-05             n/a        112          558          110       2198             110         2048
-   3          32       1  0.000156234741211             n/a        112          570          110       2000             112         2048
-   4          48       1  -1.39007568359e-05             n/a        114          864          113       2283             113         2048
-   5          64       1  0.000111923217773             n/a        113          567          112       2000             113         2048
-   6          80       1  8.32977294922e-05             n/a        114          533          112       2000             113         2048
-   7          96       1  0.000150405883789             n/a        114          545          112       2299             112         2048
-   8         112       1  0.000139587402344             n/a        113          501          112       2153             112         2048
+   1           0       1  0.000149145340566             n/a        113          515          110       2000             111         2048
+   2           4       1  0.000250034430547             n/a        113          530          110       2083             111         2048
+   3           8       1  0.000224027653641             n/a        112          540          110       2166             111         2048
+   4          12       1  0.000130455416734             n/a        112          553          110       2492             111         2048
+   5          16       1  0.000162164416886             n/a        112          558          110       2198             110         2048
+   6          20       1  0.000346299340015             n/a        112          566          110       2275             110         2048
+   7          24       1  0.000212546842534             n/a        113          558          110       2253             111         2048
+   8          28       1  0.000198349183645             n/a        113          560          110       2168             111         2048
+   9          32       1  0.000220775100705             n/a        112          570          110       2000             112         2048
+  10          36       1  0.000158228276785             n/a        114          916          112       2501             113         2048
+  11          40       1  0.000171405695287             n/a        115          903          112       2485             113         2048
+  12          44       1  0.000263243365394             n/a        114          894          112       2441             113         2048
+  13          48       1  9.19844287458e-05             n/a        115          864          113       2283             113         2048
+  14          52       1  6.90527800858e-05             n/a        114          849          111       2392             113         2048
+  15          56       1  0.000196799345635             n/a        113          695          111       2069             112         2048
+  16          60       1  5.10538771014e-06             n/a        114          588          112       2181             112         2048
+  17          64       1  1.09234832891e-06             n/a        114          567          112       2000             113         2048
+  18          68       1  0.000139081942905             n/a        114          542          112       2154             112         2048
+  19          72       1  0.000101915007999             n/a        114          542          112       2000             113         2048
+  20          76       1  7.31389139914e-05             n/a        114          542          112       2154             112         2048
+  21          80       1  8.24279458724e-05             n/a        114          533          112       2000             113         2048
+  22          84       1  0.000297936294195             n/a        114          533          112       2031             112         2048
+  23          88       1  0.000201664691374             n/a        114          533          112       2489             113         2048
+  24          92       1  -2.79741682075e-05             n/a        114          543          112       2031             112         2048
+  25          96       1  0.000106154684559             n/a        114          545          112       2299             112         2048
+  26         100       1  6.41904052237e-05             n/a        114          555          112       2008             112         2048
+  27         104       1  -4.98304366869e-05             n/a        114          547          112       2099             112         2048
+  28         108       1  0.000178798848867             n/a        114          548          111       2030             112         2048
+  29         112       1  6.38333683772e-05             n/a        114          501          112       2153             112         2048
+  30         116       1  0.000193666351418             n/a        113          499          111       2000             111         2048
+  31         120       1  0.000298809434204             n/a        113          501          111       2000             111         2048
+  32         124       1  0.000111942021698             n/a        113          513          110       2000             111         2048
 --------------------------------------------------------------------------------
 
 Supplementary columns (everything else the CSV carried)
 --------------------------------------------------------------------------------
  idx  StartPhase  FreqLock  RotationLock  SlewSaturated  AcquisitionBlock  RotationCov  DeltaCodeMeanAbs  PendingCodeMeanAbs
 --------------------------------------------------------------------------------
-   1           0         1             0              0                38          n/a            0.0925                   0
-   2          16         1             0              0                81          n/a            0.0945                   0
-   3          32         1             0              0               156          n/a             0.087                   0
-   4          48         1             0              0               635          n/a            0.0755                   0
-   5          64         1             0              0               236          n/a             0.083                   0
-   6          80         1             0              0               208          n/a             0.083                   0
-   7          96         1             0              0               223          n/a             0.082                   0
-   8         112         1             0              0               143          n/a            0.0845                   0
+   1           0         1             0              0                38          n/a             0.088                   0
+   2           4         1             0              0                47          n/a              0.08                   0
+   3           8         1             0              0               161          n/a             0.076                   0
+   4          12         1             0              0               163          n/a            0.0745                   0
+   5          16         1             0              0                81          n/a             0.074                   0
+   6          20         1             0              0                84          n/a             0.069                   0
+   7          24         1             0              0               103          n/a              0.08                   0
+   8          28         1             0              0               120          n/a            0.0805                   0
+   9          32         1             0              0               156          n/a            0.0735                   0
+  10          36         1             0              0               687          n/a             0.085                   0
+  11          40         1             0              0               679          n/a             0.075                   0
+  12          44         1             0              0               672          n/a            0.0825                   0
+  13          48         1             0              0               635          n/a            0.0795                   0
+  14          52         1             0              0               592          n/a            0.0765                   0
+  15          56         1             0              0               384          n/a             0.075                   0
+  16          60         1             0              0               265          n/a             0.088                   0
+  17          64         1             0              0               236          n/a             0.078                   0
+  18          68         1             0              0               221          n/a             0.084                   0
+  19          72         1             0              0               220          n/a             0.086                   0
+  20          76         1             0              0               215          n/a            0.0745                   0
+  21          80         1             0              0               212          n/a             0.084                   0
+  22          84         1             0              0               213          n/a            0.0865                   0
+  23          88         1             0              0               213          n/a             0.084                   0
+  24          92         1             0              0               232          n/a            0.0745                   0
+  25          96         1             0              0               233          n/a             0.082                   0
+  26         100         1             0              0               240          n/a             0.082                   0
+  27         104         1             0              0               212          n/a            0.0805                   0
+  28         108         1             0              0               204          n/a            0.0825                   0
+  29         112         1             0              0               143          n/a             0.085                   0
+  30         116         1             0              0                 1          n/a             0.075                   0
+  31         120         1             0              0                 6          n/a            0.0805                   0
+  32         124         1             0              0                23          n/a            0.0765                   0
 --------------------------------------------------------------------------------
 
 Aggregate
-  Locked                : 8 / 8
-  AllPhaseLock          : 1       CommonLockPhase : 113   spread : 2
-  FreqStateMean         : min -3.75366210937e-05  max 0.000156234741211   (expected -0)
-  Stage1Block           : min 501  max 864   (n/a count 0)
-  LockBlock             : min 2000  max 2299   (n/a count 0)
-  Stage2Block fired     : 8 / 8 start phases
+  Locked                : 32 / 32
+  AllPhaseLock          : 1       CommonLockPhase : 114   spread : 3
+  FreqStateMean         : min -4.98304366869e-05  max 0.000346299340015   (expected -0)
+  Stage1Block           : min 499  max 916   (n/a count 0)
+  LockBlock             : min 2000  max 2501   (n/a count 0)
+  Stage2Block fired     : 32 / 32 start phases
 
 Note on the stage-2 mu downshift
-  The stage-2 gate fired for 8 of 8 start phases, from block 2048
+  The stage-2 gate fired for 32 of 32 start phases, from block 2048
   through block 2048.
   The armed gate is freq-state: the online form of the same
   frequency-state detector, trailing window and tolerances the verdict
@@ -84,6 +132,6 @@ Note on the stage-2 mu downshift
   additionally requires detectRotationPeriodLock, so Stage2Block can only
   be at or before LockBlock; the two coincide exactly when the rotation
   component is already satisfied at that block.
-  Measured in this run: 0 of 8 comparable row(s) agree exactly, 4
+  Measured in this run: 0 of 32 comparable row(s) agree exactly, 20
   row(s) have Stage2Block strictly earlier than LockBlock.
 ================================================================================

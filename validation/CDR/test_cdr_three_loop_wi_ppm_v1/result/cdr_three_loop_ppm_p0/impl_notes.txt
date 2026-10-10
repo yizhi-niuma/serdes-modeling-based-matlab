@@ -105,3 +105,16 @@ ADC 结果一致(逐比特), 差异仅为各自的输出文件路径。
     r = cdr_three_loop_ppm('FreqOffsetPpm', 0, 'StartPhaseStep', 4);
     % runner 默认 FfeGateUseEwma=true; 传 'FfeGateUseEwma', false 可回退窗口门控。
 ================================================================================
+
+--------------------------------------------------------------------------------
+2026-10-09 (b) 追加: 窗口频率态门控已删除, EWMA 升为唯一实现(占用原名)
+--------------------------------------------------------------------------------
+本次 result 由 EWMA-only 代码重生。滑窗版频率态判据已从全仓库删除; EWMA 版
+占用原名 enableFreqStateGate / updateFreqStateGate(在线)与 freqStateLockCore
+(离线整条回放)。cdr_top 不再有 FfeGateUseEwma 开关与 FfeGateFreqWindowBlocks
+配置, 始终驱动 EWMA 门控。三条 EWMA(fast 1/64 / slow 1/512 / MAD 1/256) + 平坦
+/ 波动 / 速率 / 饱和四轴 + dwell(=512)驻留; railed 否决由本套件已有的 slew 饱和
+守卫承担(离线判据 satLevel 传 Inf)。全量 32 相位 / NumBlock=15000 验收: 本 ppm
+全部 32/32 锁定, 第二档降档全触发。复现: EWMA 为默认且唯一, 传 StartPhaseStep=4
+即跑 32 相位。
+================================================================================
