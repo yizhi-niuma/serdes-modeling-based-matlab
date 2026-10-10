@@ -184,13 +184,12 @@ classdef cdr_top < handle
             % 2026-09-30 又随 center-touch 本体一起从 loop_monitor 删除。
             % loop_monitor 现在是零参构造, 这里不再需要传任何惰性常量。
             % 第二级降档的门控判据。唯一判据为 'freq-state'：用环路积分频率态的
-            % 平坦性判据，与离线 loop_monitor.judgeFreqStateGateOffline 同源，在
+            % 平坦性判据，与离线 loop_monitor.freqStateLockCore 同源，在
             % 任意 ppm(含 0)下都成立。历史上的码域众数 'center-touch' 判据已于
             % 2026-09-28 从 cdr_top 删除：0 ppm 下 freq-state 与它 32/32 一致，
             % 有 ppm 时 center-touch 因 PI code 持续爬升永不触发。该判据已于
             % 2026-09-30 从 loop_monitor 本体一并删除, 不存在任何回放路径。
             cfg.FfeGateCriterion = 'freq-state';
-            cfg.FfeGateFreqWindowBlocks = 2000;
             cfg.FfeGateFreqExpectedRate = NaN;
             cfg.FfeGateFreqMeanHalfDiffTol = 1e-3;
             cfg.FfeGateFreqStdTol = 5e-3;
@@ -201,15 +200,12 @@ classdef cdr_top < handle
             % RateTol=Inf)，纯平坦判据会把它判成锁定——但那是 railed 而不是
             % 锁定，此时眼睛通常还没开、环路根本没在跟踪。守卫住在判据内部:
             % enableFreqStateGate 把 satLevel=FfeGateFreqSatFrac*FrequencyLimit
-            % 交给 judgeFreqStateGateOffline,尾窗峰值 max(|x|) >= satLevel 时判据
+            % 交给 freqStateLockCore,尾窗峰值 max(|x|) >= satLevel 时判据
             % 直接拒绝(见 processConfiguredBlock 的无条件喂入)。设 >1 可关闭;
             % FrequencyLimit=Inf 时 satLevel=Inf, 守卫自动失效。
             cfg.FfeGateFreqSatFrac = 0.9;
-            % EWMA 版第二级门控（路线 A，默认关闭）。为 true 时第二档降档改用
-            % loop_monitor 的三 EWMA 在线门控（enableFreqEwmaGate /
-            % updateFreqEwmaGate）替代 2000 深滑窗，仅实验套件开启；库默认调用方
-            % 与 ppm/_fp 两份套件完全不受影响。DwellBlocks 为连续满足四轴的块数。
-            cfg.FfeGateUseEwma = false;
+            % 频率态门控(EWMA)的驻留与三条 EWMA 权重：DwellBlocks 为连续满足
+            % 四轴的块数；三个 alpha 为 fast / slow / MAD 的权重。
             cfg.FfeGateEwmaDwellBlocks = 512;
             cfg.FfeGateEwmaAlphaFast = 1 / 64;
             cfg.FfeGateEwmaAlphaSlow = 1 / 512;
@@ -296,30 +292,18 @@ classdef cdr_top < handle
             % 若真的加入第二种判据,再在这里按 cfg.FfeGateCriterion 分支即可。
             if cfg.FfeGateEnable
                 % satLevel = FfeGateFreqSatFrac*FrequencyLimit 直接交给判据:
-                % 门控窗口的饱和拒绝现在住在 judgeFreqStateGateOffline 内部,
+                % 门控窗口的饱和拒绝现在住在 freqStateLockCore 内部,
                 % processConfiguredBlock 不再需要在喂入前挑掉饱和块(见那里的
                 % 说明)。FrequencyLimit=Inf 时 satLevel=Inf, 守卫自动失效。
-                if cfg.FfeGateUseEwma
-                    % 路线 A：EWMA 在线门控替代窗口门控。satLevel 同口径，
-                    % dwell / alpha 由配置给出，闩锁复用 FreqGateDone。
-                    obj.Monitor.enableFreqEwmaGate( ...
-                        cfg.FfeGateFreqExpectedRate, ...
-                        cfg.FfeGateFreqMeanHalfDiffTol, ...
-                        cfg.FfeGateFreqStdTol, cfg.FfeGateFreqRateTol, ...
-                        cfg.FfeGateFreqMinBlock, ...
-                        cfg.FfeGateFreqSatFrac * cfg.FrequencyLimit, ...
-                        cfg.FfeGateEwmaDwellBlocks, ...
-                        cfg.FfeGateEwmaAlphaFast, cfg.FfeGateEwmaAlphaSlow, ...
-                        cfg.FfeGateEwmaAlphaMad);
-                else
-                    obj.Monitor.enableFreqStateGate( ...
-                        cfg.FfeGateFreqWindowBlocks, ...
-                        cfg.FfeGateFreqExpectedRate, ...
-                        cfg.FfeGateFreqMeanHalfDiffTol, ...
-                        cfg.FfeGateFreqStdTol, cfg.FfeGateFreqRateTol, ...
-                        cfg.FfeGateFreqMinBlock, ...
-                        cfg.FfeGateFreqSatFrac * cfg.FrequencyLimit);
-                end
+                obj.Monitor.enableFreqStateGate( ...
+                    cfg.FfeGateFreqExpectedRate, ...
+                    cfg.FfeGateFreqMeanHalfDiffTol, ...
+                    cfg.FfeGateFreqStdTol, cfg.FfeGateFreqRateTol, ...
+                    cfg.FfeGateFreqMinBlock, ...
+                    cfg.FfeGateFreqSatFrac * cfg.FrequencyLimit, ...
+                    cfg.FfeGateEwmaDwellBlocks, ...
+                    cfg.FfeGateEwmaAlphaFast, cfg.FfeGateEwmaAlphaSlow, ...
+                    cfg.FfeGateEwmaAlphaMad);
             end
             obj.resetState();
         end
@@ -459,16 +443,11 @@ classdef cdr_top < handle
                 % railed 频率态是"完美平坦"却并非锁定)现在住在判据内部:
                 % enableFreqStateGate 已把 satLevel=FfeGateFreqSatFrac*
                 % FrequencyLimit 交给它,railed 尾窗会因峰值 max(|x|)>=satLevel 被
-                % judgeFreqStateGateOffline 直接拒绝。这样在线门控与离线判据在
+                % freqStateLockCore 直接拒绝。这样在线门控与离线判据在
                 % 同一尾窗、同一 satLevel 下逐块一致,不再有 cdr_top 侧的整块
                 % 预过滤把两者分开。非有限样本仍由 updateFreqStateGate 自行跳过。
-                if obj.Config.FfeGateUseEwma
-                    loopLockedEvent = obj.Monitor.updateFreqEwmaGate( ...
-                        blockIndex, freqState);
-                else
-                    loopLockedEvent = obj.Monitor.updateFreqStateGate( ...
-                        blockIndex, freqState);
-                end
+                loopLockedEvent = obj.Monitor.updateFreqStateGate( ...
+                    blockIndex, freqState);
                 if loopLockedEvent
                     obj.GatedCoefficients = obj.Ffe.Coefficients;
                     if strcmp(cfg.FfeGateMode, 'pvt-track')
@@ -741,12 +720,6 @@ classdef cdr_top < handle
             cfg.FfeGateCriterion = obj.requireTextChoice( ...
                 cfg.FfeGateCriterion, 'FfeGateCriterion', ...
                 {'freq-state'});
-            obj.requirePositiveInteger(cfg.FfeGateFreqWindowBlocks, ...
-                'FfeGateFreqWindowBlocks');
-            if cfg.FfeGateFreqWindowBlocks < 2
-                % 判据要取前后半均值之差，窗口至少要有两个样本。
-                obj.invalidField('FfeGateFreqWindowBlocks');
-            end
             % 期望漂移率允许为 NaN(只判平坦性，不比对速率)。
             if ~(isnumeric(cfg.FfeGateFreqExpectedRate) && ...
                     isreal(cfg.FfeGateFreqExpectedRate) && ...
@@ -771,8 +744,6 @@ classdef cdr_top < handle
                 'FfeGateFreqMinBlock');
             obj.requirePositiveScalar(cfg.FfeGateFreqSatFrac, ...
                 'FfeGateFreqSatFrac');
-            cfg.FfeGateUseEwma = obj.requireLogicalScalar( ...
-                cfg.FfeGateUseEwma, 'FfeGateUseEwma');
             obj.requirePositiveInteger(cfg.FfeGateEwmaDwellBlocks, ...
                 'FfeGateEwmaDwellBlocks');
             for ewmaAlphaField = {'FfeGateEwmaAlphaFast', ...
@@ -805,7 +776,7 @@ classdef cdr_top < handle
             numericFields = setdiff(expected, {'Detector', 'VoterMode', ...
                 'VoterDenominator', 'PiNonideal', 'FfeInitCoefficients', ...
                 'FfeAdaptEnableMask', 'FfeGateMode', 'TransitionFilter', ...
-                'FfeGateEnable', 'FfeGateCriterion', 'FfeGateUseEwma'});
+                'FfeGateEnable', 'FfeGateCriterion'});
             for index = 1:numel(numericFields)
                 field = numericFields{index};
                 cfg.(field) = double(cfg.(field));

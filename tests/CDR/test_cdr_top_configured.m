@@ -285,12 +285,12 @@ end
 function testSaturatedIntegratorDoesNotLatchGate()
 % 钳在 ±FrequencyLimit 上的积分频率态是"完美平坦"的(半差=0、std=0)，在库默认
 % 的纯平坦口径(FfeGateFreqExpectedRate=NaN / FfeGateFreqRateTol=Inf)下会被
-% judgeFreqStateGateOffline 判成锁定。那是 railed 而不是锁定：眼睛通常还没开、
+% freqStateLockCore 判成锁定。那是 railed 而不是锁定：眼睛通常还没开、
 % 环路根本没在跟踪，若让它闩锁 stage-2 就会把 dLev/FFE 过早降到 PVT 档。
 cfg = gateConfig('pvt-track');
 cfg.Ki = 0.5;                 % 让积分器真的累积
 cfg.FrequencyLimit = 0.01;    % 一次单向脉冲就撞上限幅
-cfg.FfeGateFreqWindowBlocks = 6;
+cfg.FfeGateEwmaDwellBlocks = 6;
 top = cdr_top(cfg);
 
 % 先用一次单向脉冲(1 个 late 后接恒定 early)把积分器踢到限幅；此后
@@ -312,18 +312,18 @@ assert(abs(state.LoopFilter.FrequencyState) >= ...
     'Test premise failed: the integrator did not saturate.');
 % 前提 2：尾窗确实完全平坦。纯平坦口径(satLevel=Inf,即省略第 7 个参数)会
 % 接受它——这正是"饱和被误判为锁定"的形态。把 satLevel 交给同一判据后它必须
-% 转为拒绝，这条守卫如今住在 judgeFreqStateGateOffline 内部而不是 cdr_top 的
+% 转为拒绝，这条守卫如今住在 freqStateLockCore 内部而不是 cdr_top 的
 % 预过滤里。
 tail = cellfun(@(o) o.LoopFrequencyState, outputs(end - 5:end));
 assert(std(tail) == 0, 'Test premise failed: the railed tail is not flat.');
-assert(loop_monitor.judgeFreqStateGateOffline(tail, numel(tail), ...
-    cfg.FfeGateFreqExpectedRate, cfg.FfeGateFreqMeanHalfDiffTol, ...
-    cfg.FfeGateFreqStdTol, cfg.FfeGateFreqRateTol), ...
+assert(loop_monitor.freqStateLockCore(tail, cfg.FfeGateFreqExpectedRate, ...
+    cfg.FfeGateFreqMeanHalfDiffTol, cfg.FfeGateFreqStdTol, ...
+    cfg.FfeGateFreqRateTol, Inf, numel(tail)), ...
     'Test premise failed: pure flatness (satLevel=Inf) should accept this railed tail.');
 satLevel = cfg.FfeGateFreqSatFrac * cfg.FrequencyLimit;
-assert(~loop_monitor.judgeFreqStateGateOffline(tail, numel(tail), ...
-    cfg.FfeGateFreqExpectedRate, cfg.FfeGateFreqMeanHalfDiffTol, ...
-    cfg.FfeGateFreqStdTol, cfg.FfeGateFreqRateTol, satLevel), ...
+assert(~loop_monitor.freqStateLockCore(tail, cfg.FfeGateFreqExpectedRate, ...
+    cfg.FfeGateFreqMeanHalfDiffTol, cfg.FfeGateFreqStdTol, ...
+    cfg.FfeGateFreqRateTol, satLevel, numel(tail)), ...
     'With satLevel the criterion itself must reject a railed tail.');
 % 断言：cdr_top 必须把这种块挡在门控窗口之外。
 assert(~state.Monitor.FreqGateDone, ...
@@ -344,7 +344,7 @@ cfg.DlevStepSizeSettle = 0.1;
 cfg.DlevStepSizePvtTrack = 0.02;
 % baseConfig 的 Ki=0 => 频率态恒 0，是合法的"平坦且未饱和"，门控在窗口填满后
 % 立刻闩锁；把 SNR 换挡的 minBlock 推后，强制 stage-2 先于 stage-1 触发。
-cfg.FfeGateFreqWindowBlocks = 4;
+cfg.FfeGateEwmaDwellBlocks = 4;
 cfg.SnrSettleThresholdDb = -100;   % 任何有限 SNR 都能过
 cfg.SnrSettleMinBlock = 20;
 top = cdr_top(cfg);
@@ -500,7 +500,7 @@ cfg.FfeGateStartBlock = 1;
 % (门控闩锁后的写抑制与步长动作)，不验证判据的辨别力(那是
 % test_freq_state_gate / test_loop_monitor 的职责)，所以用一个小窗口、
 % 极松容差、仅判平坦性(期望速率 NaN)的门控，保证在这段短驱动内触发。
-cfg.FfeGateFreqWindowBlocks = 6;
+cfg.FfeGateEwmaDwellBlocks = 6;
 cfg.FfeGateFreqExpectedRate = NaN;
 cfg.FfeGateFreqMeanHalfDiffTol = 100;
 cfg.FfeGateFreqStdTol = 100;

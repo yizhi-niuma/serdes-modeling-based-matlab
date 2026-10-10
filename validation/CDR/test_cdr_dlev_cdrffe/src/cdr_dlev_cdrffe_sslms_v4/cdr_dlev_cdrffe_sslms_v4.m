@@ -186,7 +186,7 @@ for startIndex = 1:numStartPhase
     % 删除)。v4 是 0 ppm，期望环路频率态为 0；沿用 ppm 套件 0-ppm 情形相同
     % 的窗口/容差。上面的 FfeGateMin* 只用于构造 loop_monitor 里保留但休眠
     % 的 center-touch 机制(供旧 MAT 离线回放)，不再参与 v4 的冻结判定。
-    cfg.FfeGateFreqWindowBlocks = min(options.FfeFreezeWindowBlocks, numBlocks);
+    cfg.FfeGateEwmaDwellBlocks = min(options.FfeFreezeWindowBlocks, numBlocks);
     cfg.FfeGateFreqExpectedRate = 0;
     cfg.FfeGateFreqMeanHalfDiffTol = options.FreqMeanHalfDiffTol;
     cfg.FfeGateFreqStdTol = options.FreqStdTol;

@@ -885,3 +885,30 @@ The following values appear in current ADC waveform studies but are not yet perm
   `MeanHalfDiffTol` and `DwellBlocks` may need per-corner retuning. The current
   experiment reuses the window tolerances (0.03 / 0.08 / 0.12) with
   `DwellBlocks = 512`.
+
+## 2026-10-09 (b): window frequency-state gate removed, EWMA promoted to canonical
+
+- The sliding-window frequency-state criterion is deleted repo-wide; the EWMA
+  gate is now the ONLY frequency-state lock gate and takes the canonical names:
+  `enableFreqStateGate` / `updateFreqStateGate` (online) and the public static
+  `freqStateLockCore` (offline whole-trace batch). The `FfeGateUseEwma` switch
+  and `FfeGateFreqWindowBlocks` config are gone; `cdr_top` always drives the
+  EWMA gate. `judgeFreqStateGateOffline` and the old private window core are
+  removed.
+- Blast radius (all migrated): `src/CDR/loop_monitor.m` (rewritten EWMA-only),
+  `src/CDR/cdr_top.m`, the v4 production three-loop runner (FFE-freeze gate; its
+  `FfeFreezeWindowBlocks` now maps to the EWMA dwell), all three ppm suites
+  (`test_cdr_three_loop_wi_ppm` / `_fp` / `_v1`) runners and their
+  make/write helpers, and the tests. `+cdr_fx` (fixed-point class) is unchanged;
+  the `_fp` suite's online gate stays fixed-point while its floating offline
+  verdict uses `freqStateLockCore`.
+- Validation (MATLAB R2025b, EWMA canonical, full 32-phase / NumBlock=15000):
+  ppm `_v1` +100 32/32; baseline ppm -100/0/+100 all 32/32; `_fp` ppm
+  -100/0/+100 all 32/32; v4 production default 8/8 start phases locked with the
+  FFE-freeze gate operating. `tests/CDR/test_loop_monitor` 4/4,
+  `test_cdr_top_configured` 12/12, and the rest of `tests/CDR` pass;
+  `test_freq_state_gate` (window online/offline equivalence) was deleted as its
+  purpose no longer exists.
+- Note: this removes a previously-validated criterion repo-wide including the
+  production v4 FFE-freeze path; done per explicit user direction after EWMA was
+  shown equivalent on the ppm suites.

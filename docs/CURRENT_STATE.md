@@ -601,3 +601,14 @@ Measured on the saved 8000-block, 32-start-phase, PRBS22 default runs, with the 
   gate (+100 ppm EWMA 2712/2610 vs window 2667/2569; 0 ppm 695/951). The full
   32-phase acceptance (-100 / 0 / +100 ppm, 15000 blocks) is recorded under
   VALIDATION.
+
+### Frequency-state gate is now EWMA-only (2026-10-09 b)
+
+- The window frequency-state criterion was deleted; EWMA took the canonical
+  names (`enableFreqStateGate` / `updateFreqStateGate` / `freqStateLockCore`).
+  `cdr_top.FfeGateUseEwma` and `FfeGateFreqWindowBlocks` are gone.
+- All callers migrated: v4 production (FFE-freeze gate), all three ppm suites and
+  their helpers, and the tests. `test_freq_state_gate` was deleted.
+- Validated under EWMA (full 32-phase, NumBlock=15000): v1 ppm +100 32/32;
+  baseline ppm and `_fp` ppm all three offsets 32/32; v4 production 8/8 locked.
+  `test_loop_monitor` 4/4, `test_cdr_top_configured` 12/12.

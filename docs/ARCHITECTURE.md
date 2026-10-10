@@ -400,3 +400,14 @@ stage-2 (settle -> PVT-track) downshift; the EWMA latch reuses `FreqGateDone`, s
 `gateLatched`, output assembly, and FFE freeze logic are unchanged. The two cores
 share the per-sample recursion and verdict, so the online gate and a whole-trace
 offline replay agree block-for-block.
+
+### loop_monitor frequency-state gate is EWMA-only (2026-10-09 b)
+
+The sliding-window frequency-state criterion was removed. `loop_monitor` now
+exposes a single frequency-state gate implemented with three EWMAs (fast/slow/
+MAD) plus a dwell counter: `enableFreqStateGate` / `updateFreqStateGate` online
+and the public static `freqStateLockCore` offline (both share one per-sample
+recursion, so a whole-trace offline replay and the online gate agree
+block-for-block). `cdr_top` always drives this gate (no `FfeGateUseEwma`
+switch); the latch reuses `FreqGateDone`, so `gateLatched`, output assembly, and
+FFE freeze are unchanged.

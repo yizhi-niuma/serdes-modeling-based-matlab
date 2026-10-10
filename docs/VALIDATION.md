@@ -1011,3 +1011,19 @@ Failure severity is **not** monotonic: `-107` diverged outright
   2667/2569), confirming the EWMA gate is a faithful replacement rather than a
   trivially-passing one. `freqMean` matched the expected drift rate to 1e-4
   (-0.8192 at +100 ppm, ~0 at 0 ppm).
+
+### EWMA-only frequency-state gate migration (2026-10-09 b)
+
+The window frequency-state criterion was removed and EWMA promoted to the
+canonical API. Re-validated in MATLAB R2025b (full 32-phase StartPhaseStep=4,
+NumBlock=15000, PRBS22 unless noted):
+
+- Unit: `tests/CDR/test_loop_monitor` 4/4 (window static check removed; the EWMA
+  `testFreqStateEwma` now exercises the canonical `freqStateLockCore` /
+  `enableFreqStateGate` / `updateFreqStateGate`). `test_cdr_top_configured`
+  12/12 (saturated-integrator and stage-two sub-tests rewritten to EWMA dwell).
+  Remaining `tests/CDR` pass; `test_freq_state_gate` deleted.
+- ppm acceptance (lock / stage-2 downshift, all start phases):
+  `_v1` +100 32/32; baseline -100/0/+100 all 32/32; `_fp` -100/0/+100 all 32/32.
+- v4 production default (StartPhaseStep=16, 8 phases): 8/8 start phases locked
+  with the EWMA FFE-freeze gate operating (`FfeFreezeWindowBlocks` -> EWMA dwell).

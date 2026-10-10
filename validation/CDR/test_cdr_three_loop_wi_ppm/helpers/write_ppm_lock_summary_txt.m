@@ -398,12 +398,15 @@ frequencyTrace = reshape(double(result.LoopFrequencyStateTrace( ...
     rowIndex, 1:numBlocks)), 1, []);
 runOptions = result.RunOptions;
 rotationApplicable = logical(result.RotationCriterionApplicable);
+% EWMA 频率锁定块取自 freqStateLockCore 整条回放的 LatchBlock(按构造等于
+% 在线闩锁块)。satLevel=Inf、dwell=512、alpha 默认，与库默认门控一致。
+[~, ewmaLatchDiag] = loop_monitor.freqStateLockCore(frequencyTrace, ...
+    result.ExpectedFreqState, runOptions.FreqMeanHalfDiffTol, ...
+    runOptions.FreqStdTol, runOptions.FreqRateTol, Inf, 512);
+ewmaLatchBlock = ewmaLatchDiag.LatchBlock;
 for blockIndex = windowBlocks:numBlocks
     windowIndex = (blockIndex - windowBlocks + 1):blockIndex;
-    frequencyLocked = loop_monitor.judgeFreqStateGateOffline( ...
-        frequencyTrace(windowIndex), windowBlocks, ...
-        result.ExpectedFreqState, runOptions.FreqMeanHalfDiffTol, ...
-        runOptions.FreqStdTol, runOptions.FreqRateTol);
+    frequencyLocked = ~isnan(ewmaLatchBlock) && blockIndex >= ewmaLatchBlock;
     if frequencyLocked && isnan(freqOnlyLockBlock)
         freqOnlyLockBlock = blockIndex;
     end

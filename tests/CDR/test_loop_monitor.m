@@ -10,11 +10,10 @@ setup_cdr_dlev_cdrffe_paths();
 
 testSnrSettleRejectsClosedEyeTransients();
 testSnrSettleDisabledAndInvalidInputs();
-testFrequencyStateLockStatic();
 testRotationPeriodLockStatic();
 testFreqStateEwma();
 
-fprintf('test_loop_monitor passed 5 / 5 checks.\n');
+fprintf('test_loop_monitor passed 4 / 4 checks.\n');
 end
 
 function testSnrSettleRejectsClosedEyeTransients()
@@ -114,49 +113,6 @@ assertThrowsId(@() monitor.updateSnrSettle(1, 'x'), 'loop_monitor:InvalidSnr');
 assertThrowsId(@() monitor.updateSnrSettle(1, [1 2]), 'loop_monitor:InvalidSnr');
 end
 
-function testFrequencyStateLockStatic()
-% 频偏跟踪的频率态平坦判据：尾窗均值恒定（前后半均值一致、std 小）且量级
-% 匹配期望速率才算锁定。量级匹配对符号不敏感，避免采样/PD 极性约定影响判定。
-window = 200;
-expectedRate = -0.8192;
-
-flat = expectedRate + 0.002 * sin((1:600) / 7);
-[locked, diag] = loop_monitor.judgeFreqStateGateOffline(flat, window, ...
-    expectedRate, 0.05, 0.05, 0.1);
-assert(locked);
-assert(abs(diag.MeanValue - expectedRate) < 0.05);
-assert(diag.FlatnessOk && diag.RateOk);
-
-% 仍在牵引（尾窗持续爬升）-> 未锁定（前后半均值差过大）。
-ramp = linspace(-0.2, -0.8192, 600);
-assert(~loop_monitor.judgeFreqStateGateOffline(ramp, window, expectedRate, ...
-    0.05, 0.05, 0.1));
-
-% 平坦但数值错误（仍在 0 附近）-> 平坦通过但量级不匹配 -> 未锁定。
-wrong = 0.001 * cos((1:600) / 5);
-[lockedWrong, diagWrong] = loop_monitor.judgeFreqStateGateOffline(wrong, ...
-    window, expectedRate, 0.05, 0.05, 0.1);
-assert(~lockedWrong && diagWrong.FlatnessOk && ~diagWrong.RateOk);
-
-% 幅度匹配对符号不敏感：+0.8192 平坦也通过量级检查。
-[lockedPos, diagPos] = loop_monitor.judgeFreqStateGateOffline(-flat, window, ...
-    expectedRate, 0.05, 0.05, 0.1);
-assert(lockedPos && diagPos.RateOk);
-
-% 序列长度不足窗口 -> 未锁定。
-assert(~loop_monitor.judgeFreqStateGateOffline(flat(1:100), window, ...
-    expectedRate, 0.05, 0.05, 0.1));
-
-% 期望速率关闭（NaN/Inf）只看平坦度。
-assert(loop_monitor.judgeFreqStateGateOffline(wrong, window, NaN, ...
-    0.05, 0.05, Inf));
-
-assertThrowsId(@() loop_monitor.judgeFreqStateGateOffline([1 2 NaN], 2, ...
-    0, 0.1, 0.1, 0.1), 'loop_monitor:InvalidFreqSeq');
-assertThrowsId(@() loop_monitor.judgeFreqStateGateOffline([1 2 3], 0, ...
-    0, 0.1, 0.1, 0.1), 'loop_monitor:InvalidWindowBlocks');
-end
-
 function testRotationPeriodLockStatic()
 % PI 旋转周期恒定 => 已跟踪。用恒定斜率合成 unwrapped，UI slip 等间隔出现；
 % 恒定序列（0 ppm 无旋转）或不规则旋转都判未锁定。
@@ -195,7 +151,7 @@ assertThrowsId(@() loop_monitor.detectRotationPeriodLock([1 2 Inf], 2, ...
 end
 
 function testFreqStateEwma()
-% EWMA 版频率态判据（freqStateLockCoreEWAM）与在线门控（enable/updateFreqEwmaGate）。
+% EWMA 版频率态判据（freqStateLockCore）与在线门控（enable/updateFreqStateGate）。
 % 关键不变量：在线逐块闩锁块 == 离线整条回放 diag.LatchBlock（二者按构造一致）。
 expectedRate = -0.8192;
 tolHalf = 0.03;
@@ -212,35 +168,35 @@ flat = expectedRate + 0.004 * randn(1, 6000);
 seqLock = [linspace(0, expectedRate, 1500), flat];
 
 % 1) 真锁序列判锁，诊断字段齐备且均值匹配期望速率。
-[locked, lockDiag] = loop_monitor.freqStateLockCoreEWAM(seqLock, ...
+[locked, lockDiag] = loop_monitor.freqStateLockCore(seqLock, ...
     expectedRate, tolHalf, tolStd, tolRate, sat, dwell, aF, aS, aM);
 assert(locked, 'EWMA 应判真锁序列为锁定。');
 assert(isfinite(lockDiag.LatchBlock) && lockDiag.LatchBlock > 0);
 assert(abs(lockDiag.MeanValue - expectedRate) <= tolRate);
 
 % 2) 慢漂移 ramp 永不判锁。
-assert(~loop_monitor.freqStateLockCoreEWAM( ...
+assert(~loop_monitor.freqStateLockCore( ...
     linspace(0, 2 * expectedRate, 8000), expectedRate, tolHalf, tolStd, ...
     tolRate, sat, dwell, aF, aS, aM));
 
 % 3) railed（恒 -4，|x| >= sat）被饱和轴否决，不判锁。
-assert(~loop_monitor.freqStateLockCoreEWAM(-4 * ones(1, 8000), ...
+assert(~loop_monitor.freqStateLockCore(-4 * ones(1, 8000), ...
     expectedRate, tolHalf, tolStd, tolRate, sat, dwell, aF, aS, aM));
 
 % 4) 速率轴：NaN 期望速率旁路后，错斜率的平坦序列也判锁；带速率轴时被拒。
 wrongFlat = [linspace(0, -1.79, 1500), (-1.79) + 0.004 * randn(1, 6000)];
-assert(loop_monitor.freqStateLockCoreEWAM(wrongFlat, NaN, tolHalf, tolStd, ...
+assert(loop_monitor.freqStateLockCore(wrongFlat, NaN, tolHalf, tolStd, ...
     Inf, sat, dwell, aF, aS, aM));
-assert(~loop_monitor.freqStateLockCoreEWAM(wrongFlat, expectedRate, ...
+assert(~loop_monitor.freqStateLockCore(wrongFlat, expectedRate, ...
     tolHalf, tolStd, tolRate, sat, dwell, aF, aS, aM));
 
 % 5) 在线门控逐块闩锁块必须等于离线 LatchBlock。
 mon = loop_monitor();
-mon.enableFreqEwmaGate(expectedRate, tolHalf, tolStd, tolRate, 1, sat, ...
+mon.enableFreqStateGate(expectedRate, tolHalf, tolStd, tolRate, 1, sat, ...
     dwell, aF, aS, aM);
 onlineLatch = NaN;
 for k = 1:numel(seqLock)
-    if mon.updateFreqEwmaGate(k, seqLock(k)) && isnan(onlineLatch)
+    if mon.updateFreqStateGate(k, seqLock(k)) && isnan(onlineLatch)
         onlineLatch = k;
     end
 end
@@ -251,16 +207,16 @@ assert(mon.FreqGateBlock == onlineLatch);
 
 % 6) 未启用即调用、以及非法 alpha，均应报错。
 mon2 = loop_monitor();
-assertThrowsId(@() mon2.updateFreqEwmaGate(1, 0), ...
-    'loop_monitor:FreqEwmaDisabled');
-assertThrowsId(@() mon2.enableFreqEwmaGate(expectedRate, tolHalf, tolStd, ...
+assertThrowsId(@() mon2.updateFreqStateGate(1, 0), ...
+    'loop_monitor:FreqGateDisabled');
+assertThrowsId(@() mon2.enableFreqStateGate(expectedRate, tolHalf, tolStd, ...
     tolRate, 1, sat, dwell, 1.5, aS, aM), 'loop_monitor:InvalidAlpha');
 
 % 7) 非有限样本被跳过并计数，不污染 EWMA。
 mon3 = loop_monitor();
-mon3.enableFreqEwmaGate(expectedRate, tolHalf, tolStd, tolRate, 1, sat, ...
+mon3.enableFreqStateGate(expectedRate, tolHalf, tolStd, tolRate, 1, sat, ...
     dwell, aF, aS, aM);
-mon3.updateFreqEwmaGate(1, NaN);
+mon3.updateFreqStateGate(1, NaN);
 assert(mon3.FreqGateSkippedCount == 1);
 
 fprintf(['  testFreqStateEwma: online latch=%d == offline, ' ...
