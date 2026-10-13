@@ -912,3 +912,56 @@ The following values appear in current ADC waveform studies but are not yet perm
 - Note: this removes a previously-validated criterion repo-wide including the
   production v4 FFE-freeze path; done per explicit user direction after EWMA was
   shown equivalent on the ppm suites.
+
+## 2026-10-13: gate identifier family renamed to freq-state semantics
+
+- **Decision:** rename the whole frequency-state gate identifier family from the
+  legacy `FfeGate*` / `FreqGate*` / `GateEngaged` / `gateLatched` names to a
+  uniform `FreqStateGate*` prefix, so the name states *what* the gate decides
+  (the loop frequency state has settled) rather than *which loop happened to be
+  downshifted by it* (FFE). This also disambiguates it from the unrelated
+  stage-1 **SNR settle gate** (`SnrSettle*` / `SettleGate`), which is a different
+  gate on a different signal and is deliberately left untouched.
+- **Scope:** code only (`src/CDR/cdr_top.m` float + `src/CDR/+cdr_fx/cdr_top.m`
+  fixed-point, `src/CDR/loop_monitor.m` + `+cdr_fx` variant, `tests/CDR`, and the
+  four ppm/v4 runners). Pure identifier rename, no behaviour change; test counts
+  unchanged. Commit `f7c08e3`. The runner option `FfeFreezeEnable` (stored in
+  `result.RunOptions`) was intentionally **not** touched to keep saved MATs/CSVs
+  readable.
+- **Mapping (old -> new):**
+  - `cdr_top` config: `FfeGateEnable` -> `FreqStateGateEnable`,
+    `FfeGateMode` -> `FreqStateGateMode`,
+    `FfeGateCriterion` -> `FreqStateGateCriterion`,
+    `FfeGateFreqExpectedRate/MeanHalfDiffTol/StdTol/RateTol/MinBlock/SatFrac` ->
+    `FreqStateGateFreq*` (same suffixes),
+    `FfeGateEwmaDwellBlocks` -> `FreqStateGateEwmaDwellBlocks`,
+    `FfeGateEwmaAlphaFast/Slow/Mad` -> `FreqStateGateEwmaAlpha*`.
+  - `cdr_top` property/method/output: `FfeGateCoeffSnapshot` ->
+    `FreqStateGateCoeffSnapshot`, `gateLatched()` -> `freqStateGateLatched()`,
+    output `GateEngaged` -> `FreqStateGateEngaged`.
+  - `loop_monitor`: `FreqGateDone/Block/SkippedCount` ->
+    `FreqStateGateDone/Block/SkippedCount`, and the internal EWMA state fields
+    `FreqGate*` -> `FreqStateGate*` (Fast/Slow/Mad/Dwell/Seeded/Enabled/Disabled/
+    AlphaFast/Slow/Mad/ExpectedRate/MeanHalfDiffTol/StdTol/RateTol/SatLevel/
+    MinBlock/DwellBlocks). The methods `enableFreqStateGate` /
+    `updateFreqStateGate` / `freqStateLockCore` already carried the `FreqState`
+    stem (2026-10-09 b) and are unchanged.
+  - Error IDs follow the config field names automatically (built as
+    `['cdr_top:Invalid' field]`), e.g. `cdr_top:InvalidFfeGateCriterion` ->
+    `cdr_top:InvalidFreqStateGateCriterion`.
+- **History note:** this entry supersedes the *names* used in the dated entries
+  above (2026-09-28 through 2026-10-09 b); those entries are left verbatim as the
+  record of what the identifiers were on their dates. Removed-gate names from
+  `2026-10-09 b` and earlier (`FfeGateUseEwma`, `FfeGateFreqWindowBlocks`,
+  `FfeGateMinEvents`, `FfeGateBandHalfWidth`, `FfeGateMinModeOccurrences`) were
+  already deleted from the code and are **not** renamed here.
+- **Related (same session, separate commit `11d95b0`):** in
+  `cdr_top.processBlock` the two local snapshot variables `newCode` / `newSlip`
+  were renamed to `incomingCodeWrapped` / `incomingUiSlip`, because they capture
+  the PI phase code/slip at which the *incoming* block (the one about to become
+  `PendingCentered`) was sampled -- the snapshot is taken before
+  `computePendingBlock` advances the PI. No behaviour change.
+- **Verification:** `checkcode` clean (pre-existing fx L108 "value unused" and v4
+  runner style note are unrelated), `test_cdr_top_configured` 12/12,
+  `test_loop_monitor` 4/4, zero residual `FfeGate` / bare `FreqGate` / bare
+  `GateEngaged` / bare `gateLatched` tokens across `src` / `tests` / runners.

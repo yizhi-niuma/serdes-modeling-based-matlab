@@ -411,3 +411,21 @@ recursion, so a whole-trace offline replay and the online gate agree
 block-for-block). `cdr_top` always drives this gate (no `FfeGateUseEwma`
 switch); the latch reuses `FreqGateDone`, so `gateLatched`, output assembly, and
 FFE freeze are unchanged.
+
+### Gate identifiers unified to `FreqStateGate*` (2026-10-13)
+
+The frequency-state gate identifier family was renamed to a single
+`FreqStateGate*` prefix across `cdr_top` (float + `+cdr_fx`), `loop_monitor`,
+the tests, and the ppm/v4 runners: config `FreqStateGateEnable` /
+`FreqStateGateMode` / `FreqStateGateCriterion` / `FreqStateGateFreq*` /
+`FreqStateGateEwma*`, the property `FreqStateGateCoeffSnapshot`, the method
+`freqStateGateLatched()`, the output `FreqStateGateEngaged`, and
+`loop_monitor.FreqStateGateDone` / `FreqStateGateBlock` /
+`FreqStateGateSkippedCount`. The lock-core methods `enableFreqStateGate` /
+`updateFreqStateGate` / `freqStateLockCore` already used the `FreqState` stem
+and are unchanged. The name now describes the decision (loop frequency state
+settled) rather than the downshifted loop (FFE), and is distinct from the
+stage-1 SNR settle gate (`SnrSettle*` / `SettleGate`), which was not touched.
+Pure rename, no behaviour change (commit `f7c08e3`; full mapping in
+`DECISIONS.md`, 2026-10-13). The prior dated subsections above retain their
+original names as the historical record.

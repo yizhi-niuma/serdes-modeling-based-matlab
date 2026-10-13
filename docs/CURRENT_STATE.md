@@ -612,3 +612,22 @@ Measured on the saved 8000-block, 32-start-phase, PRBS22 default runs, with the 
 - Validated under EWMA (full 32-phase, NumBlock=15000): v1 ppm +100 32/32;
   baseline ppm and `_fp` ppm all three offsets 32/32; v4 production 8/8 locked.
   `test_loop_monitor` 4/4, `test_cdr_top_configured` 12/12.
+
+## 2026-10-13: gate identifiers unified to `FreqStateGate*`
+
+- The frequency-state gate identifier family was renamed repo-wide from the
+  legacy `FfeGate*` / `FreqGate*` / `GateEngaged` / `gateLatched` to a uniform
+  `FreqStateGate*` prefix (config fields, the `cdr_top` property
+  `FreqStateGateCoeffSnapshot`, the `freqStateGateLatched()` method, the
+  `FreqStateGateEngaged` output, and the `loop_monitor` `FreqStateGateDone` /
+  `FreqStateGateBlock` / `FreqStateGateSkippedCount` + EWMA state). The name now
+  states *what* the gate decides (loop frequency state settled), not which loop
+  it downshifts (FFE). The unrelated stage-1 **SNR settle gate** (`SnrSettle*` /
+  `SettleGate`) is a different gate and was left untouched.
+- Pure identifier rename, no behaviour change. Commit `f7c08e3`; the
+  `processBlock` local vars `newCode`/`newSlip` -> `incomingCodeWrapped`/
+  `incomingUiSlip` in `11d95b0`. Runner option `FfeFreezeEnable` kept as-is for
+  saved-MAT compatibility. `checkcode` clean, `test_cdr_top_configured` 12/12,
+  `test_loop_monitor` 4/4. Full old->new mapping is in `DECISIONS.md`
+  (2026-10-13). Dated entries above keep their original names as the record of
+  what the identifiers were on their dates.

@@ -1027,3 +1027,23 @@ NumBlock=15000, PRBS22 unless noted):
   `_v1` +100 32/32; baseline -100/0/+100 all 32/32; `_fp` -100/0/+100 all 32/32.
 - v4 production default (StartPhaseStep=16, 8 phases): 8/8 start phases locked
   with the EWMA FFE-freeze gate operating (`FfeFreezeWindowBlocks` -> EWMA dwell).
+
+## 2026-10-13: gate identifier rename re-validation (`FreqStateGate*`)
+
+The frequency-state gate identifier family was renamed repo-wide to the
+`FreqStateGate*` prefix (commit `f7c08e3`; see `DECISIONS.md` 2026-10-13 for the
+full old->new mapping). This is a pure identifier rename with no behaviour
+change, so no new acceptance runs were required; the existing unit suites were
+re-run to confirm the rename is clean:
+
+- `tests/CDR/test_cdr_top_configured` 12/12 (freq-state gate wiring tests now
+  reference `FreqStateGate*` config / `freqStateGateLatched()` /
+  `FreqStateGateEngaged`).
+- `tests/CDR/test_loop_monitor` 4/4 (`FreqStateGateDone` / `FreqStateGateBlock`
+  and the EWMA state fields).
+- `checkcode` clean on `cdr_top` (float + `+cdr_fx`) and `loop_monitor`; zero
+  residual `FfeGate` / bare `FreqGate` / `GateEngaged` / `gateLatched` tokens in
+  `src` / `tests` / runners.
+
+The SNR settle gate (`SnrSettle*` / `SettleGate`) and the runner option
+`FfeFreezeEnable` were intentionally not renamed.
