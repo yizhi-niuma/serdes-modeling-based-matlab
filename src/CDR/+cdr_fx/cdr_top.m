@@ -109,8 +109,8 @@ classdef cdr_top < handle
             centeredCode = double(centeredCode);
 
             % 必须先快照本块实际采用的 PI 状态，再处理 pending 并更新 PI。
-            newCode = obj.PhaseInterpolator.CodeWrapped;
-            newSlip = obj.PhaseInterpolator.UiSlip;
+            incomingCodeWrapped = obj.PhaseInterpolator.CodeWrapped;
+            incomingUiSlip = obj.PhaseInterpolator.UiSlip;
             futureSamples = centeredCode(1:obj.Ffe.PreTapCount);
 
             if obj.HavePending
@@ -132,8 +132,8 @@ classdef cdr_top < handle
                 obj.PendingHasPast = false;
             end
             obj.PendingCentered = centeredCode;
-            obj.PendingCodeWrapped = newCode;
-            obj.PendingUiSlip = newSlip;
+            obj.PendingCodeWrapped = incomingCodeWrapped;
+            obj.PendingUiSlip = incomingUiSlip;
             obj.SampleBlockCount = obj.SampleBlockCount + 1;
             obj.PendingBlockIndex = obj.SampleBlockCount;
             obj.HavePending = true;
