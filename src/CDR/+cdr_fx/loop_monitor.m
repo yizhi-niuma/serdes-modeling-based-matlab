@@ -57,8 +57,8 @@ classdef loop_monitor < handle
         FreqEwmaSlow        double
         FreqEwmaMad         double
         FreqSeeded          logical
-        FreqGateLatched     logical
-        FreqGateBlock       double
+        FreqStateGateLatched     logical
+        FreqStateGateBlock       double
 
         FmtSnr              struct
         FmtFreq             struct
@@ -136,7 +136,7 @@ classdef loop_monitor < handle
 
         function [triggered, diag] = updateFreqStateGate(obj, blockIndex, freqState)
             %UPDATEFREQSTATEGATE 推进三条 EWMA 并判定频率态是否已平坦。
-            triggered = obj.FreqGateLatched;
+            triggered = obj.FreqStateGateLatched;
             diag = struct('Fast', obj.FreqEwmaFast, 'Slow', obj.FreqEwmaSlow, ...
                 'Mad', obj.FreqEwmaMad, 'Flat', false, 'Quiet', false, 'RateOk', false);
             if ~obj.FreqEnabled || triggered || ~isfinite(freqState)
@@ -179,15 +179,15 @@ classdef loop_monitor < handle
             diag.RateOk = rateOk;
 
             if blockIndex >= obj.FreqMinBlock && isFlat && isQuiet && rateOk
-                obj.FreqGateLatched = true;
-                obj.FreqGateBlock = blockIndex;
+                obj.FreqStateGateLatched = true;
+                obj.FreqStateGateBlock = blockIndex;
                 triggered = true;
             end
         end
 
-        function tf = gateLatched(obj)
+        function tf = freqStateGateLatched(obj)
             %GATELATCHED 第二级门控是否已闩锁。
-            tf = obj.FreqGateLatched;
+            tf = obj.FreqStateGateLatched;
         end
 
         function resetState(obj)
@@ -214,8 +214,8 @@ classdef loop_monitor < handle
             obj.FreqEwmaSlow = 0;
             obj.FreqEwmaMad = 0;
             obj.FreqSeeded = false;
-            obj.FreqGateLatched = false;
-            obj.FreqGateBlock = NaN;
+            obj.FreqStateGateLatched = false;
+            obj.FreqStateGateBlock = NaN;
         end
 
         function s = getState(obj)
@@ -230,8 +230,8 @@ classdef loop_monitor < handle
                 'FreqEwmaFast', obj.FreqEwmaFast, ...
                 'FreqEwmaSlow', obj.FreqEwmaSlow, ...
                 'FreqEwmaMad', obj.FreqEwmaMad, ...
-                'FreqGateLatched', obj.FreqGateLatched, ...
-                'FreqGateBlock', obj.FreqGateBlock);
+                'FreqStateGateLatched', obj.FreqStateGateLatched, ...
+                'FreqStateGateBlock', obj.FreqStateGateBlock);
         end
     end
 

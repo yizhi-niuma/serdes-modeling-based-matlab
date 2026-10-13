@@ -189,7 +189,7 @@ end
 % 且 freq-state 判定结果与已废弃的 center-touch 判定结果 32/32 一致。
 % center-touch 在本测试集中已不再使用；cdr_top 仍为 v3/v4 的
 % FFE-freeze 路径保留该机制，二者是不同的机制。
-ffeGateCriterion = 'freq-state';
+freqStateGateCriterion = 'freq-state';
 if isZeroPpm
     expectedRotationPeriod = NaN;
 else
@@ -311,13 +311,13 @@ for startIndex = 1:numStartPhase
     cfg.FfeStepSize = options.FfeStepSize;
     cfg.FfeStepSizeSettle = options.FfeStepSizeSettle;
     cfg.FfeAdaptEnableMask = options.FfeAdaptEnableMask;
-    cfg.FfeGateEnable = logical(options.FfeFreezeEnable);
-    cfg.FfeGateMode = lower(char(options.FfeFreezeMode));
+    cfg.FreqStateGateEnable = logical(options.FfeFreezeEnable);
+    cfg.FreqStateGateMode = lower(char(options.FfeFreezeMode));
     cfg.FfeStepSizePvtTrack = options.FfeStepSizePvtTrack;
-    cfg.FfeGateMinModeOccurrences = options.FfeFreezeMinModeOccurrences;
-    cfg.FfeGateMinEvents = options.FfeFreezeMinEvents;
-    cfg.FfeGateBandHalfWidth = options.FfeFreezeBandHalfWidth;
-    cfg.FfeGateStartBlock = 1;
+    cfg.FreqStateGateMinModeOccurrences = options.FfeFreezeMinModeOccurrences;
+    cfg.FreqStateGateMinEvents = options.FfeFreezeMinEvents;
+    cfg.FreqStateGateBandHalfWidth = options.FfeFreezeBandHalfWidth;
+    cfg.FreqStateGateStartBlock = 1;
     % 第二级（settle -> PVT-track）降档门控。'center-touch' 是码域众数测试，
     % 只有当 PI code 停留在某一个码上时才可能触发，也就是只在零频偏下有效。
     % 'freq-state' 改用环路积分器频率态的平坦性判据，它就是离线判决所用的
@@ -327,19 +327,19 @@ for startIndex = 1:numStartPhase
     % 而不是另一条独立调过参的规则。
     % 两者同源是在线门控与离线判据逐块对齐的前提。
     %
-    cfg.FfeGateCriterion = ffeGateCriterion;
+    cfg.FreqStateGateCriterion = freqStateGateCriterion;
     % 频率态门控已改用指数平均（见 src/CDR/+cdr_fx/loop_monitor.m）：
     % 原来的 2048 深滑窗 + 宽加法树 + 54 位平方和累加器，被三个寄存器
     % 取代（快/慢两条 EWMA 加一条绝对偏差 EWMA），面积与功耗低一个数量级。
     % 窗口长度参数因此不再存在。
-    cfg.FfeGateAlphaFast = options.FreqAlphaFast;
-    cfg.FfeGateAlphaSlow = options.FreqAlphaSlow;
-    cfg.FfeGateAlphaMad = options.FreqAlphaMad;
-    cfg.FfeGateFreqExpectedRate = expectedFreqState;
-    cfg.FfeGateFreqMeanHalfDiffTol = options.FreqMeanHalfDiffTol;
-    cfg.FfeGateFreqStdTol = options.FreqStdTol;
-    cfg.FfeGateFreqRateTol = options.FreqRateTol;
-    cfg.FfeGateFreqMinBlock = options.FreqGateMinBlock;
+    cfg.FreqStateGateAlphaFast = options.FreqAlphaFast;
+    cfg.FreqStateGateAlphaSlow = options.FreqAlphaSlow;
+    cfg.FreqStateGateAlphaMad = options.FreqAlphaMad;
+    cfg.FreqStateGateFreqExpectedRate = expectedFreqState;
+    cfg.FreqStateGateFreqMeanHalfDiffTol = options.FreqMeanHalfDiffTol;
+    cfg.FreqStateGateFreqStdTol = options.FreqStdTol;
+    cfg.FreqStateGateFreqRateTol = options.FreqRateTol;
+    cfg.FreqStateGateFreqMinBlock = options.FreqStateGateMinBlock;
     top = cdr_fx.cdr_top(cfg);
 
     adcModel = ti_adc_top(adcLaneCount, -adcFullRange, adcFullRange, ...
@@ -392,7 +392,7 @@ for startIndex = 1:numStartPhase
             loopFrequencyTrace(startIndex, blockIndex) = out.LoopFrequencyState;
             if out.LoopLockedEvent && ~isfinite(stage2GateBlock(startIndex))
                 % 记录实际的第二级降档块号。离线回放门控必须先假定一条判据，
-                % 而只要 FfeGateCriterion 不是所假定的那条，
+                % 而只要 FreqStateGateCriterion 不是所假定的那条，
                 % 回放结果就是错的。
                 stage2GateBlock(startIndex) = blockIndex;
             end
@@ -603,7 +603,7 @@ plotSelected = isfinite(plotIndex);
 % 事件会改变环路步长，标出它们后即可解释收敛曲线中
 % 拐点的成因：
 %   阶段 1 = capture -> settle，以 SNR-EWMA 阈值为门控条件
-%   阶段 2 = settle -> PVT-track，以 FfeGateCriterion 为门控条件
+%   阶段 2 = settle -> PVT-track，以 FreqStateGateCriterion 为门控条件
 % 两者均对 NaN 安全：从未发生的里程碑将直接不绘制。
 selectedStage1Block = NaN;
 selectedStage2Block = NaN;
@@ -730,7 +730,7 @@ if options.SaveOutputs
                 'LineWidth', 1.2);
         end
         drawStageMarkers(selectedStage1Block, selectedStage2Block, ...
-            options.SnrSettleThresholdDb, ffeGateCriterion, true);
+            options.SnrSettleThresholdDb, freqStateGateCriterion, true);
         hold off; grid on;
         xlim([blockAxis(1) blockAxis(end)]);
         ylim([0 samplePerSymbol - 1]);
@@ -794,7 +794,7 @@ if options.SaveOutputs
                 'LineWidth', 1.2);
         end
         drawStageMarkers(selectedStage1Block, selectedStage2Block, ...
-            options.SnrSettleThresholdDb, ffeGateCriterion, true);
+            options.SnrSettleThresholdDb, freqStateGateCriterion, true);
         hold off; grid on;
         xlim([blockAxis(1) blockAxis(end)]);
         xlabel('CDR Block Index (64 UI per block)');
@@ -833,7 +833,7 @@ if options.SaveOutputs
                 xline(selectedCaptureBlock, 'r--', 'LineWidth', 1.0);
             end
             drawStageMarkers(selectedStage1Block, selectedStage2Block, ...
-                options.SnrSettleThresholdDb, ffeGateCriterion, false);
+                options.SnrSettleThresholdDb, freqStateGateCriterion, false);
             hold off; grid on;
             xlim([blockAxis(1) blockAxis(end)]);
             thisOffset = cdrFfeTapOffset(tapIndex);
@@ -937,7 +937,7 @@ if options.SaveOutputs
             xline(selectedCaptureBlock, 'r--', 'LineWidth', 1.0);
         end
         drawStageMarkers(selectedStage1Block, selectedStage2Block, ...
-            options.SnrSettleThresholdDb, ffeGateCriterion, false);
+            options.SnrSettleThresholdDb, freqStateGateCriterion, false);
         hold off; grid on; xlim([blockAxis(1) blockAxis(end)]);
         ylabel('FrequencyState (code/block)');
         title(freqLayout, sprintf(['Loop frequency state @ %+g ppm | %s: start ' ...
@@ -985,7 +985,7 @@ if options.SaveOutputs
                 'LineWidth', 1.2);
         end
         drawStageMarkers(selectedStage1Block, selectedStage2Block, ...
-            options.SnrSettleThresholdDb, ffeGateCriterion, true);
+            options.SnrSettleThresholdDb, freqStateGateCriterion, true);
     end
     yline(0, 'k--', 'ideal offset-compensated PI code', 'LineWidth', 1.0);
     yline(captureBandHalfWidth, 'k:', 'LineWidth', 0.8);
@@ -1134,7 +1134,7 @@ result.TrackingErrorFigurePath = trackingErrorFigurePath;
 result.ResultMatPath = resultMatPath;
 % 本次运行最终生效的第二级门控判据，记录下来是为了让保存的结果
 % 能自描述它的 Stage2 块号是由哪条门控产生的。
-result.FfeGateCriterion = ffeGateCriterion;
+result.FreqStateGateCriterion = freqStateGateCriterion;
 % 实际施加的 PI 非理想性。波形地址现在取自 PI 相位表，
 % 所以这个字段会改变仿真出来的采样时刻。
 result.PiNonideal = piNonideal;
@@ -1202,7 +1202,7 @@ defaults.StepSizeSettle = 0.1;
 %   （在 -100 ppm 实测：block 84 就触发，此时 dLev 还剩 59% 行程，
 %   却把 FFE 步长砍掉 20 倍，眼睛就此张不开，
 %   导致没有任何起始相位能完成捕获）。
-%   第二级（settle -> PVT track）复用已有的相位带锁定门控（FfeGate*），
+%   第二级（settle -> PVT track）复用已有的相位带锁定门控（FreqStateGate*），
 %   把两个环路再次降到只够跟踪的步长。
 defaults.SnrSettleThresholdDb = 15;
 defaults.SnrSettleAlpha = 1 / 128;
@@ -1238,7 +1238,7 @@ defaults.LockWindowBlocks = 2000;
 defaults.FreqAlphaFast = 1 / 64;
 defaults.FreqAlphaSlow = 1 / 512;
 defaults.FreqAlphaMad = 1 / 256;
-defaults.FreqGateMinBlock = 2048;
+defaults.FreqStateGateMinBlock = 2048;
 defaults.FreqMeanHalfDiffTol = 0.03;
 defaults.FreqStdTol = 0.08;
 defaults.FreqRateTol = 0.12;
@@ -1543,7 +1543,7 @@ function drawStageMarkers(stage1Block, stage2Block, snrThresholdDb, ...
 % 有据可查，而不是看起来莫名其妙：
 %   第一级：capture -> settle，由 SNR-EWMA 阈值门控
 %          （dLev 0.5 -> 0.1，FFE 1e-3 -> 2e-4）
-%   第二级：settle -> PVT-track，由 FfeGateCriterion 门控
+%   第二级：settle -> PVT-track，由 FreqStateGateCriterion 门控
 %          （dLev 0.1 -> 0.02；默认调参下 FFE 不变）
 %
 % 第二级的标注写的是被启用的门控名，而不是把该事件称作“锁定”：

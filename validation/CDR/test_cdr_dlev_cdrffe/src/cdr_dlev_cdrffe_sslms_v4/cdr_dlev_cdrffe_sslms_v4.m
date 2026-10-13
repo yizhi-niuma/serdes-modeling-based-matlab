@@ -175,23 +175,23 @@ for startIndex = 1:numStartPhase
     cfg.FfeStepSize = options.FfeStepSize;
     cfg.FfeStepSizeSettle = options.FfeStepSizeSettle;
     cfg.FfeAdaptEnableMask = options.FfeAdaptEnableMask;
-    cfg.FfeGateEnable = logical(options.FfeFreezeEnable);
-    cfg.FfeGateMode = lower(char(options.FfeFreezeMode));
+    cfg.FreqStateGateEnable = logical(options.FfeFreezeEnable);
+    cfg.FreqStateGateMode = lower(char(options.FfeFreezeMode));
     cfg.FfeStepSizePvtTrack = options.FfeStepSizePvtTrack;
-    cfg.FfeGateMinModeOccurrences = options.FfeFreezeMinModeOccurrences;
-    cfg.FfeGateMinEvents = options.FfeFreezeMinEvents;
-    cfg.FfeGateBandHalfWidth = options.FfeFreezeBandHalfWidth;
-    cfg.FfeGateStartBlock = 1;
+    cfg.FreqStateGateMinModeOccurrences = options.FfeFreezeMinModeOccurrences;
+    cfg.FreqStateGateMinEvents = options.FfeFreezeMinEvents;
+    cfg.FreqStateGateBandHalfWidth = options.FfeFreezeBandHalfWidth;
+    cfg.FreqStateGateStartBlock = 1;
     % 门控判据现在只有 freq-state(center-touch 已于 2026-09-28 从 cdr_top
     % 删除)。v4 是 0 ppm，期望环路频率态为 0；沿用 ppm 套件 0-ppm 情形相同
-    % 的窗口/容差。上面的 FfeGateMin* 只用于构造 loop_monitor 里保留但休眠
+    % 的窗口/容差。上面的 FreqStateGateMin* 只用于构造 loop_monitor 里保留但休眠
     % 的 center-touch 机制(供旧 MAT 离线回放)，不再参与 v4 的冻结判定。
-    cfg.FfeGateEwmaDwellBlocks = min(options.FfeFreezeWindowBlocks, numBlocks);
-    cfg.FfeGateFreqExpectedRate = 0;
-    cfg.FfeGateFreqMeanHalfDiffTol = options.FreqMeanHalfDiffTol;
-    cfg.FfeGateFreqStdTol = options.FreqStdTol;
-    cfg.FfeGateFreqRateTol = options.FreqRateTol;
-    cfg.FfeGateFreqMinBlock = 1;
+    cfg.FreqStateGateEwmaDwellBlocks = min(options.FfeFreezeWindowBlocks, numBlocks);
+    cfg.FreqStateGateFreqExpectedRate = 0;
+    cfg.FreqStateGateFreqMeanHalfDiffTol = options.FreqMeanHalfDiffTol;
+    cfg.FreqStateGateFreqStdTol = options.FreqStdTol;
+    cfg.FreqStateGateFreqRateTol = options.FreqRateTol;
+    cfg.FreqStateGateFreqMinBlock = 1;
     top = cdr_top(cfg);
 
     adcModel = ti_adc_top(adcLaneCount, -adcFullRange, adcFullRange, ...
@@ -241,7 +241,7 @@ for startIndex = 1:numStartPhase
             ffeAdaptationCalculatedTrace(startIndex, blockIndex) = ...
                 out.FfeAdaptationCalculated;
             ffeWriteAppliedTrace(startIndex, blockIndex) = out.FfeWriteApplied;
-            ffeFrozenTrace(startIndex, blockIndex) = out.GateEngaged;
+            ffeFrozenTrace(startIndex, blockIndex) = out.FreqStateGateEngaged;
             if startIndex == histogramPhaseIndex && ...
                     out.FfeAdaptationCalculated
                 histogramOutputHistory = ...
@@ -267,13 +267,13 @@ for startIndex = 1:numStartPhase
     topState = top.getState();
     freezeState = topState.Monitor;
     ffeFreezeState{startIndex} = freezeState;
-    if freezeState.FreqGateDone
-        ffeFreezeBlock(startIndex) = freezeState.FreqGateBlock;
+    if freezeState.FreqStateGateDone
+        ffeFreezeBlock(startIndex) = freezeState.FreqStateGateBlock;
         % freq-state 门控没有"模式中心"，用冻结当块的 tracked eye 相位作为
         % 记录中心(供眼图标注)。ModeOccurrences/EventCount/ResetCount 是
         % center-touch 专有计数，freq-state 下退役为 NaN。
         centerUnwrapped = unwrappedPhaseTrace(startIndex, ...
-            freezeState.FreqGateBlock);
+            freezeState.FreqStateGateBlock);
         ffeFreezeCenterUnwrapped(startIndex) = centerUnwrapped;
         ffeFreezeCenterWrapped(startIndex) = ...
             mod(centerUnwrapped, samplePerSymbol);
@@ -401,9 +401,9 @@ if options.SaveOutputs
         selectedModalPhaseCode = lockedPhaseCode(slowestIndex);
     end
     if strcmpi(char(options.FfeFreezeMode), 'freeze')
-        ffeGateBlockWord = 'frozen';
+        freqStateGateBlockWord = 'frozen';
     else
-        ffeGateBlockWord = 'PVT-track';
+        freqStateGateBlockWord = 'PVT-track';
     end
     displayMainRow = find(displayEvalOffset == 0, 1);
     ffeAdaptEnableMask = logical(options.FfeAdaptEnableMask);
@@ -428,7 +428,7 @@ if options.SaveOutputs
             'LineWidth', 1.2);
         if ffeFrozenTrace(slowestIndex, end)
             xline(ffeFreezeBlock(slowestIndex), '--', ...
-                sprintf('FFE %s block %d', ffeGateBlockWord, ...
+                sprintf('FFE %s block %d', freqStateGateBlockWord, ...
                 ffeFreezeBlock(slowestIndex)), ...
                 'Color', [0.1 0.6 0.2], 'LineWidth', 1.1, ...
                 'LabelVerticalAlignment', 'bottom');
@@ -495,7 +495,7 @@ if options.SaveOutputs
             'LineWidth', 1.2);
         if ffeFrozenTrace(slowestIndex, end)
             xline(ffeFreezeBlock(slowestIndex), '--', ...
-                sprintf('FFE %s block %d', ffeGateBlockWord, ...
+                sprintf('FFE %s block %d', freqStateGateBlockWord, ...
                 ffeFreezeBlock(slowestIndex)), ...
                 'Color', [0.1 0.6 0.2], 'LineWidth', 1.1, ...
                 'LabelVerticalAlignment', 'bottom');

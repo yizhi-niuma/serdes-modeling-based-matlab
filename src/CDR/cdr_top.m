@@ -222,8 +222,8 @@ classdef cdr_top < handle
             cfg.FfeStepSize = 0.004;
             cfg.FfeStepSizeSettle = 2e-4;
             cfg.FfeAdaptEnableMask = logical([1 1 0 1 1 1]);
-            cfg.FfeGateEnable = true;
-            cfg.FfeGateMode = 'pvt-track';
+            cfg.FreqStateGateEnable = true;
+            cfg.FreqStateGateMode = 'pvt-track';
             cfg.FfeStepSizePvtTrack = 2e-4;
             % center-touch 的三个检测器参数(MinModeOccurrences / MinEvents /
             % BandHalfWidth)与 StartBlock 已于 2026-09-29 从本类配置面移除,
@@ -235,27 +235,27 @@ classdef cdr_top < handle
             % 2026-09-28 从 cdr_top 删除：0 ppm 下 freq-state 与它 32/32 一致，
             % 有 ppm 时 center-touch 因 PI code 持续爬升永不触发。该判据已于
             % 2026-09-30 从 loop_monitor 本体一并删除, 不存在任何回放路径。
-            cfg.FfeGateCriterion = 'freq-state';
-            cfg.FfeGateFreqExpectedRate = NaN;
-            cfg.FfeGateFreqMeanHalfDiffTol = 1e-3;
-            cfg.FfeGateFreqStdTol = 5e-3;
-            cfg.FfeGateFreqRateTol = Inf;
-            cfg.FfeGateFreqMinBlock = 1;
+            cfg.FreqStateGateCriterion = 'freq-state';
+            cfg.FreqStateGateFreqExpectedRate = NaN;
+            cfg.FreqStateGateFreqMeanHalfDiffTol = 1e-3;
+            cfg.FreqStateGateFreqStdTol = 5e-3;
+            cfg.FreqStateGateFreqRateTol = Inf;
+            cfg.FreqStateGateFreqMinBlock = 1;
             % 饱和守卫。撞在 ±FrequencyLimit 上的积分频率态是"完美平坦"的
             % (半差=0、std=0)，而默认口径是纯平坦性(ExpectedRate=NaN /
             % RateTol=Inf)，纯平坦判据会把它判成锁定——但那是 railed 而不是
             % 锁定，此时眼睛通常还没开、环路根本没在跟踪。守卫住在判据内部:
-            % enableFreqStateGate 把 satLevel=FfeGateFreqSatFrac*FrequencyLimit
+            % enableFreqStateGate 把 satLevel=FreqStateGateFreqSatFrac*FrequencyLimit
             % 交给 freqStateLockCore,尾窗峰值 max(|x|) >= satLevel 时判据
             % 直接拒绝(见 processBlock 的无条件喂入)。设 >1 可关闭;
             % FrequencyLimit=Inf 时 satLevel=Inf, 守卫自动失效。
-            cfg.FfeGateFreqSatFrac = 0.9;
+            cfg.FreqStateGateFreqSatFrac = 0.9;
             % 频率态门控(EWMA)的驻留与三条 EWMA 权重：DwellBlocks 为连续满足
             % 四轴的块数；三个 alpha 为 fast / slow / MAD 的权重。
-            cfg.FfeGateEwmaDwellBlocks = 512;
-            cfg.FfeGateEwmaAlphaFast = 1 / 64;
-            cfg.FfeGateEwmaAlphaSlow = 1 / 512;
-            cfg.FfeGateEwmaAlphaMad = 1 / 256;
+            cfg.FreqStateGateEwmaDwellBlocks = 512;
+            cfg.FreqStateGateEwmaAlphaFast = 1 / 64;
+            cfg.FreqStateGateEwmaAlphaSlow = 1 / 512;
+            cfg.FreqStateGateEwmaAlphaMad = 1 / 256;
         end
 
         function [decision, sliceError, dataSymbol, errorBit] = ...
@@ -300,11 +300,11 @@ classdef cdr_top < handle
         function latched = freqStateGateLatched(obj)
             %FREQSTATEGATELATCHED 第二级 freq-state 门控是否已闩锁。
             %
-            % freq-state 的闩锁是 FreqGateDone。'freeze' 模式的 FFE 写抑制和
-            % GateEngaged 报告都依赖它。(历史上 center-touch 判据闩锁读的是
+            % freq-state 的闩锁是 FreqStateGateDone。'freeze' 模式的 FFE 写抑制和
+            % FreqStateGateEngaged 报告都依赖它。(历史上 center-touch 判据闩锁读的是
             % Monitor.Frozen，该判据已从 cdr_top 删除。)
-            if obj.Config.FfeGateEnable
-                latched = obj.Monitor.FreqGateDone;
+            if obj.Config.FreqStateGateEnable
+                latched = obj.Monitor.FreqStateGateDone;
             else
                 latched = false;
             end
@@ -332,20 +332,18 @@ classdef cdr_top < handle
             obj.Monitor.enableSnrSettle(cfg.SnrSettleThresholdDb, ...
                 cfg.SnrSettleAlpha, cfg.SnrSettleMinBlock);
 
-            if cfg.FfeGateEnable
-                % satLevel = FfeGateFreqSatFrac*FrequencyLimit 直接交给判据:
-                % 门控窗口的饱和拒绝现在住在 freqStateLockCore 内部,
-                % processBlock 不再需要在喂入前挑掉饱和块(见那里的
-                % 说明)。FrequencyLimit=Inf 时 satLevel=Inf, 守卫自动失效。
+            if cfg.FreqStateGateEnable
+                % satLevel = FreqStateGateFreqSatFrac*FrequencyLimit 直接交给判据:
+                %FrequencyLimit=Inf 时 satLevel=Inf, 守卫自动失效。
                 obj.Monitor.enableFreqStateGate( ...
-                    cfg.FfeGateFreqExpectedRate, ...
-                    cfg.FfeGateFreqMeanHalfDiffTol, ...
-                    cfg.FfeGateFreqStdTol, cfg.FfeGateFreqRateTol, ...
-                    cfg.FfeGateFreqMinBlock, ...
-                    cfg.FfeGateFreqSatFrac * cfg.FrequencyLimit, ...
-                    cfg.FfeGateEwmaDwellBlocks, ...
-                    cfg.FfeGateEwmaAlphaFast, cfg.FfeGateEwmaAlphaSlow, ...
-                    cfg.FfeGateEwmaAlphaMad);
+                    cfg.FreqStateGateFreqExpectedRate, ...
+                    cfg.FreqStateGateFreqMeanHalfDiffTol, ...
+                    cfg.FreqStateGateFreqStdTol, cfg.FreqStateGateFreqRateTol, ...
+                    cfg.FreqStateGateFreqMinBlock, ...
+                    cfg.FreqStateGateFreqSatFrac * cfg.FrequencyLimit, ...
+                    cfg.FreqStateGateEwmaDwellBlocks, ...
+                    cfg.FreqStateGateEwmaAlphaFast, cfg.FreqStateGateEwmaAlphaSlow, ...
+                    cfg.FreqStateGateEwmaAlphaMad);
             end
             obj.resetState();
         end
@@ -359,13 +357,13 @@ classdef cdr_top < handle
             inputWindow = [obj.PendingPast, obj.PendingCentered, futureSamples];
             [blockOutput, blockRegressor] = obj.Ffe.processBlock(inputWindow);
 
-            % ValidMask 与数据数组的长度契约(容易读错,这里写死):
+            % BlockValidMask 与数据数组的长度契约(容易读错,这里写死):
             % blockValid 始终是 BlockSize 长的整块掩码,标出这一块里哪些槽位
             % 产生了有效输出;而 ffeOutput 以及由它派生的 Decision /
             % SliceError / DataSymbol / ErrorBit 等**已经按该掩码筛过**,因此
             % 在流水线未填满的块上比掩码短(6 抽头 FFE 的首块是 64 -> 61)。
-            % 也就是说 Decision 与 ValidMask 是"已筛数据 + 槽位说明",不要再
-            % 做 Decision(ValidMask) 这种二次索引。稳态块两者等长。
+            % 也就是说 Decision 与 BlockValidMask 是"已筛数据 + 槽位说明",不要再
+            % 做 Decision(BlockValidMask) 这种二次索引。稳态块两者等长。
             blockValid = true(1, cfg.BlockSize);
             if ~obj.PendingHasPast && obj.Ffe.PostTapCount > 0
                 blockValid(1:obj.Ffe.PostTapCount) = false;
@@ -423,12 +421,12 @@ classdef cdr_top < handle
             end
 
             loopLockedEvent = false;
-            if cfg.FfeGateEnable
+            if cfg.FreqStateGateEnable
                 % 门控判据只有 freq-state。
                 freqState = obj.LoopFilter.FrequencyState;
                 % 无条件把这一块的频率态喂进门控。饱和守卫(钳在积分限幅上的
                 % railed 频率态是"完美平坦"却并非锁定)现在住在判据内部:
-                % enableFreqStateGate 已把 satLevel=FfeGateFreqSatFrac*
+                % enableFreqStateGate 已把 satLevel=FreqStateGateFreqSatFrac*
                 % FrequencyLimit 交给它,railed 尾窗会因峰值 max(|x|)>=satLevel 被
                 % freqStateLockCore 直接拒绝。这样在线门控与离线判据在
                 % 同一尾窗、同一 satLevel 下逐块一致,不再有 cdr_top 侧的整块
@@ -437,7 +435,7 @@ classdef cdr_top < handle
                     blockIndex, freqState);
                 if loopLockedEvent
                     obj.FreqStateGateCoeffSnapshot = obj.Ffe.Coefficients;
-                    if strcmp(cfg.FfeGateMode, 'pvt-track')
+                    if strcmp(cfg.FreqStateGateMode, 'pvt-track')
                         % 第二级降档(settle -> PVT tracking)：锁定确认后两个
                         % 环路再各降一档，只保留跟踪 PVT 漂移的能力。
                         obj.FfeLoop.setStepSize(cfg.FfeStepSizePvtTrack);
@@ -451,7 +449,7 @@ classdef cdr_top < handle
             proposedCoefficients = nan(1, obj.Ffe.TapCount);
             adaptationCalculated = false;
             writeApplied = false;
-            freezeFlag = strcmp(cfg.FfeGateMode, 'freeze');
+            ffeFreezeFlag = strcmp(cfg.FreqStateGateMode, 'freeze');
 
             % 只在完整的block上做dlev和ffe系数的 SS-LMS 更新。若门控未闩锁或 非freeze 模式,才真正写入 FFE。
             if numel(ffeOutput) == cfg.BlockSize
@@ -470,11 +468,11 @@ classdef cdr_top < handle
                 % cdr_ffe.applyCoefficientDelta 拒绝非零主抽头增量
                 % (cdr_ffe:MainTapUpdate)相呼应。
                 rawDelta(obj.Ffe.MainTapIndex) = 0;
-                % 存进 cdr_top 的局部变量 proposedCoefficients 仅用于输出 trace,不直接写入 FFE;真正写入由下方 if 门控:仅当门控未闩锁或非 freeze(pvt-track)模式时才执行 applyCoefficientDelta。
+                % 存进 cdr_top 的局部变量 proposedCoefficients 仅用于输出 trace,不直接写入 FFE;
                 proposedCoefficients = obj.Ffe.Coefficients + rawDelta;
                 adaptationCalculated = true;
                 % 真正写入ffe系数
-                if ~obj.freqStateGateLatched() || ~freezeFlag
+                if ~obj.freqStateGateLatched() || ~ffeFreezeFlag
                     obj.Ffe.applyCoefficientDelta(rawDelta);
                     appliedDelta = rawDelta;
                     writeApplied = true;
@@ -490,9 +488,7 @@ classdef cdr_top < handle
             loopFilter = obj.LoopFilter;
             dlev = obj.Dlev;
             monitor = obj.Monitor;
-            % 环路滤波器的亚码连续量：LoopControl 是量化前的相位速度需求
-            % (code/block)，LoopFrequencyState 是积分态。整数 PI code 会把
-            % 亚码运动藏起来，这两个量用于区分"真抖动"与"缓慢漂移"。
+
             out = struct();
             out.HasOutput = true;
             out.BlockIndex = blockIndex;
@@ -502,7 +498,9 @@ classdef cdr_top < handle
             out.UnwrappedCode = uiSlip * cfg.SamplesPerSymbol + codeWrapped;
             out.FfeOutput = ffeOutput;
             % blockValid 始终是 BlockSize 长的整块掩码,标出这一块里哪些槽位产生了有效输出
-            out.ValidMask = blockValid;
+            out.BlockValidMask = blockValid;
+            % Decision / SliceError / DataSymbol / ErrorBit 已按 BlockValidMask 掩码
+            % 筛过,因此在流水线未填满的块上比掩码短(6 抽头 FFE 的首块是 64 -> 61)。
             out.Decision = decision;
             out.SliceError = sliceError;
             out.DataSymbol = dataSymbol;
@@ -512,7 +510,7 @@ classdef cdr_top < handle
             out.PhaseError = phaseError;
             out.DeltaCode = deltaCode;
             out.LoopControl = loopFilter.LastControl;
-            out.LoopFrequencyState = loopFilter.FrequencyState;  
+            out.LoopFrequencyState = loopFilter.FrequencyState;
             % CodeResidue 是环路滤波器的亚码残差，PendingCode 是环路滤波器的量化输出(整数 PI code)，二者之和就是环路滤波器的连续输出(亚码+整数)。
             out.LoopCodeResidue = loopFilter.CodeResidue;
             out.LoopPendingCode = loopFilter.PendingCode;
@@ -529,7 +527,7 @@ classdef cdr_top < handle
             out.FfeAdaptationCalculated = adaptationCalculated;
             out.FfeWriteApplied = writeApplied;
             out.LoopLockedEvent = loopLockedEvent;
-            out.GateEngaged = obj.freqStateGateLatched();
+            out.FreqStateGateEngaged = obj.freqStateGateLatched();
             out.SnrDb = snrDb;
             out.SnrEwmaDb = monitor.SnrEwmaDb;
             out.SnrSettleDone = monitor.SnrSettleDone;
@@ -539,15 +537,13 @@ classdef cdr_top < handle
             output = obj.buildConfiguredOutput(out);
         end
 
-        function output = buildConfiguredOutput(~, v)
+        function output = buildConfiguredOutput(~, fieldValues)
             % 正常块(processBlock)与空块(emptyConfiguredOutput)两个
             % 输出路径共用这里的规范字段顺序,取代过去两份手工维护、必须逐字段
-            % 保持一致的平行字段表。调用方只需把 38 个值填进 v(顺序随意),这里
-            % 按 names 的顺序装配,保证两种输出字段名与顺序完全一致,能拼进同一
-            % 个 struct 数组;v 若缺字段会在此处即时报错,漂移无法静默通过。
+            % 对齐的 copy 代码。fieldValues 是一个结构体,包含所有字段,但顺序不定。
             names = { ...
                 'HasOutput', 'BlockIndex', 'SampleCodeWrapped', ...
-                'SampleUiSlip', 'UnwrappedCode', 'FfeOutput', 'ValidMask', ...
+                'SampleUiSlip', 'UnwrappedCode', 'FfeOutput', 'BlockValidMask', ...
                 'Decision', 'SliceError', 'DataSymbol', 'ErrorBit', ...
                 'PhaseDecision', 'ValidTransition', 'PhaseError', 'DeltaCode', ...
                 'LoopControl', 'LoopFrequencyState', 'LoopCodeResidue', ...
@@ -555,55 +551,57 @@ classdef cdr_top < handle
                 'DlevInner', 'DlevOuter', 'DlevThreshold', 'FfeCoefficients', ...
                 'FfeRawDelta', 'FfeAppliedDelta', 'FfeProposedCoefficients', ...
                 'FfeAdaptationCalculated', 'FfeWriteApplied', 'LoopLockedEvent', ...
-                'GateEngaged', 'SnrDb', 'SnrEwmaDb', 'SnrSettleDone', ...
+                'FreqStateGateEngaged', 'SnrDb', 'SnrEwmaDb', 'SnrSettleDone', ...
                 'SnrSettleBlock', 'DlevStepSize', 'FfeStepSize'};
             output = struct();
             for index = 1:numel(names)
-                output.(names{index}) = v.(names{index});
+                output.(names{index}) = fieldValues.(names{index});
             end
         end
 
         function output = emptyConfiguredOutput(obj)
-            v = struct();
-            v.HasOutput = false;
-            v.BlockIndex = 0;
-            v.SampleCodeWrapped = NaN;
-            v.SampleUiSlip = NaN;
-            v.UnwrappedCode = NaN;
-            v.FfeOutput = zeros(1, 0);
-            v.ValidMask = false(1, obj.Config.BlockSize);
-            v.Decision = zeros(1, 0);
-            v.SliceError = zeros(1, 0);
-            v.DataSymbol = zeros(1, 0);
-            v.ErrorBit = zeros(1, 0);
-            v.PhaseDecision = zeros(1, 0, 'int8');
-            v.ValidTransition = false(1, 0);
-            v.PhaseError = NaN;
-            v.DeltaCode = NaN;
-            v.LoopControl = NaN;
-            v.LoopFrequencyState = obj.LoopFilter.FrequencyState;
-            v.LoopCodeResidue = obj.LoopFilter.CodeResidue;
-            v.LoopPendingCode = obj.LoopFilter.PendingCode;
-            v.NextCodeWrapped = obj.PhaseInterpolator.CodeWrapped;
-            v.NextUiSlip = obj.PhaseInterpolator.UiSlip;
-            v.DlevInner = obj.Dlev.DLevInner;
-            v.DlevOuter = obj.Dlev.DLevOuter;
-            v.DlevThreshold = obj.Dlev.Threshold;
-            v.FfeCoefficients = obj.Ffe.Coefficients;
-            v.FfeRawDelta = nan(1, obj.Ffe.TapCount);
-            v.FfeAppliedDelta = zeros(1, obj.Ffe.TapCount);
-            v.FfeProposedCoefficients = nan(1, obj.Ffe.TapCount);
-            v.FfeAdaptationCalculated = false;
-            v.FfeWriteApplied = false;
-            v.LoopLockedEvent = false;
-            v.GateEngaged = obj.freqStateGateLatched();
-            v.SnrDb = NaN;
-            v.SnrEwmaDb = obj.Monitor.SnrEwmaDb;
-            v.SnrSettleDone = obj.Monitor.SnrSettleDone;
-            v.SnrSettleBlock = obj.Monitor.SnrSettleBlock;
-            v.DlevStepSize = obj.Dlev.StepSize;
-            v.FfeStepSize = obj.FfeLoop.StepSize;
-            output = obj.buildConfiguredOutput(v);
+            % emptyConfiguredOutput  返回一个空块输出,用于 flush 或
+            % processBlock(无前瞻)的占位。所有数组字段都是空,标量字段都是 NaN 或 false,以便外部 trace 处理。
+            fieldValues = struct();
+            fieldValues.HasOutput = false;
+            fieldValues.BlockIndex = 0;
+            fieldValues.SampleCodeWrapped = NaN;
+            fieldValues.SampleUiSlip = NaN;
+            fieldValues.UnwrappedCode = NaN;
+            fieldValues.FfeOutput = zeros(1, 0);
+            fieldValues.BlockValidMask = false(1, obj.Config.BlockSize);
+            fieldValues.Decision = zeros(1, 0);
+            fieldValues.SliceError = zeros(1, 0);
+            fieldValues.DataSymbol = zeros(1, 0);
+            fieldValues.ErrorBit = zeros(1, 0);
+            fieldValues.PhaseDecision = zeros(1, 0, 'int8');
+            fieldValues.ValidTransition = false(1, 0);
+            fieldValues.PhaseError = NaN;
+            fieldValues.DeltaCode = NaN;
+            fieldValues.LoopControl = NaN;
+            fieldValues.LoopFrequencyState = obj.LoopFilter.FrequencyState;
+            fieldValues.LoopCodeResidue = obj.LoopFilter.CodeResidue;
+            fieldValues.LoopPendingCode = obj.LoopFilter.PendingCode;
+            fieldValues.NextCodeWrapped = obj.PhaseInterpolator.CodeWrapped;
+            fieldValues.NextUiSlip = obj.PhaseInterpolator.UiSlip;
+            fieldValues.DlevInner = obj.Dlev.DLevInner;
+            fieldValues.DlevOuter = obj.Dlev.DLevOuter;
+            fieldValues.DlevThreshold = obj.Dlev.Threshold;
+            fieldValues.FfeCoefficients = obj.Ffe.Coefficients;
+            fieldValues.FfeRawDelta = nan(1, obj.Ffe.TapCount);
+            fieldValues.FfeAppliedDelta = zeros(1, obj.Ffe.TapCount);
+            fieldValues.FfeProposedCoefficients = nan(1, obj.Ffe.TapCount);
+            fieldValues.FfeAdaptationCalculated = false;
+            fieldValues.FfeWriteApplied = false;
+            fieldValues.LoopLockedEvent = false;
+            fieldValues.FreqStateGateEngaged = obj.freqStateGateLatched();
+            fieldValues.SnrDb = NaN;
+            fieldValues.SnrEwmaDb = obj.Monitor.SnrEwmaDb;
+            fieldValues.SnrSettleDone = obj.Monitor.SnrSettleDone;
+            fieldValues.SnrSettleBlock = obj.Monitor.SnrSettleBlock;
+            fieldValues.DlevStepSize = obj.Dlev.StepSize;
+            fieldValues.FfeStepSize = obj.FfeLoop.StepSize;
+            output = obj.buildConfiguredOutput(fieldValues);
         end
 
         function configurePiNonideal(obj)
@@ -704,43 +702,43 @@ classdef cdr_top < handle
             end
             cfg.FfeAdaptEnableMask = logical( ...
                 reshape(cfg.FfeAdaptEnableMask, 1, []));
-            cfg.FfeGateEnable = obj.requireLogicalScalar( ...
-                cfg.FfeGateEnable, 'FfeGateEnable');
-            cfg.FfeGateMode = obj.requireTextChoice(cfg.FfeGateMode, ...
-                'FfeGateMode', {'freeze', 'pvt-track'});
+            cfg.FreqStateGateEnable = obj.requireLogicalScalar( ...
+                cfg.FreqStateGateEnable, 'FreqStateGateEnable');
+            cfg.FreqStateGateMode = obj.requireTextChoice(cfg.FreqStateGateMode, ...
+                'FreqStateGateMode', {'freeze', 'pvt-track'});
             obj.requireNonnegativeScalar(cfg.FfeStepSizePvtTrack, ...
                 'FfeStepSizePvtTrack');
-            cfg.FfeGateCriterion = obj.requireTextChoice( ...
-                cfg.FfeGateCriterion, 'FfeGateCriterion', ...
+            cfg.FreqStateGateCriterion = obj.requireTextChoice( ...
+                cfg.FreqStateGateCriterion, 'FreqStateGateCriterion', ...
                 {'freq-state'});
             % 期望漂移率允许为 NaN(只判平坦性，不比对速率)。
-            if ~(isnumeric(cfg.FfeGateFreqExpectedRate) && ...
-                    isreal(cfg.FfeGateFreqExpectedRate) && ...
-                    isscalar(cfg.FfeGateFreqExpectedRate) && ...
-                    (isfinite(cfg.FfeGateFreqExpectedRate) || ...
-                    isnan(cfg.FfeGateFreqExpectedRate)))
-                obj.invalidField('FfeGateFreqExpectedRate');
+            if ~(isnumeric(cfg.FreqStateGateFreqExpectedRate) && ...
+                    isreal(cfg.FreqStateGateFreqExpectedRate) && ...
+                    isscalar(cfg.FreqStateGateFreqExpectedRate) && ...
+                    (isfinite(cfg.FreqStateGateFreqExpectedRate) || ...
+                    isnan(cfg.FreqStateGateFreqExpectedRate)))
+                obj.invalidField('FreqStateGateFreqExpectedRate');
             end
-            obj.requireNonnegativeScalar(cfg.FfeGateFreqMeanHalfDiffTol, ...
-                'FfeGateFreqMeanHalfDiffTol');
-            obj.requireNonnegativeScalar(cfg.FfeGateFreqStdTol, ...
-                'FfeGateFreqStdTol');
+            obj.requireNonnegativeScalar(cfg.FreqStateGateFreqMeanHalfDiffTol, ...
+                'FreqStateGateFreqMeanHalfDiffTol');
+            obj.requireNonnegativeScalar(cfg.FreqStateGateFreqStdTol, ...
+                'FreqStateGateFreqStdTol');
             % 速率容差允许为 Inf，与 NaN 期望速率等效地跳过速率比对。
-            if ~(isnumeric(cfg.FfeGateFreqRateTol) && ...
-                    isreal(cfg.FfeGateFreqRateTol) && ...
-                    isscalar(cfg.FfeGateFreqRateTol) && ...
-                    ~isnan(cfg.FfeGateFreqRateTol) && ...
-                    cfg.FfeGateFreqRateTol >= 0)
-                obj.invalidField('FfeGateFreqRateTol');
+            if ~(isnumeric(cfg.FreqStateGateFreqRateTol) && ...
+                    isreal(cfg.FreqStateGateFreqRateTol) && ...
+                    isscalar(cfg.FreqStateGateFreqRateTol) && ...
+                    ~isnan(cfg.FreqStateGateFreqRateTol) && ...
+                    cfg.FreqStateGateFreqRateTol >= 0)
+                obj.invalidField('FreqStateGateFreqRateTol');
             end
-            obj.requirePositiveInteger(cfg.FfeGateFreqMinBlock, ...
-                'FfeGateFreqMinBlock');
-            obj.requirePositiveScalar(cfg.FfeGateFreqSatFrac, ...
-                'FfeGateFreqSatFrac');
-            obj.requirePositiveInteger(cfg.FfeGateEwmaDwellBlocks, ...
-                'FfeGateEwmaDwellBlocks');
-            for ewmaAlphaField = {'FfeGateEwmaAlphaFast', ...
-                    'FfeGateEwmaAlphaSlow', 'FfeGateEwmaAlphaMad'}
+            obj.requirePositiveInteger(cfg.FreqStateGateFreqMinBlock, ...
+                'FreqStateGateFreqMinBlock');
+            obj.requirePositiveScalar(cfg.FreqStateGateFreqSatFrac, ...
+                'FreqStateGateFreqSatFrac');
+            obj.requirePositiveInteger(cfg.FreqStateGateEwmaDwellBlocks, ...
+                'FreqStateGateEwmaDwellBlocks');
+            for ewmaAlphaField = {'FreqStateGateEwmaAlphaFast', ...
+                    'FreqStateGateEwmaAlphaSlow', 'FreqStateGateEwmaAlphaMad'}
                 alphaName = ewmaAlphaField{1};
                 alphaValue = cfg.(alphaName);
                 if ~(isnumeric(alphaValue) && isreal(alphaValue) && ...
@@ -768,8 +766,8 @@ classdef cdr_top < handle
 
             numericFields = setdiff(expected, {'Detector', 'VoterMode', ...
                 'VoterDenominator', 'PiNonideal', 'FfeInitCoefficients', ...
-                'FfeAdaptEnableMask', 'FfeGateMode', 'TransitionFilter', ...
-                'FfeGateEnable', 'FfeGateCriterion'});
+                'FfeAdaptEnableMask', 'FreqStateGateMode', 'TransitionFilter', ...
+                'FreqStateGateEnable', 'FreqStateGateCriterion'});
             for index = 1:numel(numericFields)
                 field = numericFields{index};
                 cfg.(field) = double(cfg.(field));

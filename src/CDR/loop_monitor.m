@@ -18,15 +18,15 @@ classdef loop_monitor < handle
     %    在任意 ppm(含零)下都有意义：环路频率态恰恰是"环路跟上频偏后会变恒定"
     %    的那个量。本门控用三条指数加权平均(EWMA)替代早期的 2000 深滑窗
     %    mean/std/max：
-    %       FreqGateFast (α=AlphaFast) 快速跟随当前频率态
-    %       FreqGateSlow (α=AlphaSlow) 慢速基准，近似窗口均值
-    %       FreqGateMad  (α=AlphaMad)  |x - slow| 的指数平均，替代窗口 std
+    %       FreqStateGateFast (α=AlphaFast) 快速跟随当前频率态
+    %       FreqStateGateSlow (α=AlphaSlow) 慢速基准，近似窗口均值
+    %       FreqStateGateMad  (α=AlphaMad)  |x - slow| 的指数平均，替代窗口 std
     %    四轴判据与早期窗口判据一一对应：
-    %       平坦  |fast - slow| <= FreqGateMeanHalfDiffTol
-    %       波动  mad           <= FreqGateStdTol
-    %       速率  ||slow| - |expected|| <= FreqGateRateTol  (NaN/Inf 旁路)
-    %       饱和  |x| < FreqGateSatLevel  (逐样本; railed 样本清 dwell)
-    %    四轴同时满足记为一次 instOk；连续 FreqGateDwellBlocks 个 instOk 才闩锁，
+    %       平坦  |fast - slow| <= FreqStateGateMeanHalfDiffTol
+    %       波动  mad           <= FreqStateGateStdTol
+    %       速率  ||slow| - |expected|| <= FreqStateGateRateTol  (NaN/Inf 旁路)
+    %       饱和  |x| < FreqStateGateSatLevel  (逐样本; railed 样本清 dwell)
+    %    四轴同时满足记为一次 instOk；连续 FreqStateGateDwellBlocks 个 instOk 才闩锁，
     %    把早期"整窗满足"隐含的驻留语义显式化(railed 一次即清零重数)。内存只有
     %    固定几个标量，与运行长度无关。用 enableFreqStateGate 显式启用。在线
     %    updateFreqStateGate 与离线静态判据核 freqStateLockCore 共用同一逐样本
@@ -49,26 +49,26 @@ classdef loop_monitor < handle
 
         % ---- 频率态门控(EWMA 版) ----
         % 配置(由 enableFreqStateGate 设定, 跨 resetState 保留):
-        FreqGateEnabled = false
-        FreqGateExpectedRate = NaN
-        FreqGateMeanHalfDiffTol = NaN
-        FreqGateStdTol = NaN
-        FreqGateRateTol = Inf
-        FreqGateMinBlock = NaN
-        FreqGateSatLevel = Inf
-        FreqGateDwellBlocks = NaN
-        FreqGateAlphaFast = NaN
-        FreqGateAlphaSlow = NaN
-        FreqGateAlphaMad = NaN
+        FreqStateGateEnabled = false
+        FreqStateGateExpectedRate = NaN
+        FreqStateGateMeanHalfDiffTol = NaN
+        FreqStateGateStdTol = NaN
+        FreqStateGateRateTol = Inf
+        FreqStateGateMinBlock = NaN
+        FreqStateGateSatLevel = Inf
+        FreqStateGateDwellBlocks = NaN
+        FreqStateGateAlphaFast = NaN
+        FreqStateGateAlphaSlow = NaN
+        FreqStateGateAlphaMad = NaN
         % 运行态(每次 resetState 清空):
-        FreqGateFast = NaN
-        FreqGateSlow = NaN
-        FreqGateMad = NaN
-        FreqGateSeeded = false
-        FreqGateDwell = 0
-        FreqGateDone = false
-        FreqGateBlock = NaN
-        FreqGateSkippedCount = 0
+        FreqStateGateFast = NaN
+        FreqStateGateSlow = NaN
+        FreqStateGateMad = NaN
+        FreqStateGateSeeded = false
+        FreqStateGateDwell = 0
+        FreqStateGateDone = false
+        FreqStateGateBlock = NaN
+        FreqStateGateSkippedCount = 0
     end
 
     methods
@@ -82,14 +82,14 @@ classdef loop_monitor < handle
             %RESETSTATE 清空全部动态状态，同时保留配置。
             % 频率态门控的运行态随每次 reset 清空；配置(alpha / 容差 / dwell)
             % 由 enableFreqStateGate 设定并跨 reset 保留。
-            obj.FreqGateFast = NaN;
-            obj.FreqGateSlow = NaN;
-            obj.FreqGateMad = NaN;
-            obj.FreqGateSeeded = false;
-            obj.FreqGateDwell = 0;
-            obj.FreqGateDone = false;
-            obj.FreqGateBlock = NaN;
-            obj.FreqGateSkippedCount = 0;
+            obj.FreqStateGateFast = NaN;
+            obj.FreqStateGateSlow = NaN;
+            obj.FreqStateGateMad = NaN;
+            obj.FreqStateGateSeeded = false;
+            obj.FreqStateGateDwell = 0;
+            obj.FreqStateGateDone = false;
+            obj.FreqStateGateBlock = NaN;
+            obj.FreqStateGateSkippedCount = 0;
         end
 
         function enableSnrSettle(obj, thresholdDb, alpha, minBlock)
@@ -193,33 +193,33 @@ classdef loop_monitor < handle
             loop_monitor.validateNonnegativeScalar(stdTol, 'stdTol');
             loop_monitor.validateNonnegativeScalarOrInf(rateTol, 'rateTol');
             obj.validateInteger(minBlock, 1, ...
-                'InvalidFreqGateMinBlock', 'minBlock');
+                'InvalidFreqStateGateMinBlock', 'minBlock');
             loop_monitor.validateNonnegativeScalarOrInf(satLevel, 'satLevel');
             obj.validateInteger(dwellBlocks, 1, ...
-                'InvalidFreqGateDwellBlocks', 'dwellBlocks');
+                'InvalidFreqStateGateDwellBlocks', 'dwellBlocks');
             loop_monitor.validateAlpha(alphaFast, 'alphaFast');
             loop_monitor.validateAlpha(alphaSlow, 'alphaSlow');
             loop_monitor.validateAlpha(alphaMad, 'alphaMad');
 
-            obj.FreqGateEnabled = true;
-            obj.FreqGateExpectedRate = double(expectedRate);
-            obj.FreqGateMeanHalfDiffTol = double(meanHalfDiffTol);
-            obj.FreqGateStdTol = double(stdTol);
-            obj.FreqGateRateTol = double(rateTol);
-            obj.FreqGateMinBlock = double(minBlock);
-            obj.FreqGateSatLevel = double(satLevel);
-            obj.FreqGateDwellBlocks = double(dwellBlocks);
-            obj.FreqGateAlphaFast = double(alphaFast);
-            obj.FreqGateAlphaSlow = double(alphaSlow);
-            obj.FreqGateAlphaMad = double(alphaMad);
-            obj.FreqGateFast = NaN;
-            obj.FreqGateSlow = NaN;
-            obj.FreqGateMad = NaN;
-            obj.FreqGateSeeded = false;
-            obj.FreqGateDwell = 0;
-            obj.FreqGateDone = false;
-            obj.FreqGateBlock = NaN;
-            obj.FreqGateSkippedCount = 0;
+            obj.FreqStateGateEnabled = true;
+            obj.FreqStateGateExpectedRate = double(expectedRate);
+            obj.FreqStateGateMeanHalfDiffTol = double(meanHalfDiffTol);
+            obj.FreqStateGateStdTol = double(stdTol);
+            obj.FreqStateGateRateTol = double(rateTol);
+            obj.FreqStateGateMinBlock = double(minBlock);
+            obj.FreqStateGateSatLevel = double(satLevel);
+            obj.FreqStateGateDwellBlocks = double(dwellBlocks);
+            obj.FreqStateGateAlphaFast = double(alphaFast);
+            obj.FreqStateGateAlphaSlow = double(alphaSlow);
+            obj.FreqStateGateAlphaMad = double(alphaMad);
+            obj.FreqStateGateFast = NaN;
+            obj.FreqStateGateSlow = NaN;
+            obj.FreqStateGateMad = NaN;
+            obj.FreqStateGateSeeded = false;
+            obj.FreqStateGateDwell = 0;
+            obj.FreqStateGateDone = false;
+            obj.FreqStateGateBlock = NaN;
+            obj.FreqStateGateSkippedCount = 0;
         end
 
         function triggered = updateFreqStateGate(obj, blockIndex, freqState)
@@ -228,10 +228,10 @@ classdef loop_monitor < handle
             % freqState 是本块环路滤波器积分器的频率态(code/block)，取自本块
             % 环路滤波器更新之后，因此观测序列与记录下来的频率态 trace 逐个
             % 样本对齐。每块 O(1)：推进三条 EWMA、算四轴 instOk、维护 dwell 计数。
-            % 非有限样本被跳过且计入 FreqGateSkippedCount，使依赖跳过的运行不会
+            % 非有限样本被跳过且计入 FreqStateGateSkippedCount，使依赖跳过的运行不会
             % 与干净运行无声地混同。递推与判据核 freqStateLockCore 完全一致，故
             % 在线判决与离线整条回放逐块对齐。
-            obj.requireFreqGateEnabled('updateFreqStateGate');
+            obj.requireFreqStateGateEnabled('updateFreqStateGate');
             obj.validateInteger(blockIndex, 1, 'InvalidBlock', 'blockIndex');
             isValidState = isnumeric(freqState) && isreal(freqState) && ...
                 isscalar(freqState);
@@ -241,33 +241,33 @@ classdef loop_monitor < handle
             end
 
             triggered = false;
-            if obj.FreqGateDone
+            if obj.FreqStateGateDone
                 return;
             end
             if ~isfinite(freqState)
-                obj.FreqGateSkippedCount = obj.FreqGateSkippedCount + 1;
+                obj.FreqStateGateSkippedCount = obj.FreqStateGateSkippedCount + 1;
                 return;
             end
 
-            [obj.FreqGateFast, obj.FreqGateSlow, obj.FreqGateMad, ...
-                obj.FreqGateSeeded] = loop_monitor.freqStateStep( ...
-                double(freqState), obj.FreqGateFast, obj.FreqGateSlow, ...
-                obj.FreqGateMad, obj.FreqGateSeeded, obj.FreqGateAlphaFast, ...
-                obj.FreqGateAlphaSlow, obj.FreqGateAlphaMad);
+            [obj.FreqStateGateFast, obj.FreqStateGateSlow, obj.FreqStateGateMad, ...
+                obj.FreqStateGateSeeded] = loop_monitor.freqStateStep( ...
+                double(freqState), obj.FreqStateGateFast, obj.FreqStateGateSlow, ...
+                obj.FreqStateGateMad, obj.FreqStateGateSeeded, obj.FreqStateGateAlphaFast, ...
+                obj.FreqStateGateAlphaSlow, obj.FreqStateGateAlphaMad);
             instOk = loop_monitor.freqStateInstOk(double(freqState), ...
-                obj.FreqGateFast, obj.FreqGateSlow, obj.FreqGateMad, ...
-                obj.FreqGateMeanHalfDiffTol, obj.FreqGateStdTol, ...
-                obj.FreqGateRateTol, obj.FreqGateExpectedRate, ...
-                obj.FreqGateSatLevel);
+                obj.FreqStateGateFast, obj.FreqStateGateSlow, obj.FreqStateGateMad, ...
+                obj.FreqStateGateMeanHalfDiffTol, obj.FreqStateGateStdTol, ...
+                obj.FreqStateGateRateTol, obj.FreqStateGateExpectedRate, ...
+                obj.FreqStateGateSatLevel);
             if instOk
-                obj.FreqGateDwell = obj.FreqGateDwell + 1;
+                obj.FreqStateGateDwell = obj.FreqStateGateDwell + 1;
             else
-                obj.FreqGateDwell = 0;
+                obj.FreqStateGateDwell = 0;
             end
-            if blockIndex >= obj.FreqGateMinBlock && ...
-                    obj.FreqGateDwell >= obj.FreqGateDwellBlocks
-                obj.FreqGateDone = true;
-                obj.FreqGateBlock = blockIndex;
+            if blockIndex >= obj.FreqStateGateMinBlock && ...
+                    obj.FreqStateGateDwell >= obj.FreqStateGateDwellBlocks
+                obj.FreqStateGateDone = true;
+                obj.FreqStateGateBlock = blockIndex;
                 triggered = true;
             end
         end
@@ -282,21 +282,21 @@ classdef loop_monitor < handle
             state.SnrEwmaDb = obj.SnrEwmaDb;
             state.SnrSettleDone = obj.SnrSettleDone;
             state.SnrSettleBlock = obj.SnrSettleBlock;
-            state.FreqGateEnabled = obj.FreqGateEnabled;
-            state.FreqGateExpectedRate = obj.FreqGateExpectedRate;
-            state.FreqGateMeanHalfDiffTol = obj.FreqGateMeanHalfDiffTol;
-            state.FreqGateStdTol = obj.FreqGateStdTol;
-            state.FreqGateRateTol = obj.FreqGateRateTol;
-            state.FreqGateMinBlock = obj.FreqGateMinBlock;
-            state.FreqGateSatLevel = obj.FreqGateSatLevel;
-            state.FreqGateDwellBlocks = obj.FreqGateDwellBlocks;
-            state.FreqGateAlphaFast = obj.FreqGateAlphaFast;
-            state.FreqGateAlphaSlow = obj.FreqGateAlphaSlow;
-            state.FreqGateAlphaMad = obj.FreqGateAlphaMad;
-            state.FreqGateDwell = obj.FreqGateDwell;
-            state.FreqGateDone = obj.FreqGateDone;
-            state.FreqGateBlock = obj.FreqGateBlock;
-            state.FreqGateSkippedCount = obj.FreqGateSkippedCount;
+            state.FreqStateGateEnabled = obj.FreqStateGateEnabled;
+            state.FreqStateGateExpectedRate = obj.FreqStateGateExpectedRate;
+            state.FreqStateGateMeanHalfDiffTol = obj.FreqStateGateMeanHalfDiffTol;
+            state.FreqStateGateStdTol = obj.FreqStateGateStdTol;
+            state.FreqStateGateRateTol = obj.FreqStateGateRateTol;
+            state.FreqStateGateMinBlock = obj.FreqStateGateMinBlock;
+            state.FreqStateGateSatLevel = obj.FreqStateGateSatLevel;
+            state.FreqStateGateDwellBlocks = obj.FreqStateGateDwellBlocks;
+            state.FreqStateGateAlphaFast = obj.FreqStateGateAlphaFast;
+            state.FreqStateGateAlphaSlow = obj.FreqStateGateAlphaSlow;
+            state.FreqStateGateAlphaMad = obj.FreqStateGateAlphaMad;
+            state.FreqStateGateDwell = obj.FreqStateGateDwell;
+            state.FreqStateGateDone = obj.FreqStateGateDone;
+            state.FreqStateGateBlock = obj.FreqStateGateBlock;
+            state.FreqStateGateSkippedCount = obj.FreqStateGateSkippedCount;
         end
     end
 
@@ -557,9 +557,9 @@ classdef loop_monitor < handle
             end
         end
 
-        function requireFreqGateEnabled(obj, methodName)
-            if ~obj.FreqGateEnabled
-                error('loop_monitor:FreqGateDisabled', ...
+        function requireFreqStateGateEnabled(obj, methodName)
+            if ~obj.FreqStateGateEnabled
+                error('loop_monitor:FreqStateGateDisabled', ...
                     ['%s requires the frequency-state lock gate; call ', ...
                     'enableFreqStateGate first.'], methodName);
             end

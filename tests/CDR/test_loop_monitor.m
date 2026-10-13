@@ -203,12 +203,12 @@ end
 assert(onlineLatch == lockDiag.LatchBlock, ...
     'online latch %d must equal offline LatchBlock %d', onlineLatch, ...
     lockDiag.LatchBlock);
-assert(mon.FreqGateBlock == onlineLatch);
+assert(mon.FreqStateGateBlock == onlineLatch);
 
 % 6) 未启用即调用、以及非法 alpha，均应报错。
 mon2 = loop_monitor();
 assertThrowsId(@() mon2.updateFreqStateGate(1, 0), ...
-    'loop_monitor:FreqGateDisabled');
+    'loop_monitor:FreqStateGateDisabled');
 assertThrowsId(@() mon2.enableFreqStateGate(expectedRate, tolHalf, tolStd, ...
     tolRate, 1, sat, dwell, 1.5, aS, aM), 'loop_monitor:InvalidAlpha');
 
@@ -217,7 +217,7 @@ mon3 = loop_monitor();
 mon3.enableFreqStateGate(expectedRate, tolHalf, tolStd, tolRate, 1, sat, ...
     dwell, aF, aS, aM);
 mon3.updateFreqStateGate(1, NaN);
-assert(mon3.FreqGateSkippedCount == 1);
+assert(mon3.FreqStateGateSkippedCount == 1);
 
 fprintf(['  testFreqStateEwma: online latch=%d == offline, ' ...
     'ramp/rail/wrong-rate rejected, skip counted OK\n'], onlineLatch);

@@ -85,11 +85,11 @@ classdef cdr_top < handle
             obj.Monitor = cdr_fx.loop_monitor();
             obj.Monitor.enableSnrSettle(cfg.SnrSettleThresholdDb, ...
                 cfg.SnrSettleAlpha, cfg.SnrSettleMinBlock);
-            if cfg.FfeGateEnable
-                obj.Monitor.enableFreqStateGate(cfg.FfeGateFreqExpectedRate, ...
-                    cfg.FfeGateFreqMeanHalfDiffTol, cfg.FfeGateFreqStdTol, ...
-                    cfg.FfeGateFreqRateTol, cfg.FfeGateFreqMinBlock, ...
-                    cfg.FfeGateAlphaFast, cfg.FfeGateAlphaSlow, cfg.FfeGateAlphaMad);
+            if cfg.FreqStateGateEnable
+                obj.Monitor.enableFreqStateGate(cfg.FreqStateGateFreqExpectedRate, ...
+                    cfg.FreqStateGateFreqMeanHalfDiffTol, cfg.FreqStateGateFreqStdTol, ...
+                    cfg.FreqStateGateFreqRateTol, cfg.FreqStateGateFreqMinBlock, ...
+                    cfg.FreqStateGateAlphaFast, cfg.FreqStateGateAlphaSlow, cfg.FreqStateGateAlphaMad);
             end
 
             obj.resetState();
@@ -164,9 +164,9 @@ classdef cdr_top < handle
             idx = obj.PhaseInterpolator.getLocalIndex();
         end
 
-        function tf = gateLatched(obj)
+        function tf = freqStateGateLatched(obj)
             %GATELATCHED 第二级门控是否已闩锁。
-            tf = obj.Monitor.gateLatched();
+            tf = obj.Monitor.freqStateGateLatched();
         end
 
         function resetState(obj)
@@ -263,7 +263,7 @@ classdef cdr_top < handle
             [decisionPower, errorPower] = obj.blockPowers(decision, sliceError);
             eyeOpenedEvent = obj.Monitor.updateSnrSettle( ...
                 blockIndex, decisionPower, errorPower);
-            if eyeOpenedEvent && ~obj.gateLatched()
+            if eyeOpenedEvent && ~obj.freqStateGateLatched()
                 obj.Dlev.setStepSize(cfg.DlevStepSizeSettle);
                 obj.FfeLoop.setStepSize(cfg.FfeStepSizeSettle);
             end
@@ -273,12 +273,12 @@ classdef cdr_top < handle
             end
 
             loopLockedEvent = false;
-            if cfg.FfeGateEnable
+            if cfg.FreqStateGateEnable
                 freqState = obj.LoopFilter.FrequencyState;
                 loopLockedEvent = obj.Monitor.updateFreqStateGate(blockIndex, freqState);
                 if loopLockedEvent
                     obj.FreqStateGateCoeffSnapshot = obj.Ffe.Coefficients;
-                    if strcmp(cfg.FfeGateMode, 'pvt-track')
+                    if strcmp(cfg.FreqStateGateMode, 'pvt-track')
                         obj.FfeLoop.setStepSize(cfg.FfeStepSizePvtTrack);
                         obj.Dlev.setStepSize(cfg.DlevStepSizePvtTrack);
                     end
@@ -310,7 +310,7 @@ classdef cdr_top < handle
             v = struct();
             v.HasOutput = true;
             v.BlockIndex = blockIndex;
-            v.ValidMask = blockValid;
+            v.BlockValidMask = blockValid;
             v.SampleCodeWrapped = codeWrapped;
             v.SampleUiSlip = uiSlip;
             v.UnwrappedCode = uiSlip * cfg.SamplesPerSymbol + codeWrapped;
@@ -341,7 +341,7 @@ classdef cdr_top < handle
             v.FfeWriteApplied = writeApplied;
             v.FfeStepSize = obj.FfeLoop.StepSize;
             v.LoopLockedEvent = loopLockedEvent;
-            v.GateEngaged = obj.gateLatched();
+            v.FreqStateGateEngaged = obj.freqStateGateLatched();
             v.SnrSettleDone = obj.Monitor.SnrSettleDone;
             v.SnrSettleBlock = obj.Monitor.SnrSettleBlock;
             v.DecisionPower = decisionPower;
@@ -358,7 +358,7 @@ classdef cdr_top < handle
             n = obj.Ffe.TapCount;
             output = struct( ...
                 'HasOutput', false, 'BlockIndex', 0, ...
-                'ValidMask', false(1, obj.Config.BlockSize), ...
+                'BlockValidMask', false(1, obj.Config.BlockSize), ...
                 'SampleCodeWrapped', 0, 'SampleUiSlip', 0, 'UnwrappedCode', 0, ...
                 'FfeOutput', zeros(1, 0), 'Decision', zeros(1, 0), ...
                 'SliceError', zeros(1, 0), 'DataSymbol', zeros(1, 0), ...
@@ -375,7 +375,7 @@ classdef cdr_top < handle
                 'FfeProposedCoefficients', nan(1, n), ...
                 'FfeAdaptationCalculated', false, 'FfeWriteApplied', false, ...
                 'FfeStepSize', obj.FfeLoop.StepSize, ...
-                'LoopLockedEvent', false, 'GateEngaged', obj.gateLatched(), ...
+                'LoopLockedEvent', false, 'FreqStateGateEngaged', obj.freqStateGateLatched(), ...
                 'SnrSettleDone', obj.Monitor.SnrSettleDone, ...
                 'SnrSettleBlock', obj.Monitor.SnrSettleBlock, ...
                 'DecisionPower', NaN, 'ErrorPower', NaN, ...
@@ -441,11 +441,11 @@ classdef cdr_top < handle
             cfg = cdr_top.defaultConfig();
             % 频率态门控改用 EWMA，窗口类参数被三个 alpha 取代。
             cfg = rmfield(cfg, intersect(fieldnames(cfg), ...
-                {'FfeGateFreqWindowBlocks', 'FfeGateFreqSatFrac'}));
-            cfg.FfeGateAlphaFast = 1 / 64;
-            cfg.FfeGateAlphaSlow = 1 / 512;
-            cfg.FfeGateAlphaMad = 1 / 256;
-            cfg.FfeGateFreqMinBlock = 2048;
+                {'FreqStateGateFreqWindowBlocks', 'FreqStateGateFreqSatFrac'}));
+            cfg.FreqStateGateAlphaFast = 1 / 64;
+            cfg.FreqStateGateAlphaSlow = 1 / 512;
+            cfg.FreqStateGateAlphaMad = 1 / 256;
+            cfg.FreqStateGateFreqMinBlock = 2048;
             cfg.PiPhaseTableUI = [];
         end
     end

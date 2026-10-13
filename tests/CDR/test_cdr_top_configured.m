@@ -11,7 +11,7 @@ addpath(fullfile(repoRoot, 'src', 'CDR'));
 
 testDefaultConfigAndConstruction();
 testPipelineLatency();
-testBoundaryValidMaskSkipsAdaptation();
+testBoundaryBlockValidMaskSkipsAdaptation();
 testSlicePam4Encoding();
 testDetectorAliasEquivalence();
 testFreezeModeInhibitsWrite();
@@ -46,7 +46,7 @@ cfg.DlevStepSizeSettle = 1e-12;
 cfg.FfeStepSize = 0;
 cfg.FfeStepSizeSettle = 0;
 cfg.FfeStepSizePvtTrack = 0;
-cfg.FfeGateEnable = false;
+cfg.FreqStateGateEnable = false;
 end
 
 function block = earlyBlock()
@@ -91,7 +91,7 @@ assert(strcmp(cfg.VoterMode, 'mean') && strcmp(cfg.VoterDenominator, 'auto'));
 assert(cfg.Kp == 8 && cfg.Ki == 0.03 && cfg.MaxDeltaCode == 1);
 assert(cfg.DlevStepSize == 0.5 && cfg.DlevStepSizeSettle == 0.1);
 assert(cfg.FfeStepSize == 0.004 && cfg.FfeStepSizeSettle == 2e-4);
-assert(strcmp(cfg.FfeGateMode, 'pvt-track') && cfg.FfeStepSizePvtTrack == 2e-4);
+assert(strcmp(cfg.FreqStateGateMode, 'pvt-track') && cfg.FfeStepSizePvtTrack == 2e-4);
 
 top = cdr_top(baseConfig());
 [code, slip] = top.getSamplingPhase();
@@ -133,7 +133,7 @@ assert(second.NextCodeWrapped == code2);
 % errorBit 全 1 => late，净票 -1/8；Kp=8 => deltaCode = -1。
 third = top.processBlock(earlyBlock());
 assert(third.BlockIndex == 2);
-assert(all(third.ValidMask) && numel(third.FfeOutput) == 8);
+assert(all(third.BlockValidMask) && numel(third.FfeOutput) == 8);
 assert(abs(third.PhaseError - (-1 / 8)) < 1e-12, ...
     'The mean voter must normalize the net vote by the valid sample count.');
 assert(third.DeltaCode == -1);
@@ -150,7 +150,7 @@ assert(code3 == code0 - 1 && slip3 == slip0, ...
 assert(third.NextCodeWrapped == code3);
 end
 
-function testBoundaryValidMaskSkipsAdaptation()
+function testBoundaryBlockValidMaskSkipsAdaptation()
 cfg = baseConfig();
 cfg.FfeStepSize = 0.01;
 cfg.FfeStepSizeSettle = 0.01;
@@ -159,9 +159,9 @@ top = cdr_top(cfg);
 top.processBlock(earlyBlock());
 firstProcessed = top.processBlock(lateBlock());
 % 首个处理块缺 PostTapCount 个过去样本，头 3 个输出无效。
-assert(numel(firstProcessed.ValidMask) == 8);
-assert(isequal(firstProcessed.ValidMask(1:3), [false false false]));
-assert(all(firstProcessed.ValidMask(4:end)));
+assert(numel(firstProcessed.BlockValidMask) == 8);
+assert(isequal(firstProcessed.BlockValidMask(1:3), [false false false]));
+assert(all(firstProcessed.BlockValidMask(4:end)));
 assert(numel(firstProcessed.FfeOutput) == 5);
 assert(~firstProcessed.FfeAdaptationCalculated, ...
     'Short blocks must not run the FFE update.');
@@ -169,14 +169,14 @@ assert(~firstProcessed.FfeWriteApplied);
 assert(all(isnan(firstProcessed.FfeRawDelta)));
 
 interior = top.processBlock(earlyBlock());
-assert(all(interior.ValidMask) && numel(interior.FfeOutput) == 8);
+assert(all(interior.BlockValidMask) && numel(interior.FfeOutput) == 8);
 assert(interior.FfeAdaptationCalculated && interior.FfeWriteApplied);
 assert(all(isfinite(interior.FfeRawDelta)));
 
 dlevBefore = interior.DlevInner;
 tail = top.flush();
 % 末块缺 PreTapCount 个未来样本，尾 2 个输出无效。
-assert(isequal(tail.ValidMask(end - 1:end), [false false]));
+assert(isequal(tail.BlockValidMask(end - 1:end), [false false]));
 assert(numel(tail.FfeOutput) == 6);
 assert(~tail.FfeAdaptationCalculated && ~tail.FfeWriteApplied);
 assert(tail.DlevInner == dlevBefore, ...
@@ -229,14 +229,14 @@ cfg = gateConfig('freeze');
 top = cdr_top(cfg);
 outputs = driveAlternating(top, 40);
 
-frozenIndex = findFirstGateEngaged(outputs);
+frozenIndex = findFirstFreqStateGateEngaged(outputs);
 assert(~isempty(frozenIndex), 'The FFE gate never engaged in freeze mode.');
 gatedCoefficients = outputs{frozenIndex}.FfeCoefficients;
 
 sawCalculation = false;
 for k = frozenIndex + 1:numel(outputs)
     out = outputs{k};
-    assert(out.GateEngaged);
+    assert(out.FreqStateGateEngaged);
     assert(isequal(out.FfeCoefficients, gatedCoefficients), ...
         'Frozen coefficients must stay constant after the gate engages.');
     assert(~out.FfeWriteApplied, 'Freeze mode must inhibit coefficient writes.');
@@ -251,7 +251,7 @@ assert(sawCalculation, ...
     'Freeze mode must keep computing raw SS-LMS deltas after freezing.');
 
 state = top.getState();
-assert(state.Monitor.FreqGateDone);
+assert(state.Monitor.FreqStateGateDone);
 assert(isequal(state.FreqStateGateCoeffSnapshot, gatedCoefficients));
 % freeze 模式不得改动 FFE 步长。
 assert(state.FfeLoop.StepSize == cfg.FfeStepSize);
@@ -262,17 +262,17 @@ cfg = gateConfig('pvt-track');
 top = cdr_top(cfg);
 outputs = driveAlternating(top, 40);
 
-engagedIndex = findFirstGateEngaged(outputs);
+engagedIndex = findFirstFreqStateGateEngaged(outputs);
 assert(~isempty(engagedIndex), 'The FFE gate never engaged in pvt-track mode.');
 state = top.getState();
-assert(state.Monitor.FreqGateDone);
+assert(state.Monitor.FreqStateGateDone);
 % pvt-track 不停写，只把带宽收窄到 FfeStepSizePvtTrack。
 assert(state.FfeLoop.StepSize == cfg.FfeStepSizePvtTrack);
 
 sawWrite = false;
 for k = engagedIndex + 1:numel(outputs)
     out = outputs{k};
-    assert(out.GateEngaged);
+    assert(out.FreqStateGateEngaged);
     if out.FfeAdaptationCalculated
         assert(out.FfeWriteApplied, ...
             'pvt-track mode must keep applying coefficient deltas.');
@@ -284,13 +284,13 @@ end
 
 function testSaturatedIntegratorDoesNotLatchGate()
 % 钳在 ±FrequencyLimit 上的积分频率态是"完美平坦"的(半差=0、std=0)，在库默认
-% 的纯平坦口径(FfeGateFreqExpectedRate=NaN / FfeGateFreqRateTol=Inf)下会被
+% 的纯平坦口径(FreqStateGateFreqExpectedRate=NaN / FreqStateGateFreqRateTol=Inf)下会被
 % freqStateLockCore 判成锁定。那是 railed 而不是锁定：眼睛通常还没开、
 % 环路根本没在跟踪，若让它闩锁 stage-2 就会把 dLev/FFE 过早降到 PVT 档。
 cfg = gateConfig('pvt-track');
 cfg.Ki = 0.5;                 % 让积分器真的累积
 cfg.FrequencyLimit = 0.01;    % 一次单向脉冲就撞上限幅
-cfg.FfeGateEwmaDwellBlocks = 6;
+cfg.FreqStateGateEwmaDwellBlocks = 6;
 top = cdr_top(cfg);
 
 % 先用一次单向脉冲(1 个 late 后接恒定 early)把积分器踢到限幅；此后
@@ -308,7 +308,7 @@ end
 state = top.getState();
 % 前提 1：积分器确实饱和了，否则本用例什么都没验证到。
 assert(abs(state.LoopFilter.FrequencyState) >= ...
-    cfg.FfeGateFreqSatFrac * cfg.FrequencyLimit, ...
+    cfg.FreqStateGateFreqSatFrac * cfg.FrequencyLimit, ...
     'Test premise failed: the integrator did not saturate.');
 % 前提 2：尾窗确实完全平坦。纯平坦口径(satLevel=Inf,即省略第 7 个参数)会
 % 接受它——这正是"饱和被误判为锁定"的形态。把 satLevel 交给同一判据后它必须
@@ -316,19 +316,19 @@ assert(abs(state.LoopFilter.FrequencyState) >= ...
 % 预过滤里。
 tail = cellfun(@(o) o.LoopFrequencyState, outputs(end - 5:end));
 assert(std(tail) == 0, 'Test premise failed: the railed tail is not flat.');
-assert(loop_monitor.freqStateLockCore(tail, cfg.FfeGateFreqExpectedRate, ...
-    cfg.FfeGateFreqMeanHalfDiffTol, cfg.FfeGateFreqStdTol, ...
-    cfg.FfeGateFreqRateTol, Inf, numel(tail)), ...
+assert(loop_monitor.freqStateLockCore(tail, cfg.FreqStateGateFreqExpectedRate, ...
+    cfg.FreqStateGateFreqMeanHalfDiffTol, cfg.FreqStateGateFreqStdTol, ...
+    cfg.FreqStateGateFreqRateTol, Inf, numel(tail)), ...
     'Test premise failed: pure flatness (satLevel=Inf) should accept this railed tail.');
-satLevel = cfg.FfeGateFreqSatFrac * cfg.FrequencyLimit;
-assert(~loop_monitor.freqStateLockCore(tail, cfg.FfeGateFreqExpectedRate, ...
-    cfg.FfeGateFreqMeanHalfDiffTol, cfg.FfeGateFreqStdTol, ...
-    cfg.FfeGateFreqRateTol, satLevel, numel(tail)), ...
+satLevel = cfg.FreqStateGateFreqSatFrac * cfg.FrequencyLimit;
+assert(~loop_monitor.freqStateLockCore(tail, cfg.FreqStateGateFreqExpectedRate, ...
+    cfg.FreqStateGateFreqMeanHalfDiffTol, cfg.FreqStateGateFreqStdTol, ...
+    cfg.FreqStateGateFreqRateTol, satLevel, numel(tail)), ...
     'With satLevel the criterion itself must reject a railed tail.');
 % 断言：cdr_top 必须把这种块挡在门控窗口之外。
-assert(~state.Monitor.FreqGateDone, ...
+assert(~state.Monitor.FreqStateGateDone, ...
     'A railed (saturated) integrator must not latch the freq-state gate.');
-assert(isempty(findFirstGateEngaged(outputs)), ...
+assert(isempty(findFirstFreqStateGateEngaged(outputs)), ...
     'No block may report a gate event while the integrator is railed.');
 assert(state.FfeLoop.StepSize ~= cfg.FfeStepSizePvtTrack, ...
     'A railed integrator must not trigger the stage-2 mu downshift.');
@@ -344,7 +344,7 @@ cfg.DlevStepSizeSettle = 0.1;
 cfg.DlevStepSizePvtTrack = 0.02;
 % baseConfig 的 Ki=0 => 频率态恒 0，是合法的"平坦且未饱和"，门控在窗口填满后
 % 立刻闩锁；把 SNR 换挡的 minBlock 推后，强制 stage-2 先于 stage-1 触发。
-cfg.FfeGateEwmaDwellBlocks = 4;
+cfg.FreqStateGateEwmaDwellBlocks = 4;
 cfg.SnrSettleThresholdDb = -100;   % 任何有限 SNR 都能过
 cfg.SnrSettleMinBlock = 20;
 top = cdr_top(cfg);
@@ -352,9 +352,9 @@ top = cdr_top(cfg);
 outputs = driveAlternating(top, 40);
 assert(~isempty(outputs));
 state = top.getState();
-assert(state.Monitor.FreqGateDone, 'stage-2 should have latched.');
+assert(state.Monitor.FreqStateGateDone, 'stage-2 should have latched.');
 assert(state.Monitor.SnrSettleDone, 'stage-1 should have fired later.');
-assert(state.Monitor.FreqGateBlock < state.Monitor.SnrSettleBlock, ...
+assert(state.Monitor.FreqStateGateBlock < state.Monitor.SnrSettleBlock, ...
     'Test premise failed: stage-2 must latch before stage-1 fires.');
 % 关键断言：晚到的 stage-1 不得抬回步长。
 assert(state.Dlev.StepSize == cfg.DlevStepSizePvtTrack, ...
@@ -409,7 +409,7 @@ cfg = gateConfig('pvt-track');
 top = cdr_top(cfg);
 driveAlternating(top, 40);
 dirty = top.getState();
-assert(dirty.Monitor.FreqGateDone && dirty.BlockIndex > 0);
+assert(dirty.Monitor.FreqStateGateDone && dirty.BlockIndex > 0);
 
 top.resetState();
 clean = top.getState();
@@ -420,7 +420,7 @@ assert(isempty(clean.PreviousDataSymbol) && isempty(clean.PreviousErrorBit));
 assert(~clean.Monitor.SnrSettleDone && isnan(clean.Monitor.SnrSettleBlock));
 assert(clean.Monitor.SnrSettleEnabled);
 assert(all(isnan(clean.FreqStateGateCoeffSnapshot)));
-assert(~clean.Monitor.FreqGateDone);
+assert(~clean.Monitor.FreqStateGateDone);
 assert(isequal(clean.Ffe.Coefficients, cfg.FfeInitCoefficients));
 assert(clean.Dlev.DLevInner == cfg.DlevInnerInit);
 assert(clean.Dlev.DLevOuter == cfg.DlevOuterInit);
@@ -449,8 +449,8 @@ assertThrowsId(@() cdr_top(setField(cfg, 'Detector', 'mmpd2')), ...
     'cdr_top:InvalidDetector');
 assertThrowsId(@() cdr_top(setField(cfg, 'VoterMode', 'median')), ...
     'cdr_top:InvalidVoterMode');
-assertThrowsId(@() cdr_top(setField(cfg, 'FfeGateMode', 'hold')), ...
-    'cdr_top:InvalidFfeGateMode');
+assertThrowsId(@() cdr_top(setField(cfg, 'FreqStateGateMode', 'hold')), ...
+    'cdr_top:InvalidFreqStateGateMode');
 assertThrowsId(@() cdr_top(setField(cfg, 'DlevOuterInit', 1)), ...
     'cdr_top:InvalidDlevOuterInit');
 assertThrowsId(@() cdr_top(setField(cfg, 'DlevStepSize', 0)), ...
@@ -490,25 +490,25 @@ cfg = baseConfig();
 cfg.FfeStepSize = 0.01;
 cfg.FfeStepSizeSettle = 0.01;
 cfg.FfeStepSizePvtTrack = 1e-4;
-cfg.FfeGateEnable = true;
-cfg.FfeGateMode = mode;
-cfg.FfeGateMinModeOccurrences = 3;
-cfg.FfeGateMinEvents = 2;
-cfg.FfeGateBandHalfWidth = 3;
-cfg.FfeGateStartBlock = 1;
+cfg.FreqStateGateEnable = true;
+cfg.FreqStateGateMode = mode;
+cfg.FreqStateGateMinModeOccurrences = 3;
+cfg.FreqStateGateMinEvents = 2;
+cfg.FreqStateGateBandHalfWidth = 3;
+cfg.FreqStateGateStartBlock = 1;
 % cdr_top 的唯一门控判据是 freq-state。这里只验证 freeze/pvt-track 机制
 % (门控闩锁后的写抑制与步长动作)，不验证判据的辨别力(那是
 % test_freq_state_gate / test_loop_monitor 的职责)，所以用一个小窗口、
 % 极松容差、仅判平坦性(期望速率 NaN)的门控，保证在这段短驱动内触发。
-cfg.FfeGateEwmaDwellBlocks = 6;
-cfg.FfeGateFreqExpectedRate = NaN;
-cfg.FfeGateFreqMeanHalfDiffTol = 100;
-cfg.FfeGateFreqStdTol = 100;
-cfg.FfeGateFreqRateTol = Inf;
-cfg.FfeGateFreqMinBlock = 1;
+cfg.FreqStateGateEwmaDwellBlocks = 6;
+cfg.FreqStateGateFreqExpectedRate = NaN;
+cfg.FreqStateGateFreqMeanHalfDiffTol = 100;
+cfg.FreqStateGateFreqStdTol = 100;
+cfg.FreqStateGateFreqRateTol = Inf;
+cfg.FreqStateGateFreqMinBlock = 1;
 end
 
-function index = findFirstGateEngaged(outputs)
+function index = findFirstFreqStateGateEngaged(outputs)
 index = [];
 for k = 1:numel(outputs)
     if outputs{k}.LoopLockedEvent
