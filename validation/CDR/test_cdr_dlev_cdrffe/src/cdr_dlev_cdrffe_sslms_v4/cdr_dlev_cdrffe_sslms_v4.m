@@ -277,7 +277,7 @@ for startIndex = 1:numStartPhase
         ffeFreezeCenterUnwrapped(startIndex) = centerUnwrapped;
         ffeFreezeCenterWrapped(startIndex) = ...
             mod(centerUnwrapped, samplePerSymbol);
-        ffeFrozenCoefficients(startIndex, :) = topState.GatedCoefficients;
+        ffeFrozenCoefficients(startIndex, :) = topState.FreqStateGateCoeffSnapshot;
     end
 
     settleWindow = unwrappedPhaseTrace(startIndex, end - settleBlocks + 1:end);

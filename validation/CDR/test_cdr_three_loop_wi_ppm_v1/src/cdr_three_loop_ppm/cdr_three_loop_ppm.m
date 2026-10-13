@@ -342,7 +342,7 @@ for startIndex = 1:numStartPhase
     appliedDriftSample = zeros(1, numBlocks);
     for sampleBlockIndex = 1:numBlocks + 1
         if sampleBlockIndex <= numBlocks
-            [~, sampleUiSlip] = top.getSamplingPhase();
+            [~, sampleUiSlip, sampleOffsetFloat] = top.getSamplingPhase();
             firstUi = baseUi + (sampleBlockIndex - 1) * adcBlockUi + ...
                 sampleUiSlip;
             % UI 内采样偏移，单位为波形样本。这里取自 PI 相位表而不是原始码，
@@ -358,7 +358,7 @@ for startIndex = 1:numStartPhase
             % +-0.5 LSB。这对几个 LSB pk-pk 量级的 INL 是够的
             % （6 LSB pk-pk 按 RMS 保留约 88%，7 个互异偏移），
             % 但会把 ~0.7 LSB pk-pk 以下的 INL 彻底抹平。
-            sampleOffset = round(top.PhaseInterpolator.getLocalIndex());
+            sampleOffset = round(sampleOffsetFloat);
             % 方案 A 的 ppm 注入：累积浮点漂移，只取整一次。
             driftSample = round(driftRatePerBlockCode * (sampleBlockIndex - 1));
             appliedDriftSample(sampleBlockIndex) = driftSample;

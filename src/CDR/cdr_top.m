@@ -38,8 +38,8 @@ classdef cdr_top < handle
         PendingUiSlip = 0
         PendingBlockIndex = 0
 
-        % gate 触发瞬间的系数快照。换挡/门控的判决状态归 loop_monitor 所有。
-        GatedCoefficients
+        % freq-state 门控闩锁瞬间的 FFE 系数快照(现仅 freq-state 一种 gate)。换挡/门控的判决状态归 loop_monitor 所有。
+        FreqStateGateCoeffSnapshot
     end
 
     methods
@@ -54,7 +54,49 @@ classdef cdr_top < handle
 
         function output = processBlock(obj, centeredCode)
             % processBlock  处理一个时序 ADC code 块。
-            output = obj.processConfiguredBlock(centeredCode);
+            % 流程:校验输入 -> 若已有缓存块则连同本块前瞻样本把它算出并输出
+            % -> 把本块缓存为 pending。因 CDR FFE 需要 precursor 前瞻抽头,顶层
+            % 天然滞后一个块:本次调用返回的是上一缓存块的结果,最后一块由 flush
+            % 冲刷。真正的逐块计算在私有 computePendingBlock(flush 也复用它)。
+            cfg = obj.Config;
+            isValid = isnumeric(centeredCode) && isreal(centeredCode) && ...
+                isrow(centeredCode) && numel(centeredCode) == cfg.BlockSize && ...
+                all(isfinite(centeredCode));
+            if ~isValid
+                error('cdr_top:InvalidCenteredCode', ...
+                    'centeredCode must be a finite real 1-by-BlockSize numeric vector.');
+            end
+            centeredCode = double(centeredCode);
+
+            % 必须先快照本次输入块实际采用的 PI 状态，再处理 pending 并更新 PI。
+            newCode = obj.PhaseInterpolator.CodeWrapped;
+            newSlip = obj.PhaseInterpolator.UiSlip;
+            futureSamples = centeredCode(1:obj.Ffe.PreTapCount);
+
+            if obj.HavePending
+                output = obj.computePendingBlock(true, futureSamples);
+            else
+                output = obj.emptyConfiguredOutput();
+            end
+
+            if obj.HavePending
+                if obj.Ffe.PostTapCount == 0
+                    obj.PendingPast = zeros(1, 0);
+                else
+                    obj.PendingPast = obj.PendingCentered( ...
+                        end - obj.Ffe.PostTapCount + 1:end);
+                end
+                obj.PendingHasPast = true;
+            else
+                obj.PendingPast = zeros(1, obj.Ffe.PostTapCount);
+                obj.PendingHasPast = false;
+            end
+            obj.PendingCentered = centeredCode;
+            obj.PendingCodeWrapped = newCode;
+            obj.PendingUiSlip = newSlip;
+            obj.SampleBlockCount = obj.SampleBlockCount + 1;
+            obj.PendingBlockIndex = obj.SampleBlockCount;
+            obj.HavePending = true;
             obj.LastOutput = output;
         end
 
@@ -67,15 +109,19 @@ classdef cdr_top < handle
             end
 
             futureSamples = zeros(1, obj.Ffe.PreTapCount);
-            output = obj.processPending(false, futureSamples);
+            output = obj.computePendingBlock(false, futureSamples);
             obj.HavePending = false;
             obj.LastOutput = output;
         end
 
-        function [codeWrapped, uiSlip] = getSamplingPhase(obj)
+        function [codeWrapped, uiSlip, localIndexFloat] = getSamplingPhase(obj)
             % getSamplingPhase  返回下一次外部采样应使用的 PI wrapped/slip 状态。
+            % localIndexFloat 为 UI 内本地采样点偏移，即 CodeWrapped 经 PI 相位表
+            % (含非理想 INL)映射后的物理样本偏移，可为小数；供外部 ADC/sampler
+            % 寻址，取代越级读 obj.PhaseInterpolator.getLocalIndex()。
             codeWrapped = obj.PhaseInterpolator.CodeWrapped;
             uiSlip = obj.PhaseInterpolator.UiSlip;
+            localIndexFloat = obj.PhaseInterpolator.getLocalIndex();
         end
 
         function resetState(obj)
@@ -105,7 +151,7 @@ classdef cdr_top < handle
             obj.PendingCodeWrapped = 0;
             obj.PendingUiSlip = 0;
             obj.PendingBlockIndex = 0;
-            obj.GatedCoefficients = nan(1, obj.Ffe.TapCount);
+            obj.FreqStateGateCoeffSnapshot = nan(1, obj.Ffe.TapCount);
             obj.LastOutput = struct();
         end
 
@@ -126,7 +172,7 @@ classdef cdr_top < handle
             state.PendingCodeWrapped = obj.PendingCodeWrapped;
             state.PendingUiSlip = obj.PendingUiSlip;
             state.PendingBlockIndex = obj.PendingBlockIndex;
-            state.GatedCoefficients = obj.GatedCoefficients;
+            state.FreqStateGateCoeffSnapshot = obj.FreqStateGateCoeffSnapshot;
             state.LastOutput = obj.LastOutput;
             state.Pd = obj.Pd.getState();
             state.LoopFilter = obj.LoopFilter.getState();
@@ -201,7 +247,7 @@ classdef cdr_top < handle
             % 锁定，此时眼睛通常还没开、环路根本没在跟踪。守卫住在判据内部:
             % enableFreqStateGate 把 satLevel=FfeGateFreqSatFrac*FrequencyLimit
             % 交给 freqStateLockCore,尾窗峰值 max(|x|) >= satLevel 时判据
-            % 直接拒绝(见 processConfiguredBlock 的无条件喂入)。设 >1 可关闭;
+            % 直接拒绝(见 processBlock 的无条件喂入)。设 >1 可关闭;
             % FrequencyLimit=Inf 时 satLevel=Inf, 守卫自动失效。
             cfg.FfeGateFreqSatFrac = 0.9;
             % 频率态门控(EWMA)的驻留与三条 EWMA 权重：DwellBlocks 为连续满足
@@ -251,8 +297,8 @@ classdef cdr_top < handle
     end
 
     methods (Access = private)
-        function latched = gateLatched(obj)
-            %GATELATCHED 第二级门控(freq-state)是否已闩锁。
+        function latched = freqStateGateLatched(obj)
+            %FREQSTATEGATELATCHED 第二级 freq-state 门控是否已闩锁。
             %
             % freq-state 的闩锁是 FreqGateDone。'freeze' 模式的 FFE 写抑制和
             % GateEngaged 报告都依赖它。(历史上 center-touch 判据闩锁读的是
@@ -285,15 +331,11 @@ classdef cdr_top < handle
             obj.Monitor = loop_monitor();
             obj.Monitor.enableSnrSettle(cfg.SnrSettleThresholdDb, ...
                 cfg.SnrSettleAlpha, cfg.SnrSettleMinBlock);
-            % FfeGateCriterion 目前被 validateConfig 限制为唯一值 'freq-state'
-            % (见 requireTextChoice)，所以旧代码里的 strcmp 恒真,已删除。该字段
-            % 仍保留:它是写进 result 供离线工具(make_ppm_stage_eyes /
-            % write_ppm_lock_summary_txt)判断本次 run 用了哪种门控的标签。将来
-            % 若真的加入第二种判据,再在这里按 cfg.FfeGateCriterion 分支即可。
+
             if cfg.FfeGateEnable
                 % satLevel = FfeGateFreqSatFrac*FrequencyLimit 直接交给判据:
                 % 门控窗口的饱和拒绝现在住在 freqStateLockCore 内部,
-                % processConfiguredBlock 不再需要在喂入前挑掉饱和块(见那里的
+                % processBlock 不再需要在喂入前挑掉饱和块(见那里的
                 % 说明)。FrequencyLimit=Inf 时 satLevel=Inf, 守卫自动失效。
                 obj.Monitor.enableFreqStateGate( ...
                     cfg.FfeGateFreqExpectedRate, ...
@@ -308,49 +350,11 @@ classdef cdr_top < handle
             obj.resetState();
         end
 
-        function output = processConfiguredBlock(obj, centeredCode)
-            cfg = obj.Config;
-            isValid = isnumeric(centeredCode) && isreal(centeredCode) && ...
-                isrow(centeredCode) && numel(centeredCode) == cfg.BlockSize && ...
-                all(isfinite(centeredCode));
-            if ~isValid
-                error('cdr_top:InvalidCenteredCode', ...
-                    'centeredCode must be a finite real 1-by-BlockSize numeric vector.');
-            end
-            centeredCode = double(centeredCode);
-
-            % 必须先快照本次输入块实际采用的 PI 状态，再处理 pending 并更新 PI。
-            newCode = obj.PhaseInterpolator.CodeWrapped;
-            newSlip = obj.PhaseInterpolator.UiSlip;
-            futureSamples = centeredCode(1:obj.Ffe.PreTapCount);
-
-            if obj.HavePending
-                output = obj.processPending(true, futureSamples);
-            else
-                output = obj.emptyConfiguredOutput();
-            end
-
-            if obj.HavePending
-                if obj.Ffe.PostTapCount == 0
-                    obj.PendingPast = zeros(1, 0);
-                else
-                    obj.PendingPast = obj.PendingCentered( ...
-                        end - obj.Ffe.PostTapCount + 1:end);
-                end
-                obj.PendingHasPast = true;
-            else
-                obj.PendingPast = zeros(1, obj.Ffe.PostTapCount);
-                obj.PendingHasPast = false;
-            end
-            obj.PendingCentered = centeredCode;
-            obj.PendingCodeWrapped = newCode;
-            obj.PendingUiSlip = newSlip;
-            obj.SampleBlockCount = obj.SampleBlockCount + 1;
-            obj.PendingBlockIndex = obj.SampleBlockCount;
-            obj.HavePending = true;
-        end
-
-        function output = processPending(obj, haveFuture, futureSamples)
+        function output = computePendingBlock(obj, haveFuture, futureSamples)
+            % computePendingBlock  对缓存的 pending 块算出完整逐块结果。
+            % 由 processBlock(正常块,haveFuture=true)与 flush(最后一块,
+            % haveFuture=false 补零前瞻)共用,是真正跑 FFE/slicer/三环并组装
+            % output 的地方。单独成私有方法以供两个入口复用,避免重复逻辑。
             cfg = obj.Config;
             inputWindow = [obj.PendingPast, obj.PendingCentered, futureSamples];
             [blockOutput, blockRegressor] = obj.Ffe.processBlock(inputWindow);
@@ -403,8 +407,6 @@ classdef cdr_top < handle
 
             % 这里及下面几处一律走 Fast 变体：输入全部由本类自己刚生成
             % (phaseDecision 来自上面的 mmpdFast/bbpdFast，只可能是 -1/0/+1)，
-            % 非 Fast 版本唯一多做的就是再校验一遍这些数据。顶层对 PD 早已
-            % 采用同样的约定。
             phaseError = obj.Voter.voteFast(phaseDecision);
             deltaCode = obj.LoopFilter.update(phaseError);
             obj.PhaseInterpolator.update(deltaCode);
@@ -414,30 +416,15 @@ classdef cdr_top < handle
             % 越过 SnrSettleThresholdDb（眼睛张开才降 mu）。
             snrDb = cdr_top.blockSnrDb(decision, sliceError);
             eyeOpenedEvent = obj.Monitor.updateSnrSettle(blockIndex, snrDb);
-            if eyeOpenedEvent && ~obj.gateLatched()
+            if eyeOpenedEvent && ~obj.freqStateGateLatched()
                 % 只在第二级门控尚未闩锁时才降第一级。两级都是一次性闩锁且
-                % stage-1 在本函数里先执行，若 stage-2 曾在更早的块先触发，
-                % 这里再施加 settle 档会把已降到 PVT 档的步长抬回去(0.02 ->
-                % 0.1)，调度反向。同块内两者都触发时 stage-2 在后覆盖，仍是
-                % 正确的终态。
                 obj.Dlev.setStepSize(cfg.DlevStepSizeSettle);
                 obj.FfeLoop.setStepSize(cfg.FfeStepSizeSettle);
             end
 
-            if numel(ffeOutput) == cfg.BlockSize
-                % Fast 变体：非 Fast 版本只多记 4 条调试轨迹(每块 4 次
-                % end+1 的数组增长)，而本类从不读它们，且其中的 dLev 两条
-                % 与下面 output.DlevInner/DlevOuter 完全重复。长跑时那是
-                % 无界增长。需要轨迹的调用方直接驱动 dlev_loop 即可。
-                obj.Dlev.dlevSsLmsFast(decision, sliceError);
-            end
-
             loopLockedEvent = false;
             if cfg.FfeGateEnable
-                % 门控判据只有 freq-state。环路滤波器已在本块更新过(见上方
-                % LoopFilter.update)，因此这里读到的积分频率态与随后记录进
-                % trace 的 LoopFrequencyState 是同一个值，在线判定与离线判据
-                % 逐块对齐。
+                % 门控判据只有 freq-state。
                 freqState = obj.LoopFilter.FrequencyState;
                 % 无条件把这一块的频率态喂进门控。饱和守卫(钳在积分限幅上的
                 % railed 频率态是"完美平坦"却并非锁定)现在住在判据内部:
@@ -449,7 +436,7 @@ classdef cdr_top < handle
                 loopLockedEvent = obj.Monitor.updateFreqStateGate( ...
                     blockIndex, freqState);
                 if loopLockedEvent
-                    obj.GatedCoefficients = obj.Ffe.Coefficients;
+                    obj.FreqStateGateCoeffSnapshot = obj.Ffe.Coefficients;
                     if strcmp(cfg.FfeGateMode, 'pvt-track')
                         % 第二级降档(settle -> PVT tracking)：锁定确认后两个
                         % 环路再各降一档，只保留跟踪 PVT 漂移的能力。
@@ -464,15 +451,16 @@ classdef cdr_top < handle
             proposedCoefficients = nan(1, obj.Ffe.TapCount);
             adaptationCalculated = false;
             writeApplied = false;
-            gateInhibitsWrite = strcmp(cfg.FfeGateMode, 'freeze');
+            freezeFlag = strcmp(cfg.FfeGateMode, 'freeze');
+
+            % 只在完整的block上做dlev和ffe系数的 SS-LMS 更新。若门控未闩锁或 非freeze 模式,才真正写入 FFE。
             if numel(ffeOutput) == cfg.BlockSize
+
+                obj.Dlev.dlevSsLmsFast(decision, sliceError);
+
                 errorBlock = decision - ffeOutput;
-                % Fast 变体：blockRegressor 是 Ffe 刚返回的 BlockSize x
-                % TapCount double 矩阵，errorBlock 是等长 double 行向量
-                % (进入本分支的前提就是 numel(ffeOutput)==BlockSize，即这一
-                % 块没有任何样本被 blockValid 滤掉)，Fast 版所要求的形状前提
-                % 在此处恒成立。非 Fast 版另外维护的 LastGradient/LastDelta/
-                % UpdateCount 只是诊断量，本类与任何 runner 都不读。
+                % 利用前面ffe得到的blockRegressor和errorBlock进行系数lms更新
+
                 rawDelta = obj.FfeLoop.updateSsLmsFast(blockRegressor, errorBlock);
                 % 主抽头保持固定的单位增益锚点。cdr_ffe_loop 的构造器现在硬性
                 % 拒绝任何使能主抽头的 mask(cdr_ffe_loop:MainTapAdaptEnabled)，
@@ -482,9 +470,11 @@ classdef cdr_top < handle
                 % cdr_ffe.applyCoefficientDelta 拒绝非零主抽头增量
                 % (cdr_ffe:MainTapUpdate)相呼应。
                 rawDelta(obj.Ffe.MainTapIndex) = 0;
+                % 存进 cdr_top 的局部变量 proposedCoefficients 仅用于输出 trace,不直接写入 FFE;真正写入由下方 if 门控:仅当门控未闩锁或非 freeze(pvt-track)模式时才执行 applyCoefficientDelta。
                 proposedCoefficients = obj.Ffe.Coefficients + rawDelta;
                 adaptationCalculated = true;
-                if ~obj.gateLatched() || ~gateInhibitsWrite
+                % 真正写入ffe系数
+                if ~obj.freqStateGateLatched() || ~freezeFlag
                     obj.Ffe.applyCoefficientDelta(rawDelta);
                     appliedDelta = rawDelta;
                     writeApplied = true;
@@ -492,10 +482,9 @@ classdef cdr_top < handle
             end
 
             obj.BlockIndex = blockIndex;
-            % 把本块的 38 个输出值填进 v(顺序随意),再交给 buildConfiguredOutput
-            % 按规范顺序装配。字段名与顺序的单一真相源在那个方法里,空块路径
-            % emptyConfiguredOutput 走同一个装配器,因此两种输出不会再漂移。
-            % 子模块句柄也先取进局部变量,省掉几十次 obj.X.Y 两级查找。
+
+            % 把本块的 38 个输出值填进 out(顺序随意),再交给 buildConfiguredOutput
+            % 按规范顺序装配。子模块句柄也先取进局部变量,省掉几十次 obj.X.Y 两级查找。
             phaseInterp = obj.PhaseInterpolator;
             obj.CurrentLocalIndexFloat = phaseInterp.getLocalIndex();
             loopFilter = obj.LoopFilter;
@@ -504,50 +493,54 @@ classdef cdr_top < handle
             % 环路滤波器的亚码连续量：LoopControl 是量化前的相位速度需求
             % (code/block)，LoopFrequencyState 是积分态。整数 PI code 会把
             % 亚码运动藏起来，这两个量用于区分"真抖动"与"缓慢漂移"。
-            v = struct();
-            v.HasOutput = true;
-            v.BlockIndex = blockIndex;
-            v.SampleCodeWrapped = codeWrapped;
-            v.SampleUiSlip = uiSlip;
-            v.UnwrappedCode = uiSlip * cfg.SamplesPerSymbol + codeWrapped;
-            v.FfeOutput = ffeOutput;
-            v.ValidMask = blockValid;
-            v.Decision = decision;
-            v.SliceError = sliceError;
-            v.DataSymbol = dataSymbol;
-            v.ErrorBit = errorBit;
-            v.PhaseDecision = phaseDecision;
-            v.ValidTransition = validTransition;
-            v.PhaseError = phaseError;
-            v.DeltaCode = deltaCode;
-            v.LoopControl = loopFilter.LastControl;
-            v.LoopFrequencyState = loopFilter.FrequencyState;
-            v.LoopCodeResidue = loopFilter.CodeResidue;
-            v.LoopPendingCode = loopFilter.PendingCode;
-            v.NextCodeWrapped = phaseInterp.CodeWrapped;
-            v.NextUiSlip = phaseInterp.UiSlip;
-            v.DlevInner = dlev.DLevInner;
-            v.DlevOuter = dlev.DLevOuter;
-            v.DlevThreshold = dlev.Threshold;
-            v.FfeCoefficients = obj.Ffe.Coefficients;
-            v.FfeRawDelta = rawDelta;
-            v.FfeAppliedDelta = appliedDelta;
-            v.FfeProposedCoefficients = proposedCoefficients;
-            v.FfeAdaptationCalculated = adaptationCalculated;
-            v.FfeWriteApplied = writeApplied;
-            v.LoopLockedEvent = loopLockedEvent;
-            v.GateEngaged = obj.gateLatched();
-            v.SnrDb = snrDb;
-            v.SnrEwmaDb = monitor.SnrEwmaDb;
-            v.SnrSettleDone = monitor.SnrSettleDone;
-            v.SnrSettleBlock = monitor.SnrSettleBlock;
-            v.DlevStepSize = dlev.StepSize;
-            v.FfeStepSize = obj.FfeLoop.StepSize;
-            output = obj.buildConfiguredOutput(v);
+            out = struct();
+            out.HasOutput = true;
+            out.BlockIndex = blockIndex;
+            % SampleCodeWrapped 与 SampleUiSlip 是本块的采样点 wrapped/slip 状态,供外部 ADC/sampler 寻址。
+            out.SampleCodeWrapped = codeWrapped;
+            out.SampleUiSlip = uiSlip;
+            out.UnwrappedCode = uiSlip * cfg.SamplesPerSymbol + codeWrapped;
+            out.FfeOutput = ffeOutput;
+            % blockValid 始终是 BlockSize 长的整块掩码,标出这一块里哪些槽位产生了有效输出
+            out.ValidMask = blockValid;
+            out.Decision = decision;
+            out.SliceError = sliceError;
+            out.DataSymbol = dataSymbol;
+            out.ErrorBit = errorBit;
+            out.PhaseDecision = phaseDecision;
+            out.ValidTransition = validTransition;
+            out.PhaseError = phaseError;
+            out.DeltaCode = deltaCode;
+            out.LoopControl = loopFilter.LastControl;
+            out.LoopFrequencyState = loopFilter.FrequencyState;  
+            % CodeResidue 是环路滤波器的亚码残差，PendingCode 是环路滤波器的量化输出(整数 PI code)，二者之和就是环路滤波器的连续输出(亚码+整数)。
+            out.LoopCodeResidue = loopFilter.CodeResidue;
+            out.LoopPendingCode = loopFilter.PendingCode;
+            % NextCodeWrapped 与 NextUiSlip 是下一块的采样点 wrapped/slip 状态,供外部 ADC/sampler 寻址。
+            out.NextCodeWrapped = phaseInterp.CodeWrapped;
+            out.NextUiSlip = phaseInterp.UiSlip;
+            out.DlevInner = dlev.DLevInner;
+            out.DlevOuter = dlev.DLevOuter;
+            out.DlevThreshold = dlev.Threshold;
+            out.FfeCoefficients = obj.Ffe.Coefficients;
+            out.FfeRawDelta = rawDelta;
+            out.FfeAppliedDelta = appliedDelta;
+            out.FfeProposedCoefficients = proposedCoefficients;
+            out.FfeAdaptationCalculated = adaptationCalculated;
+            out.FfeWriteApplied = writeApplied;
+            out.LoopLockedEvent = loopLockedEvent;
+            out.GateEngaged = obj.freqStateGateLatched();
+            out.SnrDb = snrDb;
+            out.SnrEwmaDb = monitor.SnrEwmaDb;
+            out.SnrSettleDone = monitor.SnrSettleDone;
+            out.SnrSettleBlock = monitor.SnrSettleBlock;
+            out.DlevStepSize = dlev.StepSize;
+            out.FfeStepSize = obj.FfeLoop.StepSize;
+            output = obj.buildConfiguredOutput(out);
         end
 
         function output = buildConfiguredOutput(~, v)
-            % 正常块(processConfiguredBlock)与空块(emptyConfiguredOutput)两个
+            % 正常块(processBlock)与空块(emptyConfiguredOutput)两个
             % 输出路径共用这里的规范字段顺序,取代过去两份手工维护、必须逐字段
             % 保持一致的平行字段表。调用方只需把 38 个值填进 v(顺序随意),这里
             % 按 names 的顺序装配,保证两种输出字段名与顺序完全一致,能拼进同一
@@ -603,7 +596,7 @@ classdef cdr_top < handle
             v.FfeAdaptationCalculated = false;
             v.FfeWriteApplied = false;
             v.LoopLockedEvent = false;
-            v.GateEngaged = obj.gateLatched();
+            v.GateEngaged = obj.freqStateGateLatched();
             v.SnrDb = NaN;
             v.SnrEwmaDb = obj.Monitor.SnrEwmaDb;
             v.SnrSettleDone = obj.Monitor.SnrSettleDone;

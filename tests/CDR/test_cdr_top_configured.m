@@ -252,7 +252,7 @@ assert(sawCalculation, ...
 
 state = top.getState();
 assert(state.Monitor.FreqGateDone);
-assert(isequal(state.GatedCoefficients, gatedCoefficients));
+assert(isequal(state.FreqStateGateCoeffSnapshot, gatedCoefficients));
 % freeze 模式不得改动 FFE 步长。
 assert(state.FfeLoop.StepSize == cfg.FfeStepSize);
 end
@@ -335,7 +335,7 @@ assert(state.FfeLoop.StepSize ~= cfg.FfeStepSizePvtTrack, ...
 end
 
 function testStageOneDoesNotRaiseStepAfterStageTwo()
-% 两级降档都是一次性闩锁，且 stage-1 在 processConfiguredBlock 里先执行。若
+% 两级降档都是一次性闩锁，且 stage-1 在 processBlock 里先执行。若
 % stage-2 曾在更早的块先触发，后到的 stage-1 不得把已经降到 PVT 档的步长抬回
 % settle 档（0.02 -> 0.1 会让步长调度反向）。
 cfg = gateConfig('pvt-track');
@@ -419,7 +419,7 @@ assert(isempty(clean.PreviousDataSymbol) && isempty(clean.PreviousErrorBit));
 % 门控与换挡的判决状态都归 loop_monitor 所有，cdr_top 不再自留副本。
 assert(~clean.Monitor.SnrSettleDone && isnan(clean.Monitor.SnrSettleBlock));
 assert(clean.Monitor.SnrSettleEnabled);
-assert(all(isnan(clean.GatedCoefficients)));
+assert(all(isnan(clean.FreqStateGateCoeffSnapshot)));
 assert(~clean.Monitor.FreqGateDone);
 assert(isequal(clean.Ffe.Coefficients, cfg.FfeInitCoefficients));
 assert(clean.Dlev.DLevInner == cfg.DlevInnerInit);

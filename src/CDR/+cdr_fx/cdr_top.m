@@ -40,7 +40,7 @@ classdef cdr_top < handle
         PreviousDataSymbol  double
         PreviousErrorBit    double
         CurrentLocalIndexFloat double
-        GatedCoefficients   double
+        FreqStateGateCoeffSnapshot   double
 
         FmtFfeOut           struct
         FmtSlice            struct
@@ -149,10 +149,14 @@ classdef cdr_top < handle
             obj.HavePending = false;
         end
 
-        function [codeWrapped, uiSlip] = getSamplingPhase(obj)
+        function [codeWrapped, uiSlip, localIndexFloat] = getSamplingPhase(obj)
             %GETSAMPLINGPHASE 调用方据此去采样波形。
+            % localIndexFloat 为 UI 内本地采样点偏移，即 CodeWrapped 经 PI 相位表
+            % (含非理想 INL)映射后的物理样本偏移，可为小数；供外部 ADC/sampler 寻址，
+            % 取代越级读 obj.PhaseInterpolator.getLocalIndex()。
             codeWrapped = obj.PhaseInterpolator.CodeWrapped;
             uiSlip = obj.PhaseInterpolator.UiSlip;
+            localIndexFloat = obj.PhaseInterpolator.getLocalIndex();
         end
 
         function idx = getLocalIndex(obj)
@@ -179,7 +183,7 @@ classdef cdr_top < handle
             obj.PreviousDataSymbol = [];
             obj.PreviousErrorBit = [];
             obj.CurrentLocalIndexFloat = obj.PhaseInterpolator.getLocalIndex();
-            obj.GatedCoefficients = obj.Ffe.Coefficients;
+            obj.FreqStateGateCoeffSnapshot = obj.Ffe.Coefficients;
         end
 
         function s = overflowReport(obj)
@@ -273,7 +277,7 @@ classdef cdr_top < handle
                 freqState = obj.LoopFilter.FrequencyState;
                 loopLockedEvent = obj.Monitor.updateFreqStateGate(blockIndex, freqState);
                 if loopLockedEvent
-                    obj.GatedCoefficients = obj.Ffe.Coefficients;
+                    obj.FreqStateGateCoeffSnapshot = obj.Ffe.Coefficients;
                     if strcmp(cfg.FfeGateMode, 'pvt-track')
                         obj.FfeLoop.setStepSize(cfg.FfeStepSizePvtTrack);
                         obj.Dlev.setStepSize(cfg.DlevStepSizePvtTrack);
