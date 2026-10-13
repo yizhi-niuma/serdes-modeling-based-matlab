@@ -58,6 +58,10 @@ classdef cdr_top < handle
             % -> 把本块缓存为 pending。因 CDR FFE 需要 precursor 前瞻抽头,顶层
             % 天然滞后一个块:本次调用返回的是上一缓存块的结果,最后一块由 flush
             % 冲刷。真正的逐块计算在私有 computePendingBlock(flush 也复用它)。
+            
+            % 对于没有完整pre或者post的第一块和最后一块,输出的 BlockValidMask 
+            % 会把无效槽位标记为 false,Decision/SliceError/DataSymbol/ErrorBit 
+            % 也会相应缩短。ffe和dlev的更新只在完整块上做,不完整块仅更新环路滤波器和 PI。
             cfg = obj.Config;
             isValid = isnumeric(centeredCode) && isreal(centeredCode) && ...
                 isrow(centeredCode) && numel(centeredCode) == cfg.BlockSize && ...

@@ -32,11 +32,6 @@ classdef loop_monitor < handle
     %    updateFreqStateGate 与离线静态判据核 freqStateLockCore 共用同一逐样本
     %    递推与判据，因此把完整频率态 trace 喂进 freqStateLockCore 得到的 one-shot
     %    闩锁块与在线门控逐块一致。
-    %
-    % 注：原第三个检测器"FFE 写门控(center-touch 码域众数锁定)"已移除，因为
-    % 它只在零频偏下有意义(有频偏时 PI code 持续旋转、永不停在单一 code)，
-    % 其职责已由上面的频率态门控在任意 ppm 下统一承担。早期的滑窗版频率态
-    % 判据(mean/std/max)已于 2026-10-09 整体替换为本 EWMA 版，不再并存。
 
     properties (SetAccess = private)
         SnrSettleEnabled = false
@@ -47,8 +42,7 @@ classdef loop_monitor < handle
         SnrSettleDone = false
         SnrSettleBlock = NaN
 
-        % ---- 频率态门控(EWMA 版) ----
-        % 配置(由 enableFreqStateGate 设定, 跨 resetState 保留):
+        % ---- 频率态门控(EWMA 版)配置 ----
         FreqStateGateEnabled = false
         FreqStateGateExpectedRate = NaN
         FreqStateGateMeanHalfDiffTol = NaN
@@ -56,7 +50,9 @@ classdef loop_monitor < handle
         FreqStateGateRateTol = Inf
         FreqStateGateMinBlock = NaN
         FreqStateGateSatLevel = Inf
+        % Frequency-State Lock Gate的驻留计数阈值——即四轴判据必须连续满足多少个 block，才认定环路频率态已经锁定。
         FreqStateGateDwellBlocks = NaN
+        % 三条 EWMA 的权重，必须落在 (0, 1]，根据分配不同权重实现不同功能
         FreqStateGateAlphaFast = NaN
         FreqStateGateAlphaSlow = NaN
         FreqStateGateAlphaMad = NaN
@@ -98,9 +94,6 @@ classdef loop_monitor < handle
             %   thresholdDb 是判决导向 SNR 的平均值(dB)，达到或超过它即认为
             %   眼已张开。alpha 是 EWMA 权重，取值 (0, 1]；alpha 越小平滑越重。
             %   minBlock 在平均值尚在预热阶段时抑制触发。
-            %
-            %   这里用一次独立的配置调用而非增加构造函数参数，是为了让文档
-            %   所述的 4 参数构造函数对每个既有调用方都保持有效。
             if nargin ~= 4
                 error('loop_monitor:InvalidSnrSettleConfig', ...
                     'Expected thresholdDb, alpha, and minBlock.');
